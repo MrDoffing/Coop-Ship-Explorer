@@ -1,0 +1,53 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[application]
+
+config/name="CoopShipExplorer"
+run/main_scene="res://scenes/main.tscn"
+config/features=PackedStringArray("4.6", "Forward Plus")
+config/icon="res://icon.svg"
+
+[autoload]
+
+Game="*res://autoload/game.gd"
+Net="*res://autoload/net.gd"
+Sfx="*res://autoload/sfx.gd"
+
+[display]
+
+window/size/viewport_width=1600
+window/size/viewport_height=900
+
+[layer_names]
+
+3d_physics/layer_1="cave"
+3d_physics/layer_2="ship_hull"
+3d_physics/layer_3="interior"
+3d_physics/layer_4="player"
+3d_physics/layer_5="enemy"
+3d_physics/layer_6="interact"
+3d_physics/layer_7="scout"
+3d_physics/layer_8="mineral"
+3d_physics/layer_9="boarder"
+3d_physics/layer_10="attached_alien"
+3d_physics/layer_11="station"
+
+[physics]
+
+common/physics_jitter_fix=0.0
+3d/physics_engine="Jolt Physics"
+common/physics_interpolation=true
+
+[rendering]
+
+rendering_device/driver.windows="d3d12"
+lights_and_shadows/positional_shadow/atlas_16_bits=false
+anti_aliasing/quality/msaa_3d=2
