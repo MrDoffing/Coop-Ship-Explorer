@@ -84,16 +84,27 @@ func _build_sounds() -> void:
 	_add("servo", 1.4, {"wave": "saw", "f0": 120.0, "f1": 170.0, "tone": 0.3, "noise": 0.35, "lp0": 0.1, "lp1": 0.16, "vib_f": 9.0, "vib_a": 0.05, "attack": 0.15, "decay": 0.7})
 	_add("install", 0.7, {"wave": "tri", "f0": 520.0, "f1": 1040.0, "tone": 0.6, "noise": 0.15, "lp0": 0.6, "lp1": 0.4, "decay": 1.4})
 	_add("alarm", 0.9, {"wave": "square", "f0": 660.0, "f1": 660.0, "tone": 0.3, "two_tone": 520.0, "decay": 0.0})
-	_add("mine_loop", 1.0, {"wave": "saw", "f0": 110.0, "f1": 110.0, "tone": 0.3, "noise": 0.3, "lp0": 0.3, "lp1": 0.3, "vib_f": 6.0, "vib_a": 0.04, "decay": 0.0}, true)
+	# A soft, warm hum with a slow shimmer (frequencies are whole cycles per loop, so it loops seamlessly).
+	_add("mine_loop", 1.0, {"wave": "sine", "f0": 180.0, "f1": 180.0, "tone": 0.3, "harm": 0.12, "noise": 0.06, "lp0": 0.08, "lp1": 0.08,
+		"vib_f": 3.0, "vib_a": 0.006, "trem_f": 5.0, "trem_a": 0.18, "decay": 0.0, "gain": 0.55}, true)
 	_add("engine_loop", 2.0, {"wave": "saw", "f0": 46.0, "f1": 46.0, "tone": 0.35, "noise": 0.4, "lp0": 0.05, "lp1": 0.05, "decay": 0.0}, true)
 	_add("scout_loop", 1.0, {"wave": "saw", "f0": 92.0, "f1": 92.0, "tone": 0.25, "noise": 0.3, "lp0": 0.12, "lp1": 0.12, "decay": 0.0}, true)
+	# Waystation bulkhead doors: a heavy rumble while they move and a clang when they stop.
+	_add("gate_loop", 2.0, {"wave": "saw", "f0": 38.0, "f1": 38.0, "tone": 0.3, "noise": 0.7, "lp0": 0.035, "lp1": 0.035,
+		"vib_f": 2.0, "vib_a": 0.05, "trem_f": 7.0, "trem_a": 0.25, "decay": 0.0, "gain": 0.8}, true)
+	_add("gate_clang", 1.3, {"wave": "sine", "f0": 95.0, "f1": 52.0, "tone": 0.6, "harm": 0.3, "noise": 0.8, "lp0": 0.35, "lp1": 0.04, "decay": 2.6, "gain": 1.0})
+	_add("buy", 0.32, {"wave": "tri", "f0": 880.0, "f1": 1760.0, "tone": 0.5, "harm": 0.25, "decay": 1.6, "two_tone": 1320.0})
 
 
 func _add(id: String, dur: float, cfg: Dictionary, loop := false) -> void:
+	if loop and not cfg.has("attack"):
+		# No fade-in on loops, or every repeat would start with a tiny dip.
+		cfg["attack"] = 0.0
 	_streams[id] = _to_wav(_synth(dur, cfg), loop)
 
 
-## Generate samples for one recipe: a swept oscillator, low-passed noise and an envelope.
+## Generate samples for one recipe: a swept oscillator (plus an optional second harmonic),
+## low-passed noise, tremolo and an envelope.
 func _synth(dur: float, cfg: Dictionary) -> PackedFloat32Array:
 	var n := int(dur * RATE)
 	var out := PackedFloat32Array()
@@ -112,6 +123,9 @@ func _synth(dur: float, cfg: Dictionary) -> PackedFloat32Array:
 	var gate_f: float = cfg.get("gate_f", 0.0)
 	var two_tone: float = cfg.get("two_tone", 0.0)
 	var gain: float = cfg.get("gain", 0.9)
+	var harm: float = cfg.get("harm", 0.0)
+	var trem_f: float = cfg.get("trem_f", 0.0)
+	var trem_a: float = cfg.get("trem_a", 0.0)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash(cfg)
 	var phase := 0.0
@@ -135,10 +149,14 @@ func _synth(dur: float, cfg: Dictionary) -> PackedFloat32Array:
 				osc = phase * 2.0 - 1.0
 			"tri":
 				osc = 1.0 - absf(phase * 4.0 - 2.0)
+		if harm > 0.0:
+			osc += sin(TAU * phase * 2.0) * harm
 		var a := lerpf(lp0, lp1, x)
 		lp += a * (rng.randf_range(-1.0, 1.0) - lp)
 		var v := osc * tone + lp * noise_amp * (1.0 + (1.0 - a) * 1.5)
 		var env := minf(1.0, t / attack) if attack > 0.0 else 1.0
+		if trem_f > 0.0:
+			env *= 1.0 - trem_a * (0.5 + 0.5 * sin(TAU * trem_f * t))
 		if decay > 0.0:
 			env *= pow(1.0 - x, decay)
 		if gate_f > 0.0 and sin(TAU * gate_f * t) < 0.0:

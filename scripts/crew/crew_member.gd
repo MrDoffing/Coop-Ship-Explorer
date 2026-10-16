@@ -7,8 +7,9 @@ extends CharacterBody3D
 ## to the server every physics tick; cameras for stations are placed locally from the player's own
 ## aim so looking around never waits for the network.
 ##
-## While the ship is docked at a waystation the crew can walk down the cargo ramp into the station
-## (ship-local space still works: the ship is parked) and carry supply crates aboard.
+## While the ship is docked at a waystation the crew can walk down the cargo ramp into the shop
+## (ship-local space still works: the ship is parked), buy supplies with the dive's credits and
+## carry the crates aboard.
 ##
 ## Crew bots are CrewMembers with `bot = true`: the server owns them and a CrewBot brain drives
 ## them (repairs and side guns); everyone else sees them like any other crew member.
@@ -309,12 +310,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			"pilot":
 				_chase_yaw = wrapf(_chase_yaw - d.x, -PI, PI)
 				_chase_pitch = clampf(_chase_pitch - d.y, -1.3, 0.6)
-			"gun_l", "gun_r", "mining":
-				var t: Turret = ship.turrets[station]
-				station_aim = t.clamp_aim(station_aim + Vector2(-d.x, -d.y) * 0.75)
-			"scout":
-				station_aim.x = wrapf(station_aim.x - d.x, -PI, PI)
-				station_aim.y = clampf(station_aim.y - d.y, -1.45, 1.45)
+			_:
+				if ship.is_turret_station(station):
+					var t: Turret = ship.turrets[station]
+					station_aim = t.clamp_aim(station_aim + Vector2(-d.x, -d.y) * 0.75)
+				elif ship.is_scout_station(station):
+					station_aim.x = wrapf(station_aim.x - d.x, -PI, PI)
+					station_aim.y = clampf(station_aim.y - d.y, -1.45, 1.45)
 
 
 func _walk(delta: float, blocked: bool) -> void:
@@ -359,7 +361,14 @@ func _interact(delta: float, blocked: bool) -> void:
 		return
 	if col is Area3D and col.has_meta("crate"):
 		var crate := ship.cargo_root.get_node_or_null(str(col.get_meta("crate"))) as SupplyCrate
-		if crate and crate.carrier == 0:
+		if crate and crate.carrier == 0 and crate.price > 0:
+			if ship.credits >= crate.price:
+				prompt = "[E] Buy %s for %d CR - %s" % [RunItems.display_name(crate.item), crate.price, RunItems.describe(crate.item)]
+				if not blocked and Input.is_action_just_pressed("interact"):
+					ship.request_crate_buy.rpc_id(1, str(crate.name))
+			else:
+				prompt = "%s costs %d CR - you have %d CR" % [RunItems.display_name(crate.item), crate.price, ship.credits]
+		elif crate and crate.carrier == 0:
 			prompt = "[E] Pick up %s - %s" % [RunItems.display_name(crate.item), RunItems.describe(crate.item)]
 			if not blocked and Input.is_action_just_pressed("interact"):
 				ship.request_crate_pickup.rpc_id(1, str(crate.name))
@@ -373,9 +382,9 @@ func _interact(delta: float, blocked: bool) -> void:
 			if not blocked and Input.is_action_just_pressed("interact"):
 				ship.request_station.rpc_id(1, id)
 		elif holder != 0 and holder != peer_id:
-			prompt = "%s - in use by %s" % [ShipBuilder.STATION_NAMES[id], Net.player_name(holder)]
-		elif id == "scout" and Game.mission.scout and not Game.mission.scout.can_launch():
-			prompt = Game.mission.scout.status_text()
+			prompt = "%s - in use by %s" % [ship.station_name(id), Net.player_name(holder)]
+		elif ship.is_scout_station(id) and Game.mission.scout_at(id) and not Game.mission.scout_at(id).can_launch():
+			prompt = Game.mission.scout_at(id).status_text()
 		else:
 			prompt = "[E] %s" % _station_verb(id)
 			if not blocked and Input.is_action_just_pressed("interact"):
@@ -419,21 +428,21 @@ func _interact_carrying(col: Object, blocked: bool) -> void:
 	var target := ""
 	if col is Area3D and col.has_meta("install_hub"):
 		if weapon:
-			prompt = "Weapons are mounted at the PORT or STARBOARD gun console"
-		elif item == "autocannon" and ship.autocannons >= RunItems.MAX_AUTOCANNONS:
-			prompt = "Every auto cannon hardpoint is taken"
+			prompt = "Guns are mounted at a GUN console"
+		elif item == "autocannon" and ship.autocannons >= ship.turret_slots():
+			prompt = "Every turret slot is taken" if ship.turret_slots() > 0 else "This ship has no turret slots"
 		else:
 			prompt = "[E] Install %s" % name_s
 			target = "hub"
 	elif col is Area3D and col.has_meta("station"):
 		var id := str(col.get_meta("station"))
-		if id in ["gun_l", "gun_r"] and weapon:
-			var current := str(ship.stats["weapon_left" if id == "gun_l" else "weapon_right"])
-			prompt = "[E] Mount %s on the %s (replaces the %s)" % [name_s, str(ShipBuilder.STATION_NAMES[id]).to_lower(),
-				Game.WEAPONS[current]["name"]]
+		if ship.station_kind(id) == "gun" and weapon:
+			var current := ship.gun_weapon(id)
+			prompt = "[E] Mount %s on the %s (replaces the %s)" % [name_s, ship.station_name(id).to_lower(),
+				Game.GUNS[current]["name"]]
 			target = id
 		elif weapon:
-			prompt = "Mount weapons at the PORT or STARBOARD gun console"
+			prompt = "Mount guns at a GUN console"
 		else:
 			prompt = "Fit this at the INSTALL HUB in the engine room"
 	elif col is Area3D and (col.has_meta("repair") or col.has_meta("crate")):
@@ -463,17 +472,16 @@ func _drop_carried() -> void:
 
 
 func _station_verb(id: String) -> String:
-	match id:
+	match ship.station_kind(id):
 		"pilot":
 			return "Pilot the ship"
-		"gun_l":
-			return "Man the port gun"
-		"gun_r":
-			return "Man the starboard gun"
-		"mining":
-			return "Operate the mining laser"
+		"gun":
+			return "Man the %s" % ship.station_name(id).to_lower()
+		"laser":
+			return "Operate the %s" % ship.station_name(id).to_lower()
 		"scout":
-			return "Launch the scout"
+			var bay := ship.station_name(id)
+			return "Launch the scout" + (bay.substr(bay.length() - 2) if bay.ends_with(" A") or bay.ends_with(" B") else "")
 	return "Use"
 
 
@@ -517,25 +525,26 @@ func _shoot() -> void:
 
 func _station_physics(blocked: bool) -> void:
 	velocity = Vector3.ZERO
-	var st: Dictionary = ShipBuilder.STATIONS[station]
+	var st := ship.console(station)
 	position = st["seat"]
-	rotation.y = st["yaw"]
+	rotation.y = st["seat_yaw"]
+	var scout: Scout = Game.mission.scout_at(station) if ship.is_scout_station(station) else null
 	if not blocked and Input.is_action_just_pressed("interact"):
-		if station == "scout":
-			Game.mission.scout.request_dock.rpc_id(1)
+		if scout:
+			scout.request_dock.rpc_id(1)
 		else:
 			exit_station(true)
 			return
 	# Holding E in the scout abandons the flight: the scout is recalled and its cargo is lost.
-	if station == "scout" and not blocked and Input.is_action_pressed("interact"):
+	if scout and not blocked and Input.is_action_pressed("interact"):
 		_recall_hold += get_physics_process_delta_time()
 		if _recall_hold >= 2.0:
 			_recall_hold = -100.0
-			Game.mission.scout.request_recall.rpc_id(1)
+			scout.request_recall.rpc_id(1)
 	else:
 		_recall_hold = 0.0
 	var data := {}
-	match station:
+	match ship.station_kind(station):
 		"pilot":
 			if not blocked:
 				data["throttle"] = Input.get_axis("move_back", "move_forward")
@@ -549,7 +558,7 @@ func _station_physics(blocked: bool) -> void:
 				if Input.is_action_just_pressed("land"):
 					ship.request_land.rpc_id(1)
 			ship.station_input.rpc_id(1, station, data)
-		"gun_l", "gun_r", "mining":
+		"gun", "laser":
 			data["aim"] = station_aim
 			data["fire"] = not blocked and Input.is_action_pressed("fire")
 			ship.station_input.rpc_id(1, station, data)
@@ -561,27 +570,23 @@ func _station_physics(blocked: bool) -> void:
 			data = {"move": mv, "yaw": station_aim.x, "pitch": station_aim.y,
 					"fire": not blocked and Input.is_action_pressed("fire"),
 					"boost": not blocked and Input.is_action_pressed("sprint")}
-			if Game.mission.scout:
-				Game.mission.scout.pilot_input.rpc_id(1, data)
+			if scout:
+				scout.pilot_input.rpc_id(1, data)
 
 
 ## Called when the server grants a station.
 func enter_station(id: String) -> void:
 	station = id
-	var st: Dictionary = ShipBuilder.STATIONS[id]
+	var st := ship.console(id)
 	position = st["seat"]
-	rotation.y = st["yaw"]
+	rotation.y = st["seat_yaw"]
 	velocity = Vector3.ZERO
 	reset_physics_interpolation()
-	match id:
-		"gun_l":
-			station_aim = ship.aim_l
-		"gun_r":
-			station_aim = ship.aim_r
-		"mining":
-			station_aim = ship.aim_m
+	match ship.station_kind(id):
+		"gun", "laser":
+			station_aim = ship.aim_of(id)
 		"scout":
-			station_aim = Vector2(ship.rotation.y, -0.25)
+			station_aim = Vector2(ship.rotation.y, 0.15 if ship.dock_launch(id).y > 0.0 else -0.25)
 		"pilot":
 			_chase_yaw = 0.0
 			_chase_pitch = -0.22
@@ -596,8 +601,8 @@ func exit_station(send := true) -> void:
 	if send:
 		ship.release_station.rpc_id(1, id)
 	station = ""
-	var st: Dictionary = ShipBuilder.STATIONS[id]
-	var yaw: float = st["yaw"]
+	var st := ship.console(id)
+	var yaw: float = st["seat_yaw"]
 	position = st["seat"] + Basis(Vector3.UP, yaw) * Vector3(0, 0.05, 0.9)
 	look_yaw = yaw
 	look_pitch = 0.0
@@ -697,27 +702,27 @@ func _update_camera(delta: float) -> void:
 		"pilot":
 			_chase_camera(ship_x, delta)
 			camera.global_position += shake
-		"gun_l", "gun_r", "mining":
-			var t: Turret = ship.turrets[station]
-			camera.global_transform = ship_x * t.camera_local(station_aim)
-			camera.global_position += shake * 0.4
-			camera.fov = 70.0 if not Input.is_action_pressed("aim") else 35.0
-			_view.visible = false
-		"scout":
-			var scout: Scout = Game.mission.scout
-			var anchor := scout.get_global_transform_interpolated().origin if scout else ship_x.origin
-			var b := Basis.from_euler(Vector3(station_aim.y, station_aim.x, 0.0))
-			var pos := _clip_to_cave(anchor, anchor + b * Vector3(0, 1.7, 6.5))
-			camera.global_transform = Transform3D(b, pos)
-			camera.global_position += shake * 0.3
-			camera.fov = 80.0
+		_:
+			if ship.is_turret_station(station):
+				var t: Turret = ship.turrets[station]
+				camera.global_transform = ship_x * t.camera_local(station_aim)
+				camera.global_position += shake * 0.4
+				camera.fov = 70.0 if not Input.is_action_pressed("aim") else 35.0
+			elif ship.is_scout_station(station):
+				var scout: Scout = Game.mission.scout_at(station)
+				var anchor := scout.get_global_transform_interpolated().origin if scout else ship_x.origin
+				var b := Basis.from_euler(Vector3(station_aim.y, station_aim.x, 0.0))
+				var pos := _clip_to_cave(anchor, anchor + b * Vector3(0, 1.7, 6.5))
+				camera.global_transform = Transform3D(b, pos)
+				camera.global_position += shake * 0.3
+				camera.fov = 80.0
 			_view.visible = false
 
 
 func _chase_camera(ship_x: Transform3D, _delta: float) -> void:
 	var orbit := Basis(Vector3.UP, _chase_yaw) * Basis(Vector3.RIGHT, _chase_pitch)
 	var focus := ship_x * Vector3(0, 2.5, -4.0)
-	var pos := _clip_to_cave(focus, focus + ship_x.basis * (orbit * Vector3(0, 0, 40.0)))
+	var pos := _clip_to_cave(focus, focus + ship_x.basis * (orbit * Vector3(0, 0, float(ship.layout.get("chase", 40.0)))))
 	camera.global_transform = Transform3D(Basis.looking_at(focus - pos, ship_x.basis.y), pos)
 	camera.fov = 72.0
 	_view.visible = false
@@ -747,7 +752,7 @@ func _remote_update(delta: float) -> void:
 		reset_physics_interpolation()
 	else:
 		position = position.lerp(net_pos, k)
-	rotation.y = lerp_angle(rotation.y, look_yaw if station == "" else float(ShipBuilder.STATIONS[station]["yaw"]), k)
+	rotation.y = lerp_angle(rotation.y, look_yaw if station == "" else float(ship.console(station).get("seat_yaw", look_yaw)), k)
 	_head.rotation.x = look_pitch * 0.6
 	_body.visible = alive
 	_body.position.y = -0.3 if station != "" else 0.0

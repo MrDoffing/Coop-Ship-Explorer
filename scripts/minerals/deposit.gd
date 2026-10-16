@@ -150,9 +150,14 @@ func _spawn_chunk() -> void:
 	# Shards burst off the wall and drift towards whoever collects them.
 	var collector := Vector3.ZERO
 	var mission := Game.mission as MissionLevel
-	if kind == "fuel" and mission.scout and mission.scout.state == Scout.State.FLYING:
-		collector = mission.scout.global_position
-	elif mission.ship:
+	var best := INF
+	if kind == "fuel":
+		for sc in mission.flying_scouts():
+			var d := sc.global_position.distance_to(global_position)
+			if d < best:
+				best = d
+				collector = sc.global_position
+	if collector == Vector3.ZERO and mission.ship:
 		collector = mission.ship.collector_global()
 	var toward := (collector - global_position).normalized() if collector != Vector3.ZERO else Vector3.ZERO
 	var vel := (up + jitter + toward * 1.2).normalized() * randf_range(4.0, 7.0)

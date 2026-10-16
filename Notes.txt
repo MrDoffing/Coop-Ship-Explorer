@@ -1,38 +1,3 @@
-# Notes
-
-## Refactors
-
-* Ship stats shall show absolute values at the right of progress bar and percentages in the middle of the bar.
-
-## Balancing
-
-
-## Additions
-
-### Minor
-
-
-### Major
-
-
-
-
 # Thoughts
 
-Maybe the station should divide the tunnels. 
-Have an entrance and exit with doors that lock themself after passing through them.
-Then player cant backtrack to previous stations or tunnels.
-
-Station should have a shop the players can buy stuff in.
-They use the credits gained in the run to buy.
-
-Need to divide meta prograssion and run progression.
-Run progression should give buffs, guns and turrets.
-Run progression:
- - Buffs (crew, guns, ship)
- - Guns and turrets.
-Meta progression:
- - Unlock new Ships (choose before start)
- - Unlock new guns (Scatter, rail, plasma. Can be found during run)
- - Unlock turret slots (1 as default, slots are not equipped with turrets at start)
- - Upgrade ships? (Maybe more gun slots?)
+Mining is really boring. I think that looking at something and simply pressing a button is never good enough. Other games tend to make the mineral more dynamic so that players need to observe and destroy chunks as the break of. Its bit more complicated but more satisfying. Adding some difficulty could be good but mining is done so often so i think it would be too demanding. Making it simple but satisfying is the goal I think.

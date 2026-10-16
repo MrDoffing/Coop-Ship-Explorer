@@ -94,6 +94,22 @@ static func bar(color: Color, height := 14.0) -> ProgressBar:
 	return b
 
 
+## A progress bar with a text read-out centred inside it (the Label is the bar's child "Pct").
+static func stat_bar(color: Color, height := 18.0) -> ProgressBar:
+	var b := bar(color, height)
+	var l := label("", int(height) - 4, Color.WHITE)
+	l.name = "Pct"
+	full_rect(l)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	l.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	l.add_theme_constant_override("outline_size", 4)
+	l.add_theme_constant_override("line_spacing", 0)
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	b.add_child(l)
+	return b
+
+
 static func full_rect(c: Control) -> Control:
 	c.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	return c

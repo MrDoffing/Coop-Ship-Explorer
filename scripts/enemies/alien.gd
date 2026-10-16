@@ -302,9 +302,9 @@ func _client_motion(delta: float, mission: MissionLevel) -> void:
 
 func _attach_point(ship: Mothership) -> Vector3:
 	if kind == Kind.CRITTER:
-		var hp_def: Array = ShipBuilder.HULL_POINTS[attached]
+		var hp_def: Array = ship.hull_point(attached)
 		return ship.to_global(hp_def[0] + hp_def[1] * 0.45)
-	return ship.to_global(ShipBuilder.HATCHES[attached]["outside"] + Vector3(0, 0.55, 0))
+	return ship.to_global(ship.hatch(attached)["outside"] + Vector3(0, 0.55, 0))
 
 
 # --- Server AI ---------------------------------------------------------------------------------
@@ -322,17 +322,24 @@ func _think(delta: float, mission: MissionLevel) -> void:
 
 func _think_spitter(delta: float, mission: MissionLevel) -> void:
 	var ship := mission.ship
-	var scout := mission.scout
 	var target := Vector3.ZERO
 	var target_vel := Vector3.ZERO
 	var has_target := false
-	var ship_center := ship.to_global(ShipBuilder.SHIELD_CENTER)
+	var ship_center := ship.to_global(ship.shield_center())
 	if ship.alive and ship_center.distance_to(global_position) < AGGRO_RANGE:
 		target = ship_center
 		target_vel = ship.velocity
 		has_target = true
-	if scout and scout.state == Scout.State.FLYING and scout.global_position.distance_to(global_position) < 45.0:
-		if not has_target or scout.global_position.distance_to(global_position) < ship_center.distance_to(global_position) * 0.6:
+	# A scout out flying close by draws its fire.
+	var scout: Scout = null
+	var scout_d := 45.0
+	for sc in mission.flying_scouts():
+		var d := sc.global_position.distance_to(global_position)
+		if d < scout_d:
+			scout_d = d
+			scout = sc
+	if scout:
+		if not has_target or scout_d < ship_center.distance_to(global_position) * 0.6:
 			target = scout.global_position
 			target_vel = scout.velocity
 			has_target = true
@@ -365,7 +372,7 @@ func _think_latcher(delta: float, mission: MissionLevel, claim: Callable) -> voi
 			_detach(ship)
 			return
 		global_position = _attach_point(ship)
-		var local_out: Vector3 = ShipBuilder.HULL_POINTS[attached][1] if kind == Kind.CRITTER else Vector3.UP
+		var local_out: Vector3 = ship.hull_point(attached)[1] if kind == Kind.CRITTER else Vector3.UP
 		var out := ship.global_basis * local_out
 		net_dir = -out
 		net_vel = ship.velocity
@@ -399,10 +406,10 @@ func _think_latcher(delta: float, mission: MissionLevel, claim: Callable) -> voi
 		if _claim >= 0:
 			var goal: Vector3
 			if kind == Kind.CRITTER:
-				var hp_def: Array = ShipBuilder.HULL_POINTS[_claim]
+				var hp_def: Array = ship.hull_point(_claim)
 				goal = ship.to_global(hp_def[0] + hp_def[1] * 0.45)
 			else:
-				goal = ship.to_global(ShipBuilder.HATCHES[_claim]["outside"] + Vector3(0, 0.55, 0))
+				goal = ship.to_global(ship.hatch(_claim)["outside"] + Vector3(0, 0.55, 0))
 			var to := goal - global_position
 			if to.length() < 1.3:
 				attached = _claim
@@ -453,10 +460,10 @@ func _steer(delta: float, desired: Vector3, accel: float, avoid_ship: bool, miss
 	net_vel += _avoid * 40.0 * delta
 	if avoid_ship:
 		var ship := mission.ship
-		var local := (ship.to_local(global_position) - ShipBuilder.SHIELD_CENTER) / ShipBuilder.SHIELD_RADII
+		var local := (ship.to_local(global_position) - ship.shield_center()) / ship.shield_radii()
 		var r := local.length()
 		if r < 1.35:
-			var push := ship.global_basis * (local.normalized() * ShipBuilder.SHIELD_RADII).normalized()
+			var push := ship.global_basis * (local.normalized() * ship.shield_radii()).normalized()
 			net_vel += push * (1.35 - r) * 60.0 * delta
 	var max_speed := float(KIND_STATS[kind]["speed"]) * 1.5 + mission.ship.velocity.length()
 	net_vel = net_vel.limit_length(max_speed)

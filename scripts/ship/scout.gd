@@ -1,12 +1,13 @@
 class_name Scout
 extends CharacterBody3D
-## The mothership's scout pod.
+## One of the mothership's scout pods.
 ##
-## Docked under the mothership's belly until a crew member launches it from the scout bay console.
-## It is small enough for the narrow side tunnels where fuel crystals grow, carries the fuel back
-## (delivered on docking) and its guns can pick off critters clawing at the mothership's hull,
-## which the turrets cannot reach. It uses no fuel. If destroyed it is rebuilt after a while.
-## Simulated on the server from the pilot's input; the pilot's camera follows it locally.
+## Docked on the mothership (under the belly, or on the Vanguard's flight deck) until a crew member
+## launches it from its scout bay console. It is small enough for the narrow side tunnels where fuel
+## crystals grow, carries the fuel back (delivered on docking) and its guns can pick off critters
+## clawing at the mothership's hull, which the turrets cannot reach. It uses no fuel. If destroyed
+## it is rebuilt after a while. Simulated on the server from the pilot's input; the pilot's camera
+## follows it locally. Its stats come live from the mothership, so run upgrades apply at once.
 
 enum State { DOCKED, FLYING, DESTROYED }
 
@@ -23,6 +24,13 @@ const HULL_SECTIONS := [
 	[1.8, 0.8, 0.48, 0.0],
 	[2.25, 0.55, 0.36, 0.0],
 ]
+const COMBAT_SECTIONS := [
+	[-3.0, 0.14, 0.1, 0.0],
+	[-1.8, 0.58, 0.36, 0.04],
+	[0.2, 0.86, 0.5, 0.06],
+	[1.7, 0.74, 0.44, 0.02],
+	[2.3, 0.5, 0.3, 0.0],
+]
 
 # Replicated (server authority).
 var net_pos := Vector3.ZERO
@@ -36,7 +44,11 @@ var max_cargo := 40.0
 var rebuild := 0.0
 var pilot := 0
 
-var stats: Dictionary = {}
+## The scout bay station that launches this scout ("scout", "scout2") and its index.
+var station_id := "scout"
+var index := 0
+## "standard" or "combat" (the Vanguard's).
+var style := "standard"
 var _model: Node3D
 var _glow_mat: StandardMaterial3D
 var _head_light: SpotLight3D
@@ -49,8 +61,10 @@ var _side := 1.0
 var _bump_cd := 0.0
 
 
-## Build the scout's visual model under `root` (also used by the homebase display).
-static func build_model(root: Node3D) -> Dictionary:
+## Build a scout's visual model under `root` (also used by the homebase display).
+static func build_model(root: Node3D, model_style := "standard") -> Dictionary:
+	if model_style == "combat":
+		return _build_combat(root)
 	var parts := {}
 	var body_mat := Models.panel_mat(Color(0.95, 0.55, 0.16), 0.4, 0.45, 0.8)
 	var grey := Models.mat(Color(0.5, 0.52, 0.56), 0.6, 0.4)
@@ -59,19 +73,76 @@ static func build_model(root: Node3D) -> Dictionary:
 	hull.mesh = Models.loft(HULL_SECTIONS, 0.35)
 	hull.material_override = body_mat
 	root.add_child(hull)
-	Models.sphere(root, Vector3(0, 0.42, -0.75), 0.5, Models.emissive(Color(0.2, 0.55, 0.7), 0.7, Color(0.03, 0.05, 0.07)), Vector3(1.0, 0.6, 1.7))
+	var b := Models.Batch.new()
+	b.sphere(Vector3(0, 0.42, -0.75), 0.5, Models.emissive(Color(0.2, 0.55, 0.7), 0.7, Color(0.03, 0.05, 0.07)), Vector3(1.0, 0.6, 1.7))
+	b.box(Vector3(0, 0.62, -0.75), Vector3(0.06, 0.08, 1.5), dark)
 	for side: float in [-1.0, 1.0]:
-		Models.box(root, Vector3(side * 1.55, -0.05, 0.7), Vector3(1.9, 0.1, 1.3), grey, Vector3(0, side * -8.0, side * 8.0))
-		Models.box(root, Vector3(side * 2.45, 0.08, 0.95), Vector3(0.12, 0.5, 0.9), dark)
-		Models.sphere(root, Vector3(side * 2.5, 0.35, 0.9), 0.07,
-				Models.emissive(Color(1, 0.2, 0.15) if side < 0 else Color(0.2, 1, 0.3), 5.0))
-		Models.cylinder(root, Vector3(side * 1.1, -0.18, -0.4), 0.06, 1.4, dark, Vector3(90, 0, 0))
-		Models.cylinder(root, Vector3(side * 0.6, 0.0, 2.25), 0.3, 0.9, grey, Vector3(90, 0, 0), 0.24)
+		b.box(Vector3(side * 1.55, -0.05, 0.7), Vector3(1.9, 0.1, 1.3), grey, Vector3(0, side * -8.0, side * 8.0))
+		b.box(Vector3(side * 1.4, 0.01, 0.75), Vector3(1.2, 0.04, 0.16), Models.mat(Color(0.95, 0.55, 0.16), 0.4, 0.45), Vector3(0, side * -8.0, side * 8.0))
+		b.box(Vector3(side * 2.45, 0.08, 0.95), Vector3(0.12, 0.5, 0.9), dark)
+		b.sphere(Vector3(side * 2.5, 0.35, 0.9), 0.07, Models.emissive(Color(1, 0.2, 0.15) if side < 0 else Color(0.2, 1, 0.3), 5.0))
+		b.cyl(Vector3(side * 1.1, -0.18, -0.4), 0.06, 1.4, dark, Vector3(90, 0, 0))
+		b.cyl(Vector3(side * 1.1, -0.18, 0.25), 0.1, 0.3, grey, Vector3(90, 0, 0))
+		b.cyl(Vector3(side * 0.6, 0.0, 2.25), 0.3, 0.9, grey, Vector3(90, 0, 0), 0.24)
+		b.cyl(Vector3(side * 0.6, 0.0, 1.75), 0.32, 0.08, dark, Vector3(90, 0, 0))
+		# Landing skids.
+		b.box(Vector3(side * 0.55, -0.5, 0.3), Vector3(0.08, 0.08, 2.2), dark)
+		for z: float in [-0.5, 1.0]:
+			b.box(Vector3(side * 0.55, -0.38, z), Vector3(0.06, 0.24, 0.06), dark)
+	b.box(Vector3(0, 0.55, 1.2), Vector3(0.08, 0.5, 0.9), dark, Vector3(-20, 0, 0))
+	b.cyl(Vector3(0.3, 0.62, 0.6), 0.02, 0.5, grey)
+	b.commit(root)
 	var glow_mat := StandardMaterial3D.new()
 	glow_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	glow_mat.albedo_color = Color(0.4, 0.85, 1.0)
 	for side: float in [-1.0, 1.0]:
 		Models.cylinder(root, Vector3(side * 0.6, 0.0, 2.72), 0.2, 0.05, glow_mat, Vector3(90, 0, 0))
+	parts["glow_mat"] = glow_mat
+	return parts
+
+
+## The Vanguard's combat scout: darker armour, forward-swept wings with gun pods and tail fins.
+static func _build_combat(root: Node3D) -> Dictionary:
+	var parts := {}
+	var body_mat := Models.panel_mat(Color(0.25, 0.27, 0.31), 0.6, 0.38, 0.8)
+	var stripe := Models.mat(Color(0.85, 0.16, 0.12), 0.35, 0.45)
+	var steel := Models.mat(Color(0.55, 0.57, 0.6), 0.75, 0.3)
+	var dark := Models.mat(Color(0.1, 0.11, 0.13), 0.6, 0.5)
+	var hull := MeshInstance3D.new()
+	hull.mesh = Models.loft(COMBAT_SECTIONS, 0.4)
+	hull.material_override = body_mat
+	root.add_child(hull)
+	var b := Models.Batch.new()
+	b.sphere(Vector3(0, 0.38, -0.95), 0.42, Models.emissive(Color(0.9, 0.3, 0.2), 0.8, Color(0.08, 0.03, 0.03)), Vector3(0.9, 0.55, 1.8))
+	b.box(Vector3(0, 0.56, -0.25), Vector3(0.14, 0.06, 2.4), stripe)
+	for side: float in [-1.0, 1.0]:
+		# Forward-swept wings with a red leading edge.
+		var wing := PackedVector2Array([Vector2(side * 0.7, 1.4), Vector2(side * 2.7, 0.2), Vector2(side * 2.7, -0.4), Vector2(side * 0.7, 0.0)])
+		b.add(Models.prism(wing, -0.1, 0.0), Transform3D.IDENTITY, body_mat)
+		b.beam(Vector3(side * 0.8, -0.02, -0.02), Vector3(side * 2.7, -0.02, -0.42), 0.1, 0.12, stripe)
+		# Gun pods under each wing: twin barrels.
+		b.box(Vector3(side * 1.1, -0.24, -0.3), Vector3(0.36, 0.28, 1.4), dark)
+		for dx: float in [-0.08, 0.08]:
+			b.cyl(Vector3(side * 1.1 + dx, -0.24, -1.25), 0.045, 0.6, steel, Vector3(90, 0, 0))
+		b.sphere(Vector3(side * 2.72, 0.02, -0.4), 0.07, Models.emissive(Color(1, 0.2, 0.15) if side < 0 else Color(0.2, 1, 0.3), 5.0))
+		# Canted tail fins.
+		b.box(Vector3(side * 0.5, 0.6, 1.6), Vector3(0.07, 0.75, 0.9), body_mat, Vector3(-25, 0, side * -18.0))
+		b.box(Vector3(side * 0.56, 0.86, 1.78), Vector3(0.08, 0.12, 0.5), stripe, Vector3(-25, 0, side * -18.0))
+		# Twin engines.
+		b.cyl(Vector3(side * 0.55, 0.0, 2.2), 0.3, 1.0, steel, Vector3(90, 0, 0), 0.25)
+		b.cyl(Vector3(side * 0.55, 0.0, 1.66), 0.33, 0.08, dark, Vector3(90, 0, 0))
+		# Landing skids.
+		b.box(Vector3(side * 0.5, -0.48, 0.2), Vector3(0.08, 0.08, 2.2), dark)
+		for z: float in [-0.6, 0.9]:
+			b.box(Vector3(side * 0.5, -0.36, z), Vector3(0.06, 0.24, 0.06), dark)
+	b.box(Vector3(0, -0.36, -1.4), Vector3(0.3, 0.16, 1.0), dark)
+	b.cyl(Vector3(0, -0.36, -2.15), 0.05, 0.6, steel, Vector3(90, 0, 0))
+	b.commit(root)
+	var glow_mat := StandardMaterial3D.new()
+	glow_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	glow_mat.albedo_color = Color(0.4, 0.85, 1.0)
+	for side: float in [-1.0, 1.0]:
+		Models.cylinder(root, Vector3(side * 0.55, 0.0, 2.72), 0.2, 0.05, glow_mat, Vector3(90, 0, 0))
 	parts["glow_mat"] = glow_mat
 	return parts
 
@@ -82,11 +153,14 @@ func _init() -> void:
 
 
 func setup(data: Dictionary) -> void:
-	name = "Scout"
-	stats = data["stats"]
-	max_hp = stats["scout_hp"]
+	index = int(data.get("index", 0))
+	station_id = str(data.get("station", "scout"))
+	style = str(data.get("style", "standard"))
+	name = "Scout" if index == 0 else "Scout%d" % (index + 1)
+	var stats: Dictionary = data["stats"]
+	max_hp = float(stats["scout_hp"])
 	hp = max_hp
-	max_cargo = stats["scout_cargo"]
+	max_cargo = float(stats["scout_cargo"])
 
 
 func _ready() -> void:
@@ -101,7 +175,7 @@ func _ready() -> void:
 	add_child(cs)
 	_model = Node3D.new()
 	add_child(_model)
-	_glow_mat = build_model(_model)["glow_mat"]
+	_glow_mat = build_model(_model, style)["glow_mat"]
 	_head_light = SpotLight3D.new()
 	_head_light.position = Vector3(0, 0.1, -2.6)
 	_head_light.spot_range = 70.0
@@ -126,19 +200,32 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
-	if Game.mission and Game.mission.get("scout") == self:
-		Game.mission.set("scout", null)
+	if Game.mission:
+		var list: Array = Game.mission.get("scouts")
+		if list != null:
+			list.erase(self)
 
 
 func _ship() -> Mothership:
 	return Game.mission.ship if Game.mission else null
 
 
+## A live ship stat (run upgrades change them mid-dive).
+func _stat(key: String) -> float:
+	var ship := _ship()
+	return float(ship.stats.get(key, 0.0)) if ship else 0.0
+
+
+func dock_point() -> Vector3:
+	var ship := _ship()
+	return ship.dock_point(station_id) if ship else Vector3.ZERO
+
+
 func dock_transform() -> Transform3D:
 	var ship := _ship()
 	if ship == null:
 		return global_transform
-	return ship.global_transform * Transform3D(Basis.IDENTITY, ShipBuilder.DOCK_POINT)
+	return ship.global_transform * Transform3D(Basis.IDENTITY, ship.dock_point(station_id))
 
 
 func can_launch() -> bool:
@@ -175,6 +262,14 @@ func _physics_process(delta: float) -> void:
 
 
 func _server_tick(delta: float, ship: Mothership) -> void:
+	# Hull and cargo follow the ship's stats (scout upgrades from waystation shops).
+	var want_hp := float(ship.stats.get("scout_hp", max_hp))
+	if absf(want_hp - max_hp) > 0.01:
+		if want_hp > max_hp and state != State.DESTROYED:
+			hp += want_hp - max_hp
+		max_hp = want_hp
+		hp = minf(hp, max_hp)
+	max_cargo = float(ship.stats.get("scout_cargo", max_cargo))
 	match state:
 		State.DOCKED:
 			global_transform = dock_transform()
@@ -200,7 +295,7 @@ func _fly(delta: float) -> void:
 	var bank := Basis(Vector3.FORWARD, mv.x * 0.35)
 	var q := global_basis.get_rotation_quaternion().slerp((aim * bank).get_rotation_quaternion(), NetUtil.smooth(10.0, delta))
 	global_basis = Basis(q)
-	var speed := float(stats["scout_speed"]) * (1.6 if _input.get("boost", false) else 1.0)
+	var speed := _stat("scout_speed") * (1.6 if _input.get("boost", false) else 1.0)
 	var desired := aim * Vector3(mv.x, mv.y, -mv.z).limit_length(1.0) * speed
 	velocity = velocity.move_toward(desired, 32.0 * delta)
 	var pre := velocity
@@ -220,9 +315,9 @@ func _fly(delta: float) -> void:
 		ray.collide_with_areas = true
 		var hit := get_world_3d().direct_space_state.intersect_ray(ray)
 		var focus: Vector3 = hit["position"] if not hit.is_empty() else global_position - aim.z * 120.0
-		var muzzle := to_global(Vector3(_side * 1.1, -0.18, -1.3))
+		var muzzle := to_global(Vector3(_side * 1.1, -0.18 if style == "standard" else -0.24, -1.3))
 		var dir := (focus - muzzle).normalized()
-		Game.mission.projectiles.fire("scout", muzzle, dir * 170.0 + velocity, float(stats["scout_damage"]))
+		Game.mission.projectiles.fire("scout", muzzle, dir * 170.0 + velocity, _stat("scout_damage"))
 
 
 func _client_tick(delta: float) -> void:
@@ -264,8 +359,9 @@ func launch(pid: int) -> void:
 	state = State.FLYING
 	pilot = pid
 	global_transform = dock_transform()
-	velocity = ship.velocity + ship.global_basis.y * -7.0
-	_input = {"yaw": ship.rotation.y, "pitch": -0.25}
+	velocity = ship.velocity + ship.global_basis * ship.dock_launch(station_id)
+	var up := ship.dock_launch(station_id).y > 0.0
+	_input = {"yaw": ship.rotation.y, "pitch": 0.15 if up else -0.25}
 	reset_physics_interpolation()
 	_fx.rpc("launch")
 
@@ -275,6 +371,14 @@ func pilot_left() -> void:
 	if state == State.FLYING:
 		_dock()
 	pilot = 0
+
+
+## Server: the mothership is docking at a waystation: bring the scout home (its cargo included).
+func recall_for_docking() -> void:
+	if state == State.FLYING:
+		var ship := _ship()
+		ship.notify_peer(pilot, "Scout recalled - the mothership is docking", 1)
+		_dock()
 
 
 func take_damage(amount: float, _info: Dictionary) -> void:
@@ -329,7 +433,7 @@ func request_dock() -> void:
 	if dist <= DOCK_RANGE:
 		_dock()
 	else:
-		_ship().notify_peer(pilot, "Too far to dock (%d m) - fly back under the mothership" % int(dist), 1)
+		_ship().notify_peer(pilot, "Too far to dock (%d m) - fly back to the mothership's scout dock" % int(dist), 1)
 
 
 ## Pilot gave up the flight: the scout returns to the bay on autopilot, dropping its cargo.

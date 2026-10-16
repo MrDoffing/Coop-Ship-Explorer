@@ -4,9 +4,11 @@ extends RefCounted
 ##
 ## The main tunnel follows a noise-driven path along -Z (depth s = -z) with a varying radius and
 ## occasional large caverns where nests live. Narrow side tunnels that only the scout fits through
-## branch off and end in chambers holding fuel crystals, and every few hundred metres a waystation
-## hangar is cut into the wall (see StationBuilder for its layout). Rock is a signed distance field
-## (negative = open space, positive = rock) that build_chunk() polygonises with surface nets.
+## branch off and end in chambers holding fuel crystals. Every few hundred metres the tunnel runs
+## through a waystation: it straightens onto the station's axis, narrows and smooths out, and
+## opens into a hall carved around the landing pad, sealed by bulkheads at both ends (see
+## StationBuilder for its layout). Rock is a signed distance field (negative = open space,
+## positive = rock) that build_chunk() polygonises with surface nets.
 ##
 ## Every peer builds identical geometry from the seed, so only chunk indices are replicated.
 ## Instances cache per-segment data and are not thread-safe: use one instance per thread.
@@ -26,12 +28,16 @@ const START_CAP := -14.0
 ## Waystations: the first one around STATION_FIRST metres deep, then every STATION_SPACING.
 const STATION_FIRST := 290.0
 const STATION_SPACING := 440.0
-## Landing pad position: this far beyond the tunnel wall, and this far below the centre line.
-const STATION_INSET := 14.0
-const STATION_DROP := 6.0
+## Near a waystation the tunnel runs straight along the station's axis with this radius and only a
+## little of its wall noise: fully within STATION_HOLD metres of the hall's ends, blending back into
+## the wild cave over the next STATION_RAMP metres.
+const STATION_RADIUS := 15.0
+const STATION_NOISE := 0.15
+const STATION_HOLD := 10.0
+const STATION_RAMP := 70.0
 const STATION_BLEND := 2.0
 ## No scout tunnels this close (in depth) to a waystation.
-const STATION_CLEAR := 75.0
+const STATION_CLEAR := 130.0
 
 const ROCK_A := Color(0.52, 0.46, 0.4)
 const ROCK_B := Color(0.36, 0.38, 0.44)
@@ -75,8 +81,18 @@ static func _make_noise(s: int, freq: float, octaves: int) -> FastNoiseLite:
 
 # --- Shape of the cave -------------------------------------------------------------------------
 
-## Centre of the main tunnel (x, y) at depth s.
+## Centre of the main tunnel (x, y) at depth s. Near a waystation it runs onto the station's axis.
 func center(s: float) -> Vector2:
+	var raw := _raw_center(s)
+	var st := _station_near(s)
+	if st.is_empty():
+		return raw
+	var w := station_weight(s, st)
+	return raw.lerp(_station_line(s, st), w) if w > 0.0 else raw
+
+
+## The noise-driven tunnel path, before waystations straighten it.
+func _raw_center(s: float) -> Vector2:
 	var ramp := smoothstep(10.0, 160.0, s)
 	return Vector2(
 		_path_x.get_noise_1d(s) * 44.0 + _path_x2.get_noise_1d(s) * 9.0,
@@ -96,7 +112,52 @@ func tangent(s: float) -> Vector3:
 ## Main tunnel radius at depth s, before wall noise.
 func radius(s: float) -> float:
 	var r := 21.0 + _rad.get_noise_1d(s) * 6.0 + cavern_extra(s)
-	return r * smoothstep(START_CAP - 22.0, START_CAP, s)
+	r *= smoothstep(START_CAP - 22.0, START_CAP, s)
+	var st := _station_near(s)
+	if not st.is_empty():
+		r = lerpf(r, STATION_RADIUS, station_weight(s, st))
+	return r
+
+
+## How much of the main wall noise is left at depth s (the tunnel is smooth near waystations).
+func noise_scale(s: float) -> float:
+	var st := _station_near(s)
+	if st.is_empty():
+		return 1.0
+	return lerpf(1.0, STATION_NOISE, station_weight(s, st))
+
+
+## The waystation whose approach reaches depth s, or {}. Cavern avoidance can move a station well
+## away from its nominal depth, so the neighbours are checked too.
+func _station_near(s: float) -> Dictionary:
+	var k := int(round((s - STATION_FIRST) / STATION_SPACING))
+	var best := {}
+	var best_w := 0.0
+	for kk in range(maxi(k - 1, 0), k + 2):
+		var st := station(kk)
+		var w := station_weight(s, st)
+		if w > best_w:
+			best_w = w
+			best = st
+	return best
+
+
+## 0..1: how strongly waystation `st` straightens the tunnel at depth s.
+func station_weight(s: float, st: Dictionary) -> float:
+	var lo: float = st["s_entry"]
+	var hi: float = st["s_exit"]
+	if s >= lo - STATION_HOLD and s <= hi + STATION_HOLD:
+		return 1.0
+	var d := (lo - STATION_HOLD - s) if s < lo else (s - hi - STATION_HOLD)
+	return 1.0 - smoothstep(0.0, STATION_RAMP, d)
+
+
+## Point (x, y) at depth s on the straight line through waystation `st`'s gates.
+func _station_line(s: float, st: Dictionary) -> Vector2:
+	var p0: Vector3 = st["p0"]
+	var f: Vector3 = st["f"]
+	var l := p0 + f * ((s - float(st["s"])) / -f.z)
+	return Vector2(l.x, l.y)
 
 
 func cavern(k: int) -> Dictionary:
@@ -184,45 +245,47 @@ func side_tunnels_in(s_lo: float, s_hi: float) -> Array:
 	return out
 
 
-## Waystation k: a hangar with a landing pad cut into the tunnel wall, a pier and a station
-## building behind it. Station-local frame: x along the tunnel, y up, z into the wall, origin on
-## top of the landing pad.
+## Waystation k: a hall built into the tunnel around a landing pad, sealed by a bulkhead at each
+## end. Station-local frame: -z along the tunnel (deeper, towards the exit), y up, origin on top of
+## the landing pad; the tunnel's centre line runs through both gates at y = StationBuilder.LINE_Y.
+## "s_entry" / "s_exit" are the depths of the hall's two ends.
 func station(k: int) -> Dictionary:
 	if _station_cache.has(k):
 		return _station_cache[k]
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash([seed_value, k, "station"])
 	var s := STATION_FIRST + k * STATION_SPACING + rng.randf_range(-40.0, 40.0)
-	# Stay out of the caverns where nests grow (best effort when two caverns are close).
+	# Stay clear of the caverns' middles where nests grow (best effort when two caverns are close).
 	for pass_i in 2:
 		for kk in range(int(floor(s / CAVERN_SEGMENT)) - 1, int(floor(s / CAVERN_SEGMENT)) + 2):
 			if kk < 1:
 				continue
 			var cv := cavern(kk)
-			var clear := float(cv["half"]) + 50.0
+			var clear := float(cv["half"]) + 60.0
 			var off := s - float(cv["s"])
 			if absf(off) < clear:
 				s = float(cv["s"]) + (clear if off >= 0.0 else -clear)
-	var side := 1.0 if rng.randf() < 0.5 else -1.0
-	var t := tangent(s)
-	var zf := Vector3(-t.z, 0.0, t.x).normalized() * side
+	# The frame follows the raw tunnel (the straightened path is derived from it).
+	var raw := _raw_center(s)
+	var p0 := Vector3(raw.x, raw.y, -s)
+	var ahead := _raw_center(s + 4.0)
+	var behind := _raw_center(s - 4.0)
+	var t := (Vector3(ahead.x, ahead.y, -s - 4.0) - Vector3(behind.x, behind.y, -s + 4.0)).normalized()
+	var f := Vector3(t.x, 0.0, t.z).normalized()
+	var zf := -f
 	var basis := Basis(Vector3.UP.cross(zf), Vector3.UP, zf)
-	var depth := radius(s) + STATION_INSET
-	var xform := Transform3D(basis, center3(s) + zf * depth + Vector3(0, -STATION_DROP, 0))
-	var hmin := Vector3(-StationBuilder.HANGAR_HALF_X, StationBuilder.HANGAR_FLOOR, -depth)
-	var hmax := Vector3(StationBuilder.HANGAR_HALF_X, StationBuilder.HANGAR_ROOF, StationBuilder.HANGAR_BACK)
-	var bmin := StationBuilder.CARVE_MIN
-	var bmax := StationBuilder.CARVE_MAX
+	var xform := Transform3D(basis, p0 - Vector3(0, StationBuilder.LINE_Y, 0))
+	var hmin := Vector3(-StationBuilder.HALL_HALF_X, StationBuilder.HALL_FLOOR, StationBuilder.HALL_EXIT)
+	var hmax := Vector3(StationBuilder.HALL_HALF_X, StationBuilder.HALL_ROOF, StationBuilder.HALL_ENTRY)
 	var aabb := AABB(xform * hmin, Vector3.ZERO)
-	for box: Array in [[hmin, hmax], [bmin, bmax]]:
-		var lo: Vector3 = box[0]
-		var hi: Vector3 = box[1]
-		for i in 8:
-			aabb = aabb.expand(xform * Vector3(hi.x if (i & 1) != 0 else lo.x, hi.y if (i & 2) != 0 else lo.y, hi.z if (i & 4) != 0 else lo.z))
+	for i in 8:
+		aabb = aabb.expand(xform * Vector3(hmax.x if (i & 1) != 0 else hmin.x, hmax.y if (i & 2) != 0 else hmin.y, hmax.z if (i & 4) != 0 else hmin.z))
+	var c := -f.z
 	var st := {
-		"k": k, "s": s, "side": side, "depth": depth, "xform": xform, "inv": xform.affine_inverse(),
+		"k": k, "s": s, "xform": xform, "inv": xform.affine_inverse(), "p0": p0, "f": f,
+		"s_entry": s - StationBuilder.HALL_ENTRY * c, "s_exit": s - StationBuilder.HALL_EXIT * c,
 		"aabb": aabb.grow(SIDE_BAND + STATION_BLEND),
-		"hc": (hmin + hmax) * 0.5, "hh": (hmax - hmin) * 0.5, "bc": (bmin + bmax) * 0.5, "bh": (bmax - bmin) * 0.5,
+		"hc": (hmin + hmax) * 0.5, "hh": (hmax - hmin) * 0.5,
 		"name": "WAYSTATION %d" % (k + 1),
 	}
 	_station_cache[k] = st
@@ -252,11 +315,10 @@ func near_station(s: float, dist: float) -> bool:
 	return false
 
 
-## Signed distance to the rock carved away for a waystation (hangar plus building cavity).
+## Signed distance to the rock carved away for a waystation's hall.
 func station_raw(p: Vector3, st: Dictionary) -> float:
 	var l: Vector3 = (st["inv"] as Transform3D) * p
-	var d := _round_box(l - (st["hc"] as Vector3), st["hh"], StationBuilder.HANGAR_ROUND)
-	return minf(d, _round_box(l - (st["bc"] as Vector3), st["bh"], 1.5))
+	return _round_box(l - (st["hc"] as Vector3), st["hh"], StationBuilder.HALL_ROUND)
 
 
 static func _round_box(p: Vector3, half: Vector3, r: float) -> float:
@@ -298,7 +360,7 @@ func sdf(p: Vector3) -> float:
 	var c := center(s)
 	var d := Vector2(p.x - c.x, p.y - c.y).length() - radius(s)
 	if absf(d) < MAIN_BAND:
-		d += main_noise(p.x, p.y, p.z)
+		d += main_noise(p.x, p.y, p.z) * noise_scale(s)
 	for t in side_tunnels_in(s - 1.0, s + 1.0):
 		var bb: AABB = t["aabb"]
 		if bb.has_point(p):
@@ -340,6 +402,7 @@ func build_chunk(n: int) -> Dictionary:
 
 	var slice_c := PackedVector2Array()
 	var slice_r := PackedFloat32Array()
+	var slice_n := PackedFloat32Array()
 	var xmin := INF
 	var xmax := -INF
 	var ymin := INF
@@ -350,6 +413,7 @@ func build_chunk(n: int) -> Dictionary:
 		var r := radius(s)
 		slice_c.append(c)
 		slice_r.append(r)
+		slice_n.append(noise_scale(s))
 		var ext := r + MAIN_BAND + CELL
 		xmin = minf(xmin, c.x - ext)
 		xmax = maxf(xmax, c.x + ext)
@@ -379,6 +443,7 @@ func build_chunk(n: int) -> Dictionary:
 		var z := -(kmin + kk) * CELL
 		var c := slice_c[kk]
 		var r := slice_r[kk]
+		var ns := slice_n[kk]
 		if r < 0.5:
 			continue
 		var ext := r + MAIN_BAND + CELL
@@ -395,7 +460,7 @@ func build_chunk(n: int) -> Dictionary:
 				var dx := x - c.x
 				var d := sqrt(dx * dx + dy * dy) - r
 				if d < MAIN_BAND and d > -MAIN_BAND:
-					d += main_noise(x, y, z)
+					d += main_noise(x, y, z) * ns
 				vals[row + ii] = d
 
 	# Side tunnels, blended in with a smooth union.
@@ -419,7 +484,7 @@ func build_chunk(n: int) -> Dictionary:
 						ds += side_noise(x, y, z)
 					vals[row + ii] = smin(vals[row + ii], ds, SIDE_BLEND)
 
-	# Waystation hangars and building cavities: flat, lightly roughened rock.
+	# Waystation halls: flat, lightly roughened rock.
 	for st in stations:
 		var bb: AABB = st["aabb"]
 		var ia := maxi(0, int(floor(bb.position.x / CELL)) - i0)

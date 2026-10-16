@@ -1,9 +1,14 @@
 extends Node
 ## Global game state shared by every scene.
 ##
-## Holds the crew's persistent profile (credits, upgrades, turret loadout), turns it into ship
-## stats for a mission, stores local settings and registers the input actions. The server (host
-## or solo player) owns and saves the profile; clients receive copies through sync_profile().
+## Holds the crew's persistent profile (research points, unlocked guns, the motherships the crew
+## owns with their upgrades, and the selected ship), turns it into ship stats for a mission, stores
+## local settings and registers the input actions. The server (host or solo player) owns and saves
+## the profile; clients receive copies through sync_profile().
+##
+## Progress is split in two: research points (meta progression) are earned at the end of every dive
+## and spent at homebase; credits from mining only exist during a dive and are spent in waystation
+## shops.
 
 signal profile_changed
 signal settings_changed
@@ -14,6 +19,8 @@ var save_path := SAVE_PATH
 const SETTINGS_PATH := "user://settings.cfg"
 ## Where settings are saved (autotests point this elsewhere so they never change real settings).
 var settings_path := SETTINGS_PATH
+## Version 2: research points, ships and gun unlocks (version 1 had credits and homebase upgrades).
+const PROFILE_VERSION := 2
 
 # Physics layer bits (also named in project.godot).
 const LAYER_CAVE := 1
@@ -32,39 +39,32 @@ const PLAYER_COLORS: Array[Color] = [
 	Color(0.25, 0.65, 1.0), Color(1.0, 0.55, 0.2), Color(0.4, 0.95, 0.45), Color(0.95, 0.4, 0.85),
 ]
 
-const UPGRADE_CATEGORIES := ["Mothership", "Weapons", "Scout", "Crew"]
-
-## Upgrade catalogue. The cost of buying level n+1 is base * 1.65^n (rounded to 10).
-const UPGRADES := {
-	"hull": {"name": "Hull Plating", "desc": "+80 max hull integrity.", "cat": "Mothership", "base": 120, "max": 6},
-	"shield_cap": {"name": "Shield Capacitors", "desc": "+40 max shield strength.", "cat": "Mothership", "base": 110, "max": 6},
-	"shield_regen": {"name": "Shield Regenerator", "desc": "+25% shield recharge and 1s faster reboot.", "cat": "Mothership", "base": 140, "max": 4},
-	"engine": {"name": "Engine Tuning", "desc": "+12% top speed and handling.", "cat": "Mothership", "base": 100, "max": 5},
-	"fuel_tank": {"name": "Fuel Tanks", "desc": "+30 fuel capacity.", "cat": "Mothership", "base": 90, "max": 5},
-	"fuel_eff": {"name": "Fuel Injectors", "desc": "-12% fuel consumption.", "cat": "Mothership", "base": 130, "max": 4},
-	"hardening": {"name": "System Hardening", "desc": "-15% collateral damage to engine and weapons.", "cat": "Mothership", "base": 150, "max": 4},
-	"turret_dmg": {"name": "Turret Calibration", "desc": "+20% turret damage.", "cat": "Weapons", "base": 120, "max": 6},
-	"turret_rate": {"name": "Turret Autoloaders", "desc": "+15% turret fire rate.", "cat": "Weapons", "base": 130, "max": 5},
-	"mining": {"name": "Mining Laser Focus", "desc": "+30% mining speed.", "cat": "Weapons", "base": 90, "max": 5},
-	"laser_overcharge": {"name": "Laser Overcharge", "desc": "+50% mining laser damage to aliens and egg sacs.", "cat": "Weapons", "base": 110, "max": 4},
-	"auto_cannons": {"name": "Auto Cannons", "desc": "A small automatic turret on a hull edge. Weak, but it never stops shooting.", "cat": "Weapons", "base": 650, "max": 4},
-	"tractor": {"name": "Tractor Field", "desc": "+25% mineral collection range.", "cat": "Weapons", "base": 80, "max": 4},
-	"scout_armor": {"name": "Scout Armor", "desc": "+30 scout hull.", "cat": "Scout", "base": 90, "max": 5},
-	"scout_guns": {"name": "Scout Blasters", "desc": "+25% scout weapon damage.", "cat": "Scout", "base": 100, "max": 5},
-	"scout_cargo": {"name": "Scout Cargo Hold", "desc": "+20 fuel cargo capacity.", "cat": "Scout", "base": 80, "max": 4},
-	"scout_engine": {"name": "Scout Thrusters", "desc": "+12% scout speed.", "cat": "Scout", "base": 80, "max": 4},
-	"blaster": {"name": "Crew Blasters", "desc": "+25% blaster damage.", "cat": "Crew", "base": 90, "max": 5},
-	"toolkit": {"name": "Toolkits", "desc": "+30% repair speed.", "cat": "Crew", "base": 90, "max": 5},
-	"suit": {"name": "Armored Suits", "desc": "+25 crew health.", "cat": "Crew", "base": 80, "max": 4},
+## Weapons for the manned guns. Every gun launches with a Pulse Cannon; the others are unlocked at
+## homebase with research points and then turn up in waystation shops during a dive.
+const GUNS := {
+	"pulse": {"name": "Pulse Cannon", "short": "Rapid energy bolts", "desc": "Rapid energy bolts. A reliable all-rounder, fitted to every gun at launch.", "rp": 0},
+	"flak": {"name": "Scatter Cannon", "short": "Short-range pellet bursts", "desc": "Short-range pellet bursts that shred swarms.", "rp": 60},
+	"plasma": {"name": "Plasma Mortar", "short": "Exploding plasma orbs", "desc": "Slow orbs that explode, damaging everything nearby.", "rp": 100},
+	"rail": {"name": "Rail Lance", "short": "Piercing hitscan slug", "desc": "Piercing hitscan slug. Slow but devastating.", "rp": 140},
 }
+const GUN_ORDER := ["pulse", "flak", "plasma", "rail"]
 
-## Turret weapons that can be bought and mounted on the port or starboard turret.
-const WEAPONS := {
-	"pulse": {"name": "Pulse Cannon", "desc": "Rapid energy bolts. Reliable all-rounder.", "cost": 0},
-	"flak": {"name": "Flak Cannon", "desc": "Short-range pellet bursts that shred swarms.", "cost": 450},
-	"plasma": {"name": "Plasma Mortar", "desc": "Slow orbs that explode, damaging everything nearby.", "cost": 650},
-	"rail": {"name": "Rail Lance", "desc": "Piercing hitscan slug. Slow but devastating.", "cost": 900},
+## Upgrades bought at homebase for each mothership. Level n+1 costs base * growth^n research
+## points (rounded to 5). Turret slots are capped by the ship's hardpoints.
+const SHIP_UPGRADES := {
+	"hull": {"name": "Hull Plating", "desc": "+15% max hull integrity", "base": 30, "growth": 1.6, "max": 5},
+	"shield": {"name": "Shield Capacitors", "desc": "+15% max shield", "base": 30, "growth": 1.6, "max": 5},
+	"engine": {"name": "Engine Tuning", "desc": "+8% speed and handling", "base": 35, "growth": 1.6, "max": 4},
+	"slots": {"name": "Turret Slot", "desc": "+1 auto turret slot. Slots launch empty; fill them from waystation shops.", "base": 80, "growth": 1.8, "max": -1},
 }
+const SHIP_UPGRADE_ORDER := ["hull", "shield", "engine", "slots"]
+
+## Research points for a dive: per 10 m of depth, per waystation reached and per nest destroyed.
+const RP_PER_10M := 1
+const RP_PER_STATION := 10
+const RP_PER_NEST := 2
+## Converting a version 1 save: lifetime credits earned per research point.
+const RP_LEGACY_RATE := 45.0
 
 var profile: Dictionary = {}
 var mouse_sensitivity := 0.0025
@@ -79,6 +79,10 @@ var ui_blocking := false
 var mission: Node = null
 ## The game root (scripts/main.gd), set when it starts.
 var main: Node = null
+## The save on disk is still in the old format: back it up before overwriting it.
+var _legacy_on_disk := false
+## Cheat (homebase cheat menu): every dive starts with this many credits. Not saved.
+var cheat_dive_credits := 0
 
 
 func _ready() -> void:
@@ -104,32 +108,65 @@ func sender_id() -> int:
 
 func default_profile() -> Dictionary:
 	return {
-		"credits": 0,
+		"version": PROFILE_VERSION,
+		"rp": 0,
+		"rp_total": 0,
 		"best_depth": 0,
 		"missions": 0,
-		"total_earned": 0,
-		"upgrades": {},
-		"weapons": ["pulse"],
-		"loadout": {"left": "pulse", "right": "pulse"},
+		"guns": ["pulse"],
+		"ships": {"prospector": {}},
+		"ship": "prospector",
 		"last_mission": {},
 	}
 
 
 func load_profile() -> void:
 	profile = default_profile()
+	_legacy_on_disk = false
 	if FileAccess.file_exists(save_path):
 		var f := FileAccess.open(save_path, FileAccess.READ)
 		if f:
 			var parsed: Variant = JSON.parse_string(f.get_as_text())
 			if parsed is Dictionary:
-				for k in parsed:
-					profile[k] = parsed[k]
+				if int((parsed as Dictionary).get("version", 1)) < PROFILE_VERSION:
+					profile = migrate_profile(parsed)
+					_legacy_on_disk = true
+				else:
+					for k in parsed:
+						profile[k] = parsed[k]
 	profile_changed.emit()
+
+
+## Convert a version 1 profile (credits and homebase upgrades) to research points. The old
+## upgrades no longer exist; lifetime earnings become research points and bought guns stay unlocked.
+func migrate_profile(old: Dictionary) -> Dictionary:
+	var p := default_profile()
+	p["best_depth"] = int(old.get("best_depth", 0))
+	p["missions"] = int(old.get("missions", 0))
+	var rp := int(round(float(old.get("total_earned", 0)) / RP_LEGACY_RATE))
+	p["rp"] = rp
+	p["rp_total"] = rp
+	var guns: Array = ["pulse"]
+	for w in old.get("weapons", []):
+		if GUNS.has(str(w)) and not str(w) in guns:
+			guns.append(str(w))
+	p["guns"] = guns
+	p["migrated"] = {"rp": rp, "guns": guns.size() - 1}
+	return p
 
 
 func save_profile() -> void:
 	if not multiplayer.is_server():
 		return
+	if _legacy_on_disk:
+		# Keep the old save next to the new one the first time it is overwritten.
+		_legacy_on_disk = false
+		var backup := save_path.get_basename() + "_v1_backup.json"
+		if FileAccess.file_exists(save_path) and not FileAccess.file_exists(backup):
+			var src := FileAccess.open(save_path, FileAccess.READ)
+			var dst := FileAccess.open(backup, FileAccess.WRITE)
+			if src and dst:
+				dst.store_string(src.get_as_text())
 	var f := FileAccess.open(save_path, FileAccess.WRITE)
 	if f:
 		f.store_string(JSON.stringify(profile, "\t"))
@@ -141,87 +178,217 @@ func reset_profile() -> void:
 	profile_changed.emit()
 
 
-func credits() -> int:
-	return int(profile.get("credits", 0))
+func rp() -> int:
+	return int(profile.get("rp", 0))
 
 
-func upgrade_level(id: String) -> int:
-	return int(profile.get("upgrades", {}).get(id, 0))
+func owns_gun(id: String) -> bool:
+	return id in profile.get("guns", [])
 
 
-## Price of the next level of an upgrade, or -1 when it is maxed out.
-func upgrade_cost(id: String) -> int:
-	var u: Dictionary = UPGRADES[id]
-	var lvl := upgrade_level(id)
-	if lvl >= int(u["max"]):
+func owns_ship(id: String) -> bool:
+	return (profile.get("ships", {}) as Dictionary).has(id)
+
+
+func selected_ship() -> String:
+	var id := str(profile.get("ship", "prospector"))
+	return id if owns_ship(id) and ShipTypes.exists(id) else "prospector"
+
+
+func ship_level(ship_id: String, upgrade: String) -> int:
+	return int((profile.get("ships", {}) as Dictionary).get(ship_id, {}).get(upgrade, 0))
+
+
+func ship_upgrade_max(ship_id: String, upgrade: String) -> int:
+	if upgrade == "slots":
+		var t := ShipTypes.get_type(ship_id)
+		return int(t["max_slots"]) - int(t["slots"])
+	return int(SHIP_UPGRADES[upgrade]["max"])
+
+
+## Research point price of the next level of a ship upgrade, or -1 when it is maxed out.
+func ship_upgrade_cost(ship_id: String, upgrade: String) -> int:
+	var lvl := ship_level(ship_id, upgrade)
+	if lvl >= ship_upgrade_max(ship_id, upgrade):
 		return -1
-	return int(round(float(u["base"]) * pow(1.65, lvl) / 10.0)) * 10
+	var u: Dictionary = SHIP_UPGRADES[upgrade]
+	return int(round(float(u["base"]) * pow(float(u["growth"]), lvl) / 5.0)) * 5
 
 
-func owns_weapon(id: String) -> bool:
-	return id in profile.get("weapons", [])
+## Auto turret slots of a ship (all empty at launch).
+func turret_slots(ship_id: String) -> int:
+	return int(ShipTypes.get_type(ship_id)["slots"]) + ship_level(ship_id, "slots")
 
 
-func request_buy_upgrade(id: String) -> void:
-	_buy_upgrade.rpc_id(1, id)
+func request_unlock_ship(id: String) -> void:
+	_unlock_ship.rpc_id(1, id)
 
 
-func request_buy_weapon(id: String) -> void:
-	_buy_weapon.rpc_id(1, id)
+func request_select_ship(id: String) -> void:
+	_select_ship.rpc_id(1, id)
 
 
-func request_equip(slot: String, weapon: String) -> void:
-	_equip_weapon.rpc_id(1, slot, weapon)
+func request_ship_upgrade(upgrade: String) -> void:
+	_ship_upgrade.rpc_id(1, upgrade)
+
+
+func request_unlock_gun(id: String) -> void:
+	_unlock_gun.rpc_id(1, id)
 
 
 @rpc("any_peer", "call_local", "reliable")
-func _buy_upgrade(id: String) -> void:
-	if not multiplayer.is_server() or not UPGRADES.has(id) or mission != null:
+func _unlock_ship(id: String) -> void:
+	if not multiplayer.is_server() or not ShipTypes.exists(id) or owns_ship(id) or mission != null:
 		return
-	var cost := upgrade_cost(id)
-	if cost < 0 or credits() < cost:
+	var cost := int(ShipTypes.TYPES[id]["cost"])
+	if rp() < cost:
 		return
-	profile["credits"] = credits() - cost
-	var ups: Dictionary = profile.get("upgrades", {})
-	ups[id] = upgrade_level(id) + 1
-	profile["upgrades"] = ups
+	profile["rp"] = rp() - cost
+	var ships: Dictionary = profile.get("ships", {})
+	ships[id] = {}
+	profile["ships"] = ships
+	profile["ship"] = id
 	_commit_profile()
 
 
 @rpc("any_peer", "call_local", "reliable")
-func _buy_weapon(id: String) -> void:
-	if not multiplayer.is_server() or not WEAPONS.has(id) or owns_weapon(id) or mission != null:
+func _select_ship(id: String) -> void:
+	if not multiplayer.is_server() or not owns_ship(id) or mission != null:
 		return
-	var cost := int(WEAPONS[id]["cost"])
-	if credits() < cost:
+	profile["ship"] = id
+	_commit_profile()
+
+
+@rpc("any_peer", "call_local", "reliable")
+func _ship_upgrade(upgrade: String) -> void:
+	if not multiplayer.is_server() or not SHIP_UPGRADES.has(upgrade) or mission != null:
 		return
-	profile["credits"] = credits() - cost
-	var owned: Array = profile.get("weapons", [])
+	var id := selected_ship()
+	var cost := ship_upgrade_cost(id, upgrade)
+	if cost < 0 or rp() < cost:
+		return
+	profile["rp"] = rp() - cost
+	var ships: Dictionary = profile.get("ships", {})
+	var levels: Dictionary = ships.get(id, {})
+	levels[upgrade] = ship_level(id, upgrade) + 1
+	ships[id] = levels
+	profile["ships"] = ships
+	_commit_profile()
+
+
+@rpc("any_peer", "call_local", "reliable")
+func _unlock_gun(id: String) -> void:
+	if not multiplayer.is_server() or not GUNS.has(id) or owns_gun(id) or mission != null:
+		return
+	var cost := int(GUNS[id]["rp"])
+	if rp() < cost:
+		return
+	profile["rp"] = rp() - cost
+	var owned: Array = profile.get("guns", [])
 	owned.append(id)
-	profile["weapons"] = owned
+	profile["guns"] = owned
 	_commit_profile()
 
 
-@rpc("any_peer", "call_local", "reliable")
-func _equip_weapon(slot: String, id: String) -> void:
-	if not multiplayer.is_server() or not slot in ["left", "right"] or not owns_weapon(id):
-		return
-	var loadout: Dictionary = profile.get("loadout", {})
-	loadout[slot] = id
-	profile["loadout"] = loadout
-	_commit_profile()
+## Research points earned by a dive (see the RP_* constants).
+static func dive_rp(depth: int, stations: int, nests: int) -> Dictionary:
+	var by_depth := int(depth / 10) * RP_PER_10M
+	var by_stations := stations * RP_PER_STATION
+	var by_nests := nests * RP_PER_NEST
+	return {"depth": by_depth, "stations": by_stations, "nests": by_nests, "total": by_depth + by_stations + by_nests}
 
 
-## Server: bank the result of a finished mission.
+## Server: bank the result of a finished mission (research points; the dive's credits are gone).
 func apply_mission_result(result: Dictionary) -> void:
 	if not multiplayer.is_server():
 		return
-	profile["credits"] = credits() + int(result.get("earned", 0))
-	profile["total_earned"] = int(profile.get("total_earned", 0)) + int(result.get("earned", 0))
+	var earned := int(result.get("rp", 0))
+	profile["rp"] = rp() + earned
+	profile["rp_total"] = int(profile.get("rp_total", 0)) + earned
 	profile["best_depth"] = maxi(int(profile.get("best_depth", 0)), int(result.get("depth", 0)))
 	profile["missions"] = int(profile.get("missions", 0)) + 1
 	profile["last_mission"] = result
+	profile.erase("migrated")
 	_commit_profile()
+
+
+# --- Cheats ------------------------------------------------------------------------------------
+
+## The homebase cheat menu is for testing: it only exists in debug builds (running from the editor
+## or the Godot executable), and only the host can use it.
+func cheats_allowed() -> bool:
+	return OS.is_debug_build()
+
+
+## Where the profile from before the first cheat is kept (next to the save).
+func cheat_backup_path() -> String:
+	return save_path.get_basename() + "_precheat.json"
+
+
+func has_cheat_backup() -> bool:
+	return FileAccess.file_exists(cheat_backup_path())
+
+
+## Host: apply a cheat. Kinds: "rp" (add `amount` research points), "unlock_ships", "unlock_guns",
+## "max_ship" (the selected ship's upgrades), "max_all" (every owned ship's upgrades), "fresh" (a
+## brand-new profile) and "restore" (the profile from before the first cheat).
+func request_cheat(kind: String, amount := 0) -> void:
+	_cheat.rpc_id(1, kind, amount)
+
+
+@rpc("any_peer", "call_local", "reliable")
+func _cheat(kind: String, amount: int) -> void:
+	if not multiplayer.is_server() or sender_id() != 1 or not cheats_allowed() or mission != null:
+		return
+	if kind == "restore":
+		_restore_cheat_backup()
+		return
+	# Keep the real profile the first time a cheat changes it.
+	if not has_cheat_backup():
+		var f := FileAccess.open(cheat_backup_path(), FileAccess.WRITE)
+		if f:
+			f.store_string(JSON.stringify(profile, "\t"))
+	match kind:
+		"rp":
+			profile["rp"] = rp() + maxi(amount, 0)
+		"unlock_ships":
+			var ships: Dictionary = profile.get("ships", {})
+			for id: String in ShipTypes.ORDER:
+				if not ships.has(id):
+					ships[id] = {}
+			profile["ships"] = ships
+		"unlock_guns":
+			profile["guns"] = GUN_ORDER.duplicate()
+		"max_ship", "max_all":
+			var ships: Dictionary = profile.get("ships", {})
+			for id: String in ships:
+				if kind == "max_ship" and id != selected_ship():
+					continue
+				var levels: Dictionary = ships[id]
+				for up: String in SHIP_UPGRADE_ORDER:
+					levels[up] = ship_upgrade_max(id, up)
+				ships[id] = levels
+			profile["ships"] = ships
+		"fresh":
+			profile = default_profile()
+		_:
+			return
+	_commit_profile()
+
+
+func _restore_cheat_backup() -> void:
+	var path := cheat_backup_path()
+	if not FileAccess.file_exists(path):
+		return
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(path))
+	if not parsed is Dictionary:
+		return
+	var p := default_profile()
+	for k in parsed:
+		p[k] = parsed[k]
+	profile = p
+	_commit_profile()
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
 
 
 func _commit_profile() -> void:
@@ -240,37 +407,44 @@ func sync_profile(p: Dictionary) -> void:
 	profile_changed.emit()
 
 
-## Mission stats derived from the purchased upgrades.
-func ship_stats() -> Dictionary:
-	var loadout: Dictionary = profile.get("loadout", {})
+## Mission stats for a ship (the selected one by default): its type's base stats plus the
+## homebase upgrades bought for it. Waystation items change them further during a dive.
+func ship_stats(ship_id := "") -> Dictionary:
+	var id := ship_id if ShipTypes.exists(ship_id) else selected_ship()
+	var t := ShipTypes.get_type(id)
+	var hull_l := ship_level(id, "hull")
+	var shield_l := ship_level(id, "shield")
+	var engine_l := ship_level(id, "engine")
 	return {
-		"max_hull": 400.0 + 80.0 * upgrade_level("hull"),
-		"max_shield": 120.0 + 40.0 * upgrade_level("shield_cap"),
-		"shield_regen": 9.0 * (1.0 + 0.25 * upgrade_level("shield_regen")),
-		"shield_reboot": maxf(4.0, 9.0 - upgrade_level("shield_regen")),
-		"max_speed": 9.0 * (1.0 + 0.12 * upgrade_level("engine")),
-		"accel": 2.6 * (1.0 + 0.15 * upgrade_level("engine")),
-		"yaw_rate": deg_to_rad(26.0) * (1.0 + 0.1 * upgrade_level("engine")),
-		"vert_speed": 5.0 * (1.0 + 0.1 * upgrade_level("engine")),
-		"max_fuel": 100.0 + 30.0 * upgrade_level("fuel_tank"),
-		"fuel_burn": pow(0.88, upgrade_level("fuel_eff")),
-		"collateral": 0.35 * pow(0.85, upgrade_level("hardening")),
-		"turret_damage": 1.0 + 0.2 * upgrade_level("turret_dmg"),
-		"turret_rate": 1.0 + 0.15 * upgrade_level("turret_rate"),
-		"mining_power": 24.0 * (1.0 + 0.3 * upgrade_level("mining")),
-		"mining_vs_alien": 1.0 + 0.5 * upgrade_level("laser_overcharge"),
-		"edge_cannons": upgrade_level("auto_cannons"),
+		"ship": id,
+		"base_hull": float(t["hull"]),
+		"base_shield": float(t["shield"]),
+		"max_hull": float(t["hull"]) * (1.0 + 0.15 * hull_l),
+		"max_shield": float(t["shield"]) * (1.0 + 0.15 * shield_l),
+		"shield_regen": 9.0,
+		"shield_reboot": 9.0,
+		"max_speed": float(t["speed"]) * (1.0 + 0.08 * engine_l),
+		"accel": float(t["accel"]) * (1.0 + 0.1 * engine_l),
+		"yaw_rate": deg_to_rad(float(t["yaw"])) * (1.0 + 0.06 * engine_l),
+		"vert_speed": float(t["vert"]) * (1.0 + 0.06 * engine_l),
+		"max_fuel": 100.0,
+		"fuel_burn": 1.0,
+		"collateral": 0.35,
+		"turret_damage": 1.0,
+		"turret_rate": 1.0,
+		"mining_power": 24.0 * float(t["mining"]),
+		"mining_vs_alien": float(t["laser_vs_alien"]),
+		"overcharge_step": 0.5 * float(t["laser_vs_alien"]),
 		"mining_range": 48.0,
-		"tractor_range": 42.0 * (1.0 + 0.25 * upgrade_level("tractor")),
-		"scout_hp": 70.0 + 30.0 * upgrade_level("scout_armor"),
-		"scout_damage": 7.0 * (1.0 + 0.25 * upgrade_level("scout_guns")),
-		"scout_cargo": 40.0 + 20.0 * upgrade_level("scout_cargo"),
-		"scout_speed": 17.0 * (1.0 + 0.12 * upgrade_level("scout_engine")),
-		"blaster_damage": 20.0 * (1.0 + 0.25 * upgrade_level("blaster")),
-		"repair_rate": 14.0 * (1.0 + 0.3 * upgrade_level("toolkit")),
-		"crew_hp": 100.0 + 25.0 * upgrade_level("suit"),
-		"weapon_left": str(loadout.get("left", "pulse")),
-		"weapon_right": str(loadout.get("right", "pulse")),
+		"tractor_range": 42.0,
+		"scout_hp": 70.0 * float(t["scout_hp"]),
+		"scout_damage": 7.0 * float(t["scout_damage"]),
+		"scout_cargo": 40.0,
+		"scout_speed": 17.0 * float(t["scout_speed"]),
+		"blaster_damage": 20.0,
+		"repair_rate": 14.0,
+		"crew_hp": 100.0,
+		"turret_slots": turret_slots(id),
 	}
 
 

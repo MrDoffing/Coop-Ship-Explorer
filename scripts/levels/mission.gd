@@ -6,7 +6,9 @@ extends Node3D
 ## fuel crystals (in the scout-only side tunnels), alien nests and free-roaming aliens, keeps a
 ## director spawning ambushes that get nastier with depth, and ends the mission when the
 ## mothership is destroyed (or the host aborts). Clients rebuild the cave locally from the seed,
-## including the waystations, whose defences shoot down any alien that comes near.
+## including the waystations, whose defences shoot down any alien that comes near. The dive pays
+## out research points (depth, waystations reached, nests); the credits mined are only good for
+## waystation shops during the dive.
 
 const AHEAD := 230.0
 const BEHIND := 90.0
@@ -18,7 +20,8 @@ var stats: Dictionary = {}
 var best_depth := 0
 var cave: CaveGen
 var ship: Mothership
-var scout: Scout
+## The mothership's scouts (one per scout bay), by index.
+var scouts: Array[Scout] = []
 var local_player: CrewMember
 var hud: Hud
 var projectiles: Projectiles
@@ -228,8 +231,26 @@ func _spawn_ship(data: Variant) -> Node:
 		return s
 	var sc := Scout.new()
 	sc.setup(d)
-	scout = sc
+	scouts.append(sc)
+	scouts.sort_custom(func(a: Scout, b: Scout): return a.index < b.index)
 	return sc
+
+
+## The scout launched from a scout bay station, or null.
+func scout_at(station_id: String) -> Scout:
+	for sc in scouts:
+		if is_instance_valid(sc) and sc.station_id == station_id:
+			return sc
+	return null
+
+
+## Scouts that are out flying.
+func flying_scouts() -> Array[Scout]:
+	var out: Array[Scout] = []
+	for sc in scouts:
+		if is_instance_valid(sc) and sc.state == Scout.State.FLYING:
+			out.append(sc)
+	return out
 
 
 func _spawn_enemy(data: Variant) -> Node:
@@ -280,8 +301,15 @@ func spawn_pickup(kind: String, pos: Vector3, vel: Vector3, value: int, fuel: fl
 func _server_start() -> void:
 	for n in range(-1, 5):
 		_ensure_chunk(n)
-	ship_spawner.spawn({"t": "ship", "stats": stats, "pos": Vector3(0, -1.0, 0)})
-	ship_spawner.spawn({"t": "scout", "stats": stats})
+	var ship_id := str(stats.get("ship", "prospector"))
+	ship_spawner.spawn({"t": "ship", "ship": ship_id, "stats": stats, "pos": Vector3(0, -1.0, 0)})
+	if Game.cheats_allowed() and Game.cheat_dive_credits > 0:
+		ship.credits = Game.cheat_dive_credits
+	var layout := ShipTypes.get_type(ship_id)
+	var i_scout := 0
+	for sid: String in layout["scouts"]:
+		ship_spawner.spawn({"t": "scout", "stats": stats, "index": i_scout, "station": sid, "style": layout["scout_style"]})
+		i_scout += 1
 	var i := 0
 	var ids := Net.roster.keys()
 	ids.sort()
@@ -337,6 +365,8 @@ func _physics_process(delta: float) -> void:
 			started = true
 			ship.frozen = false
 			ship.notify.rpc("Systems online. Take the pilot seat and dive!", 0)
+			if Game.cheats_allowed() and Game.cheat_dive_credits > 0:
+				ship.notify.rpc("Cheat: this dive starts with %d credits" % Game.cheat_dive_credits, 1)
 			_tutorial.rpc()
 		return
 	_stream_chunks()
@@ -359,9 +389,9 @@ func _stream_chunks() -> void:
 	var s := -ship.global_position.z
 	var s_lo := s - BEHIND
 	var s_hi := s + AHEAD
-	# Keep the cave around the scout too when it scouts far ahead (or behind).
-	if scout and scout.state == Scout.State.FLYING:
-		var ss := -scout.global_position.z
+	# Keep the cave around the scouts too when they scout far ahead (or behind).
+	for sc in flying_scouts():
+		var ss := -sc.global_position.z
 		s_lo = minf(s_lo, ss - 60.0)
 		s_hi = maxf(s_hi, ss + 120.0)
 	var lo := int(floor(s_lo / CaveGen.CHUNK_LEN))
@@ -378,8 +408,8 @@ func _stream_chunks() -> void:
 
 func _despawn_far() -> void:
 	var s := -ship.global_position.z
-	if scout and scout.state == Scout.State.FLYING:
-		s = minf(s, -scout.global_position.z)
+	for sc in flying_scouts():
+		s = minf(s, -sc.global_position.z)
 	for root: Node3D in [enemy_root, mineral_root, pickup_root]:
 		for c in root.get_children():
 			var n := c as Node3D
@@ -461,7 +491,7 @@ func _populate(chunk: CaveChunk) -> void:
 			nest_here = true
 	if not nest_here and n >= 4 and rng.randf() < clampf((s0 - 200.0) / 1400.0, 0.0, 0.3):
 		nest_here = true
-	if nest_here and cave.near_station(depth_mid, 90.0):
+	if nest_here and cave.near_station(depth_mid, 140.0):
 		nest_here = false
 	if nest_here:
 		_place_nest(verts, norms, rng, depth_mid)
@@ -471,7 +501,7 @@ func _populate(chunk: CaveChunk) -> void:
 		var count := rng.randi_range(0, 1) + int(depth_mid / 350.0)
 		for k in mini(count, 4):
 			var s := rng.randf_range(s0, s1)
-			if cave.near_station(s, 90.0):
+			if cave.near_station(s, 140.0):
 				continue
 			var c := cave.center3(s)
 			var r := cave.radius(s) * 0.5
@@ -582,7 +612,9 @@ func _director(delta: float) -> void:
 	var s := -ship.global_position.z
 	var ahead := randf() < 0.7
 	var sp := s + (randf_range(90.0, 130.0) if ahead else -randf_range(60.0, 80.0))
-	if cave.near_station(sp, 85.0):
+	# Bulkheads seal the tunnel: never spawn behind the last waystation or near the next one.
+	var behind: Dictionary = cave.station(ship.gate_k) if ship.gate_k >= 0 else {}
+	if cave.near_station(sp, 140.0) or (not behind.is_empty() and sp < float(behind["s_exit"]) + 40.0):
 		_director_t = 8.0
 		return
 	var c := cave.center3(sp)
@@ -598,8 +630,9 @@ func _director(delta: float) -> void:
 		spawn_alien(kind, p, _hp_mult(s), _dmg_mult(s))
 
 
-## Waystation defences: one shot every quarter second at the nearest alien inside a station's
-## safe zone (hull-latched ones included).
+## Waystation defences: one shot every quarter second at the alien nearest to a station's pad
+## inside its safe zone (the hall and its approach tunnels, hull-latched aliens included), fired
+## from the closest of its guard turrets.
 func _station_defense(delta: float) -> void:
 	_defense_t -= delta
 	if _defense_t > 0.0:
@@ -609,22 +642,32 @@ func _station_defense(delta: float) -> void:
 	if aliens.is_empty():
 		return
 	var s := -ship.global_position.z
-	for st in cave.stations_in(s - 200.0, s + 200.0):
+	for st in cave.stations_in(s - 250.0, s + 250.0):
 		var xf: Transform3D = st["xform"]
-		var center := xf * StationBuilder.SAFE_CENTER
+		var inv: Transform3D = st["inv"]
 		var best: Alien = null
-		var best_d := StationBuilder.SAFE_RADIUS
+		var best_d := INF
 		for a in aliens:
 			var alien := a as Alien
 			if alien == null or alien.hp <= 0.0 or alien.is_queued_for_deletion():
 				continue
-			var d := alien.global_position.distance_to(center)
+			var l := inv * alien.global_position
+			if l.x < StationBuilder.SAFE_MIN.x or l.x > StationBuilder.SAFE_MAX.x or l.y < StationBuilder.SAFE_MIN.y \
+					or l.y > StationBuilder.SAFE_MAX.y or l.z < StationBuilder.SAFE_MIN.z or l.z > StationBuilder.SAFE_MAX.z:
+				continue
+			var d := l.length()
 			if d < best_d:
 				best_d = d
 				best = alien
 		if best:
-			var right := (xf.affine_inverse() * best.global_position).x >= 0.0
-			var from := xf * (StationBuilder.GUARDS[1 if right else 0] as Vector3)
+			var l := inv * best.global_position
+			var from := xf * (StationBuilder.GUARDS[0] as Vector3)
+			var guard_d := INF
+			for g: Vector3 in StationBuilder.GUARDS:
+				var d := g.distance_to(l)
+				if d < guard_d:
+					guard_d = d
+					from = xf * g
 			fx_event.rpc("station_zap", best.global_position, from)
 			best.take_damage(99999.0, {"source": "station"})
 
@@ -648,17 +691,22 @@ func abort_mission() -> void:
 	_finish(false)
 
 
+## Research points this dive has earned so far (see Game.dive_rp).
+func dive_rp() -> Dictionary:
+	return Game.dive_rp(int(ship.depth) if ship else 0, ship.stations_docked if ship else 0, nests_destroyed)
+
+
 func _finish(destroyed: bool) -> void:
 	if not is_inside_tree():
 		return
 	var depth := int(ship.depth) if ship else 0
-	var minerals := ship.credits if ship else 0
-	var depth_bonus := int(depth * 0.5)
-	var nest_bonus := nests_destroyed * 60
+	var rp := dive_rp()
 	Game.apply_mission_result({
-		"destroyed": destroyed, "depth": depth, "minerals": minerals, "depth_bonus": depth_bonus,
-		"nests": nests_destroyed, "nest_bonus": nest_bonus, "kills": kills,
-		"earned": minerals + depth_bonus + nest_bonus, "record": depth > best_depth,
+		"destroyed": destroyed, "depth": depth, "ship": str(stats.get("ship", "prospector")),
+		"stations": ship.stations_docked if ship else 0, "nests": nests_destroyed, "kills": kills,
+		"mined": int(ship.credits) if ship else 0, "ore": ship.ore.duplicate() if ship else {},
+		"rp_depth": int(rp["depth"]), "rp_stations": int(rp["stations"]), "rp_nests": int(rp["nests"]),
+		"rp": int(rp["total"]), "record": depth > best_depth,
 	})
 	Game.main.return_to_homebase()
 
@@ -676,10 +724,11 @@ func _show_end(destroyed: bool) -> void:
 	if hud == null:
 		return
 	var depth := int(ship.depth) if ship else 0
+	var rp := int(dive_rp()["total"])
 	if destroyed:
-		hud.show_banner("MOTHERSHIP DESTROYED", "Depth reached: %d m - the crew is evacuated to homebase" % depth)
+		hud.show_banner("MOTHERSHIP DESTROYED", "Depth reached: %d m  -  +%d research points\nThe crew is evacuated to homebase" % [depth, rp])
 	else:
-		hud.show_banner("MISSION ABORTED", "Returning to homebase with the haul", UiTheme.WARN)
+		hud.show_banner("MISSION ABORTED", "Returning to homebase  -  +%d research points" % rp, UiTheme.WARN)
 
 
 @rpc("authority", "call_local", "reliable")
@@ -690,6 +739,7 @@ func _tutorial() -> void:
 		["Walk to the PILOT seat at the front and press E. W raises the throttle.", 0],
 		["The mining laser breaks crystals; the tractor field collects the chunks.", 0],
 		["Fuel crystals grow in narrow side tunnels - only the scout fits.", 0],
+		["Mined credits buy supplies in the waystation shops. Land (L) at each waystation to pass its bulkheads.", 0],
 	]
 	for i in tips.size():
 		get_tree().create_timer(2.0 + i * 5.0).timeout.connect(func():

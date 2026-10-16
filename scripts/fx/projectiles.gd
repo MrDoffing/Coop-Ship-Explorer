@@ -89,7 +89,9 @@ func _physics_process(delta: float) -> void:
 		return
 	var space := get_world_3d().direct_space_state
 	var ship: Mothership = Game.mission.ship if Game.mission else null
-	var scout: Scout = Game.mission.scout if Game.mission else null
+	var scouts: Array[Scout] = []
+	if Game.mission:
+		scouts = (Game.mission as MissionLevel).flying_scouts()
 	for i in range(_shots.size() - 1, -1, -1):
 		var s := _shots[i]
 		s["life"] = float(s["life"]) - delta
@@ -102,7 +104,7 @@ func _physics_process(delta: float) -> void:
 		var to := from + vel * delta
 		var done := false
 		if kind == "spit":
-			done = _spit_step(s, from, to, ship, scout, space)
+			done = _spit_step(s, from, to, ship, scouts, space)
 		else:
 			var q := PhysicsRayQueryParameters3D.create(from, to, MASK_SCOUT if kind == "scout" else MASK_SHIP)
 			q.collide_with_areas = true
@@ -122,7 +124,7 @@ func _physics_process(delta: float) -> void:
 			(s["node"] as Node3D).global_transform = _xform(to, vel)
 
 
-func _spit_step(s: Dictionary, from: Vector3, to: Vector3, ship: Mothership, scout: Scout, space: PhysicsDirectSpaceState3D) -> bool:
+func _spit_step(s: Dictionary, from: Vector3, to: Vector3, ship: Mothership, scouts: Array[Scout], space: PhysicsDirectSpaceState3D) -> bool:
 	if ship and ship.alive:
 		var hit_pos: Variant = ship.shield_hit(from, to)
 		if hit_pos != null:
@@ -130,7 +132,7 @@ func _spit_step(s: Dictionary, from: Vector3, to: Vector3, ship: Mothership, sco
 				ship.apply_damage(float(s["dmg"]), hit_pos, "spit")
 			Fx.sparks(hit_pos, KINDS["spit"]["color"], 10, 6.0)
 			return true
-	if scout and scout.state == Scout.State.FLYING:
+	for scout in scouts:
 		var d := _seg_point_dist(from, to, scout.global_position)
 		if d < 1.8:
 			if s["auth"]:

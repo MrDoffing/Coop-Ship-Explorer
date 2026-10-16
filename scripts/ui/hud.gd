@@ -1,8 +1,8 @@
 class_name Hud
 extends CanvasLayer
-## In-mission HUD: ship systems, depth and haul, crew roster, interaction prompts, station
-## read-outs, alerts, the scout's dock marker, waystation markers, carried crates and
-## end-of-mission banners.
+## In-mission HUD: ship systems (percentage inside each bar, absolute value beside it), depth,
+## credits and research points, crew roster, interaction prompts, station read-outs, alerts, the
+## scouts' dock markers, waystation markers, carried crates and end-of-mission banners.
 
 ## Waystations closer than this get a marker on screen.
 const STATION_MARKER_RANGE := 320.0
@@ -11,6 +11,7 @@ var _root: Control
 var _bars: Dictionary = {}
 var _texts: Dictionary = {}
 var _depth: Label
+var _ship_title: Label
 var _haul: Label
 var _popup: Label
 var _popup_value := 0
@@ -75,21 +76,23 @@ func _panel(pos: Vector2, min_size: Vector2) -> VBoxContainer:
 
 
 func _build_ship_panel() -> void:
-	var v := _panel(Vector2(16, 16), Vector2(330, 0))
-	v.add_child(UiTheme.label(ShipBuilder.NAME, 20, UiTheme.ACCENT))
+	var v := _panel(Vector2(16, 16), Vector2(380, 0))
+	_ship_title = UiTheme.label("", 20, UiTheme.ACCENT)
+	v.add_child(_ship_title)
 	for row: Array in [["hull", "HULL", Color(1.0, 0.45, 0.3)], ["shield", "SHIELD", Color(0.35, 0.85, 1.0)],
 			["fuel", "FUEL", Color(1.0, 0.65, 0.2)], ["engine", "ENGINE", Color(0.5, 1.0, 0.55)],
 			["weapons", "WEAPONS", Color(0.5, 1.0, 0.55)], ["blast", "BLAST", Color(0.95, 0.35, 0.3)]]:
 		var h := HBoxContainer.new()
+		h.add_theme_constant_override("separation", 8)
 		var name_l := UiTheme.label(row[1], 14, UiTheme.MUTED)
-		name_l.custom_minimum_size.x = 76
+		name_l.custom_minimum_size.x = 70
 		h.add_child(name_l)
-		var b := UiTheme.bar(row[2], 14.0)
+		var b := UiTheme.stat_bar(row[2], 18.0)
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		h.add_child(b)
 		var t := UiTheme.label("", 14)
-		t.custom_minimum_size.x = 86
+		t.custom_minimum_size.x = 92
 		t.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 		h.add_child(t)
 		v.add_child(h)
@@ -160,12 +163,15 @@ func _build_bottom() -> void:
 	_tool_label = UiTheme.label("", 18, UiTheme.ACCENT)
 	v.add_child(_tool_label)
 	var h := HBoxContainer.new()
+	h.add_theme_constant_override("separation", 8)
 	h.add_child(UiTheme.label("HEALTH", 14, UiTheme.MUTED))
-	_hp_bar = UiTheme.bar(Color(0.4, 1.0, 0.5), 16.0)
+	_hp_bar = UiTheme.stat_bar(Color(0.4, 1.0, 0.5), 18.0)
 	_hp_bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_hp_bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	h.add_child(_hp_bar)
 	_hp_text = UiTheme.label("", 14)
+	_hp_text.custom_minimum_size.x = 76
+	_hp_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	h.add_child(_hp_text)
 	v.add_child(h)
 
@@ -323,25 +329,27 @@ func _process(delta: float) -> void:
 
 
 func _update_ship(ship: Mothership, mission: MissionLevel) -> void:
-	_set_bar("hull", ship.hull / ship.max_hull, "%d / %d" % [int(ship.hull), int(ship.max_hull)])
+	_ship_title.text = str(ship.layout.get("name", "MOTHERSHIP")).to_upper()
+	_set_bar("hull", ship.hull / ship.max_hull, _pct(ship.hull, ship.max_hull), "%d / %d" % [int(ship.hull), int(ship.max_hull)])
 	if ship.shield_down:
-		_set_bar("shield", 0.0, "DOWN %ds" % int(ceil(ship.shield_reboot)) if ship.fuel > 0.0 else "NO FUEL")
+		_set_bar("shield", 0.0, "DOWN", "reboot %d s" % int(ceil(ship.shield_reboot)) if ship.fuel > 0.0 else "NO FUEL")
 		(_texts["shield"] as Label).add_theme_color_override("font_color", UiTheme.DANGER)
 	else:
-		_set_bar("shield", ship.shield / ship.max_shield, "%d%%" % int(100.0 * ship.shield / ship.max_shield))
+		_set_bar("shield", ship.shield / ship.max_shield, _pct(ship.shield, ship.max_shield), "%d / %d" % [int(ship.shield), int(ship.max_shield)])
 		(_texts["shield"] as Label).add_theme_color_override("font_color", UiTheme.TEXT)
-	_set_bar("fuel", ship.fuel / ship.max_fuel, "%d%%" % int(100.0 * ship.fuel / ship.max_fuel))
+	_set_bar("fuel", ship.fuel / ship.max_fuel, _pct(ship.fuel, ship.max_fuel), "%d / %d" % [int(ship.fuel), int(ship.max_fuel)])
 	(_texts["fuel"] as Label).add_theme_color_override("font_color", UiTheme.DANGER if ship.fuel < ship.max_fuel * 0.2 else UiTheme.TEXT)
 	if ship.blast_cd <= 0.0:
-		_set_bar("blast", 1.0, "READY")
+		_set_bar("blast", 1.0, "READY", "READY")
 		(_texts["blast"] as Label).add_theme_color_override("font_color", UiTheme.GOOD)
 	else:
-		_set_bar("blast", 1.0 - ship.blast_cd / Mothership.BLAST_COOLDOWN, "%d s" % int(ceil(ship.blast_cd)))
+		var charged := 1.0 - ship.blast_cd / Mothership.BLAST_COOLDOWN
+		_set_bar("blast", charged, "%d%%" % int(charged * 100.0), "%d s" % int(ceil(ship.blast_cd)))
 		(_texts["blast"] as Label).add_theme_color_override("font_color", UiTheme.MUTED)
 	for sys: String in ["engine", "weapons"]:
 		var hpv := ship.system_hp(sys)
 		var online := ship.system_online(sys)
-		_set_bar(sys, hpv / 100.0, ("%d%%" % int(hpv)) if online else "OFFLINE")
+		_set_bar(sys, hpv / 100.0, _pct(hpv, 100.0) if online else "OFFLINE", "%d / 100" % int(hpv))
 		var col := UiTheme.TEXT if online else UiTheme.DANGER
 		if online and hpv < 50.0:
 			col = UiTheme.WARN
@@ -356,12 +364,19 @@ func _update_ship(ship: Mothership, mission: MissionLevel) -> void:
 	_dock_status.visible = ship.landing != Mothership.Dock.FLYING
 	var record := "" if mission.best_depth <= 0 else "   (record %d m)" % mission.best_depth
 	_depth.text = "DEPTH %d m%s" % [int(ship.depth), record]
-	_haul.text = "Haul: %d CR" % ship.credits
+	_haul.text = "Credits: %d CR    Research: +%d RP" % [ship.credits, int(mission.dive_rp()["total"])]
 
 
-func _set_bar(id: String, value: float, text: String) -> void:
-	(_bars[id] as ProgressBar).value = clampf(value, 0.0, 1.0)
-	(_texts[id] as Label).text = text
+## Set a bar's fill, the read-out centred in it and the value beside it.
+func _set_bar(id: String, value: float, inside: String, beside: String) -> void:
+	var b := _bars[id] as ProgressBar
+	b.value = clampf(value, 0.0, 1.0)
+	(b.get_node("Pct") as Label).text = inside
+	(_texts[id] as Label).text = beside
+
+
+static func _pct(value: float, max_value: float) -> String:
+	return "%d%%" % int(round(100.0 * clampf(value / maxf(max_value, 0.001), 0.0, 1.0)))
 
 
 func _update_crew(ship: Mothership) -> void:
@@ -374,7 +389,7 @@ func _update_crew(ship: Mothership) -> void:
 		if not p.alive:
 			where = "knocked out"
 		elif p.station != "":
-			where = ShipBuilder.STATION_NAMES[p.station]
+			where = ship.station_name(p.station)
 		elif not Mothership.is_aboard(p.position):
 			where = "at the waystation"
 		lines.append("%s%s - %s" % [p.display_name, " [bot]" if p.bot else "", where])
@@ -403,7 +418,8 @@ func _update_player(player: CrewMember, ship: Mothership, _delta: float) -> void
 		_prompt.text = ""
 		return
 	_hp_bar.value = player.hp / player.max_hp
-	_hp_text.text = " %d" % int(player.hp)
+	(_hp_bar.get_node("Pct") as Label).text = _pct(player.hp, player.max_hp)
+	_hp_text.text = "%d / %d" % [int(maxf(player.hp, 0.0)), int(player.max_hp)]
 	_tool_label.text = "BLASTER  [1]" if player.tool == 0 else "TOOLKIT  [2]"
 	_tool_label.visible = player.station == "" and player.carrying == null
 	_carry_label.visible = player.carrying != null and player.alive
@@ -421,7 +437,7 @@ func _update_player(player: CrewMember, ship: Mothership, _delta: float) -> void
 		show_banner("", "")
 	if player.alive:
 		_prompt.text = player.prompt if player.station == "" else ""
-	_crosshair.visible = player.alive and (player.station == "" or player.station in ["gun_l", "gun_r", "mining", "scout"])
+	_crosshair.visible = player.alive and (player.station == "" or ship.is_turret_station(player.station) or ship.is_scout_station(player.station))
 
 
 func _update_station(player: CrewMember, ship: Mothership, mission: MissionLevel) -> void:
@@ -429,8 +445,8 @@ func _update_station(player: CrewMember, ship: Mothership, mission: MissionLevel
 		_station_panel.visible = false
 		return
 	_station_panel.visible = true
-	_station_title.text = ShipBuilder.STATION_NAMES[player.station].to_upper()
-	match player.station:
+	_station_title.text = ship.station_name(player.station).to_upper()
+	match ship.station_kind(player.station):
 		"pilot":
 			var speed := ship.velocity.length()
 			var state := "ENGINE OFFLINE" if not ship.engine_online else ("LOW POWER (no fuel)" if ship.fuel <= 0.0 else "")
@@ -441,6 +457,8 @@ func _update_station(player: CrewMember, ship: Mothership, mission: MissionLevel
 					var st := ship.nearest_station(Mothership.LAND_RANGE)
 					if not st.is_empty():
 						_station_info.text += "\n%s in range - press L to land" % st["name"]
+						if ship.in_hall(st):
+							_station_info.text += "\nExit bulkhead sealed until you land"
 				Mothership.Dock.APPROACH:
 					_station_info.text = "Docking approach on autopilot..."
 				Mothership.Dock.LANDED:
@@ -449,16 +467,16 @@ func _update_station(player: CrewMember, ship: Mothership, mission: MissionLevel
 				Mothership.Dock.LIFTOFF:
 					_station_info.text = "Lifting off..."
 			_station_help.text = "W/S throttle   A/D turn   Space/Ctrl up/down\nT autopilot   X full stop   B emergency blast\nL land at / lift off from a waystation\nMouse: look around   E: leave"
-		"gun_l", "gun_r":
-			var w := str(ship.stats["weapon_left" if player.station == "gun_l" else "weapon_right"])
-			_station_info.text = "%s%s" % [Game.WEAPONS[w]["name"], "" if ship.weapons_online else "\nWEAPONS OFFLINE - needs repair"]
+		"gun":
+			var w := ship.gun_weapon(player.station)
+			_station_info.text = "%s%s" % [Game.GUNS[w]["name"], "" if ship.weapons_online else "\nWEAPONS OFFLINE - needs repair"]
 			_station_help.text = "Mouse: aim   LMB: fire   RMB: zoom   E: leave"
-		"mining":
-			var reach := "Beam active" if ship.mining_on else "Hold LMB to fire the mining laser"
+		"laser":
+			var reach := "Beam active" if ship.laser_on(player.station) else "Hold LMB to fire the mining laser"
 			_station_info.text = "%s%s" % [reach, "" if ship.weapons_online else "\nWEAPONS OFFLINE - needs repair"]
 			_station_help.text = "Aim at crystal deposits on the walls.\nChunks fly into the tractor field.   E: leave"
 		"scout":
-			var scout := mission.scout
+			var scout := mission.scout_at(player.station)
 			if scout:
 				_station_info.text = "Hull %d/%d   Fuel cargo %d/%d" % [int(scout.hp), int(scout.max_hp), int(scout.cargo), int(scout.max_cargo)]
 			_station_help.text = "WASD move   Space/Ctrl up/down   Shift boost\nMouse: steer   LMB: fire   E: dock (near the ship)\nHold E: recall the scout (cargo is lost)"
@@ -466,13 +484,14 @@ func _update_station(player: CrewMember, ship: Mothership, mission: MissionLevel
 
 func _update_dock_marker(player: CrewMember, ship: Mothership, mission: MissionLevel) -> void:
 	_dock_marker.visible = false
-	if player == null or player.station != "scout" or mission.scout == null:
+	if player == null or not ship.is_scout_station(player.station):
 		return
+	var scout := mission.scout_at(player.station)
 	var cam := get_viewport().get_camera_3d()
-	if cam == null:
+	if cam == null or scout == null:
 		return
-	var dock := ship.to_global(ShipBuilder.DOCK_POINT)
-	var dist := mission.scout.global_position.distance_to(dock)
+	var dock := ship.to_global(scout.dock_point())
+	var dist := scout.global_position.distance_to(dock)
 	var size := get_viewport().get_visible_rect().size
 	var screen: Vector2
 	if cam.is_position_behind(dock):
@@ -486,19 +505,21 @@ func _update_dock_marker(player: CrewMember, ship: Mothership, mission: MissionL
 	_dock_marker.position = screen - Vector2(80, 10)
 
 
-## Marker on the nearest waystation's hangar while flying.
+## Marker on the next waystation's entrance gate while flying.
 func _update_waystation(player: CrewMember, ship: Mothership) -> void:
 	_station_marker.visible = false
-	if player == null or ship.landing != Mothership.Dock.FLYING or player.station == "scout":
+	if player == null or ship.landing != Mothership.Dock.FLYING or ship.is_scout_station(player.station):
 		return
 	var st := ship.nearest_station(STATION_MARKER_RANGE)
 	var cam := get_viewport().get_camera_3d()
 	if st.is_empty() or cam == null:
 		return
 	var target := Mothership.station_entrance(st)
-	var dist := ship.global_position.distance_to(target)
-	if dist < 20.0:
+	var dist := ship.station_distance(st)
+	if dist < 20.0 and not ship.in_hall(st):
 		return
+	if ship.in_hall(st):
+		target = (st["xform"] as Transform3D) * Vector3(0, StationBuilder.LAND_HEIGHT, 0)
 	var size := get_viewport().get_visible_rect().size
 	var screen: Vector2
 	if cam.is_position_behind(target):
@@ -511,7 +532,10 @@ func _update_waystation(player: CrewMember, ship: Mothership) -> void:
 	var hint := ""
 	if dist <= Mothership.LAND_RANGE:
 		hint = "\n[L] LAND" if player.station == "pilot" else "\npilot: L to land"
-	_station_marker.text = "◆ %s  %d m - safe haven%s" % [st["name"], int(dist), hint]
+	if ship.in_hall(st):
+		_station_marker.text = "◆ %s  LANDING PAD%s" % [st["name"], hint]
+	else:
+		_station_marker.text = "◆ %s  %d m - shop and safe haven%s" % [st["name"], int(dist), hint]
 	_station_marker.position = screen - Vector2(130, 10)
 
 
@@ -521,22 +545,28 @@ func _crew_report(ship: Mothership, mission: MissionLevel) -> String:
 		var p := c as CrewMember
 		if p == null:
 			continue
-		var where: String = "Walking" if p.station == "" else ShipBuilder.STATION_NAMES[p.station]
+		var where: String = "Walking" if p.station == "" else ship.station_name(p.station)
 		lines.append("%s   %s   HP %d%s" % [p.display_name, where, int(p.hp), "" if p.alive else "  (knocked out)"])
 	lines.append("")
 	var ore_lines := PackedStringArray()
 	for k in ship.ore:
 		ore_lines.append("%s x%d" % [Deposit.TYPES[k]["name"], int(ship.ore[k])])
 	lines.append("Ore: " + (", ".join(ore_lines) if ore_lines.size() > 0 else "none yet"))
-	lines.append("Aliens killed: %d   Nests destroyed: %d" % [mission.kills, mission.nests_destroyed])
+	lines.append("Aliens killed: %d   Nests destroyed: %d   Waystations: %d" % [mission.kills, mission.nests_destroyed, ship.stations_docked])
+	var rp := mission.dive_rp()
+	lines.append("Research so far: %d RP (depth %d, waystations %d, nests %d)" % [rp["total"], rp["depth"], rp["stations"], rp["nests"]])
+	var guns := PackedStringArray()
+	for g: String in ship.gun_stations():
+		guns.append("%s: %s" % [ship.station_name(g), Game.GUNS[ship.gun_weapon(g)]["name"]])
+	lines.append(", ".join(guns))
 	if not ship.run_mods.is_empty():
 		var mods := PackedStringArray()
 		for item: String in ship.run_mods:
 			var n := int(ship.run_mods[item])
 			mods.append(RunItems.display_name(item) + (" x%d" % n if n > 1 else ""))
-		lines.append("Waystation supplies (this dive): " + ", ".join(mods))
-	if mission.scout:
-		lines.append("Scout: " + mission.scout.status_text())
+		lines.append("Installed this dive: " + ", ".join(mods))
+	for sc in mission.scouts:
+		lines.append("%s: %s" % [ship.station_name(sc.station_id), sc.status_text()])
 	return "\n".join(lines)
 
 

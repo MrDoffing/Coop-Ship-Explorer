@@ -3,21 +3,23 @@ extends CharacterBody3D
 ## The crew's ship. Flight, systems, weapons and damage are simulated on the server; clients get
 ## the state through the synchronizer and drive stations by sending input to the server.
 ##
-## Crew members and boarding aliens live inside it (Interior/Crew, Interior/Boarders) in ship-local
-## space, so they ride along with its movement. Damage hits the energy shield first; once the
-## shield breaks, the hull takes damage and part of it spills over into the engine and weapon
-## systems, which go offline at zero until the crew repairs them. The hull cannot be repaired in
-## flight, only with repair kits from a waystation.
+## The ship type (see ShipTypes) decides its stations: one pilot seat plus any number of guns,
+## mining lasers and scout bays, and its auto turret slots. Crew members and boarding aliens live
+## inside it (Interior/Crew, Interior/Boarders) in ship-local space, so they ride along with its
+## movement. Damage hits the energy shield first; once the shield breaks, the hull takes damage and
+## part of it spills over into the engine and weapon systems, which go offline at zero until the
+## crew repairs them. The hull cannot be repaired in flight, only with repair kits from a shop.
 ##
-## Waystations are hangars in the cave wall. The pilot requests landing (L) and the ship flies a
-## scripted approach onto the pad; while docked it is safe, refuels and the cargo ramp opens so the
-## crew can carry supply crates aboard. Those upgrades last for the current dive only.
+## Waystations sit in the tunnel between two bulkheads. The pilot requests landing (L) and the ship
+## flies a scripted approach through the open entrance gate onto the pad; the entrance then seals
+## behind it. While docked it is safe, refuels, and the cargo ramp opens so the crew can buy supplies
+## in the shop and carry them aboard. On liftoff the exit gate opens, and it seals again once the
+## ship is through, so there is no way back. Supplies only last for the current dive.
 
 signal destroyed
 
 enum Dock { FLYING, APPROACH, LANDED, LIFTOFF }
 
-const STATIONS := ["pilot", "gun_l", "gun_r", "mining", "scout"]
 const WEAPON_DEFS := {
 	"pulse": {"cooldown": 0.15, "speed": 150.0, "damage": 11.0, "pellets": 1, "spread": 0.6, "kind": "pulse"},
 	"flak": {"cooldown": 0.75, "speed": 120.0, "damage": 6.0, "pellets": 8, "spread": 4.5, "kind": "flak"},
@@ -33,17 +35,23 @@ const BLAST_RADIUS := 42.0
 const BLAST_DAMAGE := 420.0
 const BLAST_HULL_COST := 0.06
 const BLAST_FUEL_COST := 12.0
-## Waystations: landing is possible within LAND_RANGE of a hangar entrance. Docking flight speeds,
-## ramp and landing gear travel rates, and what the station tops up per second while docked.
+## Waystations: landing is possible within LAND_RANGE of a station's entrance gate (or inside its
+## hall). Docking flight speeds, ramp and landing gear travel rates, and what the station tops up
+## per second while docked.
 const LAND_RANGE := 110.0
 const DOCK_SPEED := 11.0
-const DOCK_SPEED_SLOW := 7.5
+const DOCK_SPEED_SLOW := 7.0
 const DOCK_TURN_RATE := 0.7
+const DOCK_DESCENT := 3.0
 const RAMP_RATE := 0.7
 const GEAR_RATE := 0.8
 const DOCK_REFUEL := 9.0
 const DOCK_SHIELD := 25.0
-## Auto cannons (waystation supplies): reach, turn rate, rate of fire and damage per bolt.
+## Bulkhead doors move this much (open fraction) per second.
+const GATE_RATE := 0.22
+## Braking (m/s²) the flight computer allows for when it stops the ship short of a sealed bulkhead.
+const BRAKE_DECEL := 2.0
+## Auto turrets: reach, turn rate, rate of fire and damage per bolt.
 const AUTO_RANGE := 75.0
 const AUTO_TURN := 3.0
 const AUTO_COOLDOWN := 0.32
@@ -65,14 +73,22 @@ void fragment() {
 }
 """
 
+## The ship type (ShipTypes id), from the spawn data.
+var ship_type := "prospector"
+## Its layout (ShipTypes.get_type), set up before the ship enters the tree.
+var layout: Dictionary = {}
+
 # --- Replicated state (server authority) ---
 var net_pos := Vector3.ZERO
 var net_vel := Vector3.ZERO
 var net_yaw := 0.0
-var aim_l := Vector2.ZERO
-var aim_r := Vector2.ZERO
-var aim_m := Vector2(0.0, -0.35)
-var mining_end := Vector3.ZERO
+## Aim of every gun and mining laser, in layout["aimables"] order.
+var aims := PackedVector2Array()
+## Where each mining laser's beam ends (layout["lasers"] order) and which ones fire (bit mask).
+var beam_ends := PackedVector3Array()
+var beams := 0
+## Gun station -> mounted weapon (Game.GUNS id).
+var gun_weapons: Dictionary = {}
 var hull := 400.0
 var shield := 120.0
 var shield_down := false
@@ -85,7 +101,7 @@ var fuel := 100.0
 var throttle := 0.0
 var autopilot := true
 var occupants: Dictionary = {}
-var mining_on := false
+## Credits mined this dive: spent in waystation shops, gone when the dive ends.
 var credits := 0
 var ore: Dictionary = {}
 var depth := 0.0
@@ -97,8 +113,16 @@ var blast_cd := 0.0
 ## Waystation docking state and the station (index) the ship is docking at, or -1.
 var landing := Dock.FLYING
 var station_k := -1
-## Supplies installed this dive (item id -> count), auto cannons installed from waystations, and
-## the aim of every auto cannon hardpoint (bought ones included, see active_cannons()).
+## The waystation the ship last landed at (-1: none yet) and how far its entrance and exit
+## bulkheads are open (0 sealed .. 1 open). Stations further on are open to enter; earlier ones
+## stay sealed.
+var gate_k := -1
+var gate_entry := 1.0
+var gate_exit := 0.0
+## Waystations landed at this dive.
+var stations_docked := 0
+## Supplies installed this dive (item id -> count), auto turrets installed in the turret slots, and
+## the aim of every turret hardpoint.
 var run_mods: Dictionary = {}
 var autocannons := 0
 var auto_aim := PackedVector2Array()
@@ -123,6 +147,7 @@ var cargo_root: Node3D
 var crew_spawner: MultiplayerSpawner
 var boarder_spawner: MultiplayerSpawner
 var cargo_spawner: MultiplayerSpawner
+## Station id -> Turret for every gun and mining laser.
 var turrets: Dictionary = {}
 var panels: Array = []
 var nav: AStar3D
@@ -130,19 +155,21 @@ var _ext: Dictionary = {}
 var _int: Dictionary = {}
 var _shield_mat: ShaderMaterial
 var _shield_flash := 0.0
-var _beam: MeshInstance3D
-var _beam_light: OmniLight3D
+## Laser station -> {"mesh", "light", "audio"}.
+var _beams: Dictionary = {}
 var _engine_audio: AudioStreamPlayer3D
-var _mine_audio: AudioStreamPlayer3D
 var _since_sync := 0.0
 var _alarm_t := 0.0
 var _alarm_sound_t := 0.0
 var _ramp_body: StaticBody3D
 var _hub_text := ""
+## How far the ship reaches ahead of and behind its origin (from the collision boxes).
+var _nose := 14.0
+var _stern := 14.5
 
 # --- Server only ---
 var _inputs: Dictionary = {}
-var _fire_cd := {"gun_l": 0.0, "gun_r": 0.0}
+var _fire_cd: Dictionary = {}
 var _time := 0.0
 var _last_hit := -100.0
 var _yaw_rate := 0.0
@@ -159,7 +186,14 @@ var _dock_t := 0.0
 var _dock_from := Vector3.ZERO
 var _dock_from_yaw := 0.0
 var _dock_wait := 0.0
-## Crates still waiting at each waystation (index -> [{item, pos (station-local), yaw}]).
+## The exit bulkhead of station gate_k: 0 sealed, 1 opening for liftoff, 2 waiting for the ship
+## (and scouts) to clear it, 3 sealed for good.
+var _exit_state := 0
+## Waystation whose "sealed bulkhead ahead" warning was already shown.
+var _brake_warned := -1
+## Second L press within this time leaves purchased crates behind.
+var _liftoff_confirm := -100.0
+## Crates still at each waystation (index -> [{item, price, pos (station-local), yaw}]).
 var _station_cargo: Dictionary = {}
 var _crate_seq := 0
 var _auto_cd: Array[float] = []
@@ -168,23 +202,20 @@ var _auto_retarget := 0.0
 
 
 func _init() -> void:
-	var mounts := ShipBuilder.AUTOCANNON_MOUNTS.size()
-	auto_aim.resize(mounts)
-	_auto_cd.resize(mounts)
-	_auto_cd.fill(0.0)
-	_auto_target.resize(mounts)
-	_auto_target.fill(0)
 	NetUtil.add_sync(self,
-		["net_pos", "net_vel", "net_yaw", "aim_l", "aim_r", "aim_m", "mining_end"],
+		["net_pos", "net_vel", "net_yaw", "aims", "beam_ends"],
 		["hull", "shield", "shield_down", "shield_reboot", "engine_hp", "weapons_hp", "engine_online",
-		"weapons_online", "fuel", "throttle", "autopilot", "occupants", "mining_on", "credits", "ore",
-		"depth", "alive", "boarders", "frozen", "blast_cd", "landing", "station_k", "stats", "max_hull",
-		"max_shield", "max_fuel", "run_mods", "autocannons", "auto_aim"], 1.0 / 30.0)
+		"weapons_online", "fuel", "throttle", "autopilot", "occupants", "beams", "gun_weapons", "credits", "ore",
+		"depth", "alive", "boarders", "frozen", "blast_cd", "landing", "station_k", "gate_k", "gate_entry",
+		"gate_exit", "stations_docked", "stats", "max_hull", "max_shield", "max_fuel", "run_mods", "autocannons",
+		"auto_aim"], 1.0 / 30.0)
 
 
 func setup(data: Dictionary) -> void:
 	name = "Mothership"
 	stats = data["stats"]
+	ship_type = str(data.get("ship", stats.get("ship", "prospector")))
+	layout = ShipTypes.get_type(ship_type)
 	max_hull = stats["max_hull"]
 	max_shield = stats["max_shield"]
 	max_fuel = stats["max_fuel"]
@@ -193,6 +224,27 @@ func setup(data: Dictionary) -> void:
 	fuel = max_fuel
 	position = data.get("pos", Vector3.ZERO)
 	net_pos = position
+	var aimables: Array = layout["aimables"]
+	aims.resize(aimables.size())
+	for i in aimables.size():
+		aims[i] = Vector2(0.0, -0.35) if station_kind(aimables[i]) == "laser" else Vector2.ZERO
+	beam_ends.resize((layout["lasers"] as Array).size())
+	var w := {}
+	for g: String in layout["guns"]:
+		w[g] = "pulse"
+		_fire_cd[g] = 0.0
+	gun_weapons = w
+	var mounts := (layout["hardpoints"] as Array).size()
+	auto_aim.resize(mounts)
+	_auto_cd.resize(mounts)
+	_auto_cd.fill(0.0)
+	_auto_target.resize(mounts)
+	_auto_target.fill(0)
+	for bx: Array in layout["boxes"]:
+		var c: Vector3 = bx[0]
+		var s: Vector3 = bx[1]
+		_nose = maxf(_nose, -(c.z - s.z * 0.5))
+		_stern = maxf(_stern, c.z + s.z * 0.5)
 
 
 func _ready() -> void:
@@ -204,13 +256,12 @@ func _ready() -> void:
 	exterior = Node3D.new()
 	exterior.name = "Exterior"
 	add_child(exterior)
-	_ext = ShipBuilder.build_exterior(exterior)
-	for id in ["gun_l", "gun_r", "mining"]:
-		turrets[id] = _ext[id]
+	_ext = ShipBuilder.build_exterior(exterior, ship_type)
+	turrets = _ext["turrets"]
 	interior = Node3D.new()
 	interior.name = "Interior"
 	add_child(interior)
-	_int = ShipBuilder.build_interior(interior)
+	_int = ShipBuilder.build_interior(interior, ship_type)
 	interior_body = _int["body"]
 	panels = _int["panels"]
 	crew_root = Node3D.new()
@@ -228,7 +279,7 @@ func _ready() -> void:
 	cargo_spawner = NetUtil.add_spawner(self, "CargoSpawner", cargo_root, _spawn_crate)
 	nav = ShipBuilder.build_nav()
 	_build_shield()
-	_build_beam()
+	_build_beams()
 	_build_audio()
 	if not multiplayer.is_server():
 		($Sync as MultiplayerSynchronizer).synchronized.connect(func(): _since_sync = 0.0)
@@ -240,18 +291,13 @@ func _exit_tree() -> void:
 
 
 func _add_hull_shapes() -> void:
-	var cs := CollisionShape3D.new()
-	var box := BoxShape3D.new()
-	box.size = Vector3(19.0, 6.8, 28.0)
-	cs.shape = box
-	cs.position = Vector3(0, 1.4, 0.3)
-	add_child(cs)
-	var cs2 := CollisionShape3D.new()
-	var belly := BoxShape3D.new()
-	belly.size = Vector3(5.5, 1.8, 6.0)
-	cs2.shape = belly
-	cs2.position = Vector3(0, -2.7, ShipBuilder.DOCK_POINT.z)
-	add_child(cs2)
+	for bx: Array in layout["boxes"]:
+		var cs := CollisionShape3D.new()
+		var box := BoxShape3D.new()
+		box.size = bx[1]
+		cs.shape = box
+		cs.position = bx[0]
+		add_child(cs)
 
 
 func _build_shield() -> void:
@@ -268,29 +314,38 @@ func _build_shield() -> void:
 	_shield_mat.shader = shader
 	mi.material_override = _shield_mat
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mi.position = ShipBuilder.SHIELD_CENTER
-	mi.scale = ShipBuilder.SHIELD_RADII
+	mi.position = shield_center()
+	mi.scale = shield_radii()
 	add_child(mi)
 
 
-func _build_beam() -> void:
-	_beam = MeshInstance3D.new()
-	var cm := CylinderMesh.new()
-	cm.top_radius = 0.08
-	cm.bottom_radius = 0.08
-	cm.height = 1.0
-	cm.radial_segments = 8
-	cm.rings = 1
-	_beam.mesh = cm
-	_beam.material_override = Models.glow(Color(2.0, 0.85, 0.3, 1.0))
-	_beam.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_beam.visible = false
-	add_child(_beam)
-	_beam_light = OmniLight3D.new()
-	_beam_light.light_color = Color(1.0, 0.55, 0.2)
-	_beam_light.omni_range = 9.0
-	_beam_light.light_energy = 0.0
-	add_child(_beam_light)
+func _build_beams() -> void:
+	for id: String in layout["lasers"]:
+		var mi := MeshInstance3D.new()
+		var cm := CylinderMesh.new()
+		cm.top_radius = 0.08 if style_of(id) != "drill" else 0.12
+		cm.bottom_radius = cm.top_radius
+		cm.height = 1.0
+		cm.radial_segments = 8
+		cm.rings = 1
+		mi.mesh = cm
+		mi.material_override = Models.glow(Color(2.0, 0.85, 0.3, 1.0))
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.visible = false
+		add_child(mi)
+		var light := OmniLight3D.new()
+		light.light_color = Color(1.0, 0.55, 0.2)
+		light.omni_range = 9.0
+		light.light_energy = 0.0
+		add_child(light)
+		var audio := AudioStreamPlayer3D.new()
+		audio.stream = Sfx.stream("mine_loop")
+		audio.position = console(id)["pos"]
+		audio.volume_db = -13.0
+		audio.unit_size = 8.0
+		audio.max_distance = 120.0
+		add_child(audio)
+		_beams[id] = {"mesh": mi, "light": light, "audio": audio}
 
 
 func _build_audio() -> void:
@@ -301,12 +356,6 @@ func _build_audio() -> void:
 	_engine_audio.unit_size = 20.0
 	_engine_audio.autoplay = true
 	add_child(_engine_audio)
-	_mine_audio = AudioStreamPlayer3D.new()
-	_mine_audio.stream = Sfx.stream("mine_loop")
-	_mine_audio.position = ShipBuilder.TURRET_MOUNTS["mining"]["pos"]
-	_mine_audio.volume_db = -6.0
-	_mine_audio.unit_size = 16.0
-	add_child(_mine_audio)
 
 
 func _spawn_crew(data: Variant) -> Node:
@@ -327,6 +376,100 @@ func _spawn_crate(data: Variant) -> Node:
 	return c
 
 
+# --- Layout ------------------------------------------------------------------------------------
+
+## The layout entry of a station (seat, console, kind, mount...), or {}.
+func console(id: String) -> Dictionary:
+	return (layout["by_id"] as Dictionary).get(id, {})
+
+
+func has_station(id: String) -> bool:
+	return (layout["by_id"] as Dictionary).has(id)
+
+
+func station_name(id: String) -> String:
+	return str(console(id).get("name", id))
+
+
+## "pilot", "gun", "laser" or "scout".
+func station_kind(id: String) -> String:
+	return str(console(id).get("kind", ""))
+
+
+func style_of(id: String) -> String:
+	return str(console(id).get("style", ""))
+
+
+func is_turret_station(id: String) -> bool:
+	return turrets.has(id)
+
+
+func is_scout_station(id: String) -> bool:
+	return station_kind(id) == "scout"
+
+
+func gun_stations() -> Array:
+	return layout["guns"]
+
+
+func laser_stations() -> Array:
+	return layout["lasers"]
+
+
+func scout_stations() -> Array:
+	return layout["scouts"]
+
+
+func aim_of(id: String) -> Vector2:
+	var i := (layout["aimables"] as Array).find(id)
+	return aims[i] if i >= 0 and i < aims.size() else Vector2.ZERO
+
+
+func gun_weapon(id: String) -> String:
+	return str(gun_weapons.get(id, "pulse"))
+
+
+func laser_on(id: String) -> bool:
+	var i := (layout["lasers"] as Array).find(id)
+	return i >= 0 and (beams & (1 << i)) != 0
+
+
+func laser_end(id: String) -> Vector3:
+	var i := (layout["lasers"] as Array).find(id)
+	return beam_ends[i] if i >= 0 and i < beam_ends.size() else global_position
+
+
+func dock_point(scout_station: String) -> Vector3:
+	return console(scout_station).get("dock", Vector3(0, -3.15, 3.5))
+
+
+func dock_launch(scout_station: String) -> Vector3:
+	return console(scout_station).get("launch", Vector3(0, -7.0, 0))
+
+
+func shield_center() -> Vector3:
+	return layout["shield_center"]
+
+
+func shield_radii() -> Vector3:
+	return layout["shield_radii"]
+
+
+## [position, outward normal] of hull point i (where critters latch on).
+func hull_point(i: int) -> Array:
+	return layout["hull_points"][i]
+
+
+## {"outside", "inside"} of roof hatch i (where infiltrators cut in).
+func hatch(i: int) -> Dictionary:
+	return layout["hatch_list"][i]
+
+
+## Auto turret slots this dive (ship type and homebase upgrades; all launch empty).
+func turret_slots() -> int:
+	return mini(int(stats.get("turret_slots", 0)), (layout["hardpoints"] as Array).size())
+
+
 # --- Simulation --------------------------------------------------------------------------------
 
 func _physics_process(delta: float) -> void:
@@ -335,6 +478,7 @@ func _physics_process(delta: float) -> void:
 		_fx_cd = maxf(0.0, _fx_cd - delta)
 		if alive:
 			_server_systems(delta)
+		_server_gates(delta)
 		_server_flight(delta)
 		_server_weapons(delta)
 		_server_autocannons(delta)
@@ -369,7 +513,7 @@ func _server_systems(delta: float) -> void:
 	if blast_cd > 0.0:
 		blast_cd = maxf(0.0, blast_cd - delta)
 	if not frozen and landing == Dock.FLYING:
-		var burn := (0.12 + absf(throttle) * 0.55 + (0.12 if mining_on else 0.0)) * float(stats["fuel_burn"])
+		var burn := (0.12 + absf(throttle) * 0.55 + (0.12 * _laser_count() if beams != 0 else 0.0)) * float(stats["fuel_burn"])
 		fuel = maxf(0.0, fuel - burn * delta)
 	if landing == Dock.LANDED:
 		# Station services: refuel and recharge the shield.
@@ -410,6 +554,14 @@ func _server_systems(delta: float) -> void:
 	boarders = boarder_root.get_child_count()
 
 
+func _laser_count() -> int:
+	var n := 0
+	for i in (layout["lasers"] as Array).size():
+		if beams & (1 << i):
+			n += 1
+	return n
+
+
 func _server_flight(delta: float) -> void:
 	if landing != Dock.FLYING:
 		_dock_flight(delta)
@@ -438,6 +590,7 @@ func _server_flight(delta: float) -> void:
 		desired = -global_basis.z * throttle * float(stats["max_speed"]) * power
 		desired += Vector3.UP * vert * float(stats["vert_speed"]) * power
 		desired += global_basis.x * strafe * 4.0 * power
+		desired = _gate_brake(desired)
 	var accel := float(stats["accel"]) * (1.0 if can_fly else 0.35)
 	velocity = velocity.move_toward(desired, accel * delta)
 	var target_rate := turn * float(stats["yaw_rate"]) * power if can_fly else 0.0
@@ -471,25 +624,61 @@ func _autopilot() -> Vector3:
 	return Vector3(turn, vert, strafe)
 
 
+## The flight computer stops the ship short of a sealed bulkhead: it limits the speed along a
+## waystation's axis so the ship can brake in time.
+func _gate_brake(desired: Vector3) -> Vector3:
+	if Game.mission == null:
+		return desired
+	var cave: CaveGen = Game.mission.cave
+	var s := -global_position.z
+	for st: Dictionary in cave.stations_in(s - 130.0, s + 130.0):
+		var k := int(st["k"])
+		var l: Vector3 = (st["inv"] as Transform3D) * global_position
+		if absf(l.x) > StationBuilder.HALL_HALF_X + 10.0:
+			continue
+		var deeper := -(st["xform"] as Transform3D).basis.z
+		var v := desired.dot(deeper)
+		var exit_open := k == gate_k and gate_exit > 0.95
+		if exit_open:
+			continue
+		if v > 0.0 and k > gate_k and l.z > StationBuilder.EXIT_FACE:
+			# Heading for the sealed exit of a station we have not landed at.
+			var room := (l.z - _nose) - (StationBuilder.EXIT_INNER + 5.0)
+			var vmax := sqrt(2.0 * BRAKE_DECEL * maxf(room, 0.0))
+			if v > vmax:
+				desired -= deeper * (v - vmax)
+				if _brake_warned != k and room < 40.0:
+					_brake_warned = k
+					notify.rpc("%s: exit bulkhead sealed - land (L) to continue" % st["name"], 1)
+		elif v < 0.0 and k <= gate_k and l.z < StationBuilder.EXIT_FACE:
+			# Backing up towards the sealed exit of a station we already left.
+			var room := (StationBuilder.EXIT_FACE - 5.0) - (l.z + _stern)
+			var vmax := sqrt(2.0 * BRAKE_DECEL * maxf(room, 0.0))
+			if -v > vmax:
+				desired += deeper * (-v - vmax)
+	return desired
+
+
 func _server_weapons(delta: float) -> void:
-	for id: String in ["gun_l", "gun_r"]:
-		_fire_cd[id] = maxf(0.0, float(_fire_cd[id]) - delta)
+	for id: String in layout["guns"]:
+		_fire_cd[id] = maxf(0.0, float(_fire_cd.get(id, 0.0)) - delta)
 		if not occupants.has(id) or not weapons_online or not alive:
 			continue
 		var inp: Dictionary = _inputs.get(id, {})
 		if not inp.get("fire", false) or float(_fire_cd[id]) > 0.0:
 			continue
-		var weapon := str(stats["weapon_left" if id == "gun_l" else "weapon_right"])
-		_fire_cd[id] = _fire_turret(id, weapon)
+		_fire_cd[id] = _fire_turret(id, gun_weapon(id))
 
 
 func _fire_turret(id: String, weapon: String) -> float:
 	var def: Dictionary = WEAPON_DEFS.get(weapon, WEAPON_DEFS["pulse"])
 	var t: Turret = turrets[id]
-	var a := aim_l if id == "gun_l" else aim_r
+	var a := aim_of(id)
 	var b := global_basis * t.aim_basis_local(a)
 	var muzzle := to_global(t.muzzle_local(a))
 	var dmg := float(def["damage"]) * float(stats["turret_damage"])
+	if style_of(id) == "heavy":
+		dmg *= 1.25
 	var proj: Projectiles = Game.mission.projectiles
 	if weapon == "rail":
 		proj.fire_rail(muzzle, -b.z, dmg)
@@ -503,33 +692,40 @@ func _fire_turret(id: String, weapon: String) -> float:
 
 
 func _server_mining(delta: float) -> void:
-	var inp: Dictionary = _inputs.get("mining", {})
-	var on := occupants.has("mining") and bool(inp.get("fire", false)) and weapons_online and alive
-	if on != mining_on:
-		mining_on = on
-	if not on:
-		return
-	var t: Turret = turrets["mining"]
-	var from := to_global(t.muzzle_local(aim_m))
-	var dir := -(global_basis * t.aim_basis_local(aim_m)).z
-	var reach := float(stats["mining_range"])
-	var q := PhysicsRayQueryParameters3D.create(from, from + dir * reach, Game.LAYER_CAVE | Game.LAYER_ENEMY | Game.LAYER_MINERAL)
-	q.collide_with_areas = true
-	var hit := get_world_3d().direct_space_state.intersect_ray(q)
-	if hit.is_empty():
-		mining_end = from + dir * reach
-		return
-	mining_end = hit["position"]
-	var col: Object = hit["collider"]
-	if col.has_meta("target"):
-		var target: Variant = col.get_meta("target")
-		if target is Node and is_instance_valid(target):
-			var power := float(stats["mining_power"]) * delta
-			# Laser Overcharge: extra damage to aliens and egg sacs.
-			var vs_alien := float(stats.get("mining_vs_alien", 1.0))
-			if target is Alien:
-				power *= vs_alien
-			target.take_damage(power, {"source": "mining", "pos": mining_end, "sac": col.get_meta("sac", -1), "vs_alien": vs_alien})
+	var lasers: Array = layout["lasers"]
+	var mask := 0
+	var space := get_world_3d().direct_space_state
+	for i in lasers.size():
+		var id: String = lasers[i]
+		var inp: Dictionary = _inputs.get(id, {})
+		var on := occupants.has(id) and bool(inp.get("fire", false)) and weapons_online and alive
+		if not on:
+			continue
+		mask |= 1 << i
+		var t: Turret = turrets[id]
+		var a := aim_of(id)
+		var from := to_global(t.muzzle_local(a))
+		var dir := -(global_basis * t.aim_basis_local(a)).z
+		var reach := float(stats["mining_range"])
+		var q := PhysicsRayQueryParameters3D.create(from, from + dir * reach, Game.LAYER_CAVE | Game.LAYER_ENEMY | Game.LAYER_MINERAL)
+		q.collide_with_areas = true
+		var hit := space.intersect_ray(q)
+		if hit.is_empty():
+			beam_ends[i] = from + dir * reach
+			continue
+		beam_ends[i] = hit["position"]
+		var col: Object = hit["collider"]
+		if col.has_meta("target"):
+			var target: Variant = col.get_meta("target")
+			if target is Node and is_instance_valid(target):
+				var power := float(stats["mining_power"]) * delta
+				# Laser Overcharge: extra damage to aliens and egg sacs.
+				var vs_alien := float(stats.get("mining_vs_alien", 1.0))
+				if target is Alien:
+					power *= vs_alien
+				target.take_damage(power, {"source": "mining", "pos": beam_ends[i], "sac": col.get_meta("sac", -1), "vs_alien": vs_alien})
+	if mask != beams:
+		beams = mask
 
 
 # --- Damage, repairs and resources (server) ----------------------------------------------------
@@ -592,7 +788,7 @@ func system_online(sys: String) -> bool:
 
 
 func collector_global() -> Vector3:
-	return to_global(ShipBuilder.COLLECTOR)
+	return to_global(layout["collector"])
 
 
 func collect_mineral(kind: String, value: int) -> void:
@@ -615,7 +811,7 @@ func add_fuel(amount: float) -> void:
 ## Index of a free hull point for a critter to latch onto, or -1.
 func claim_hull_point(owner_id: int) -> int:
 	var free: Array[int] = []
-	for i in ShipBuilder.HULL_POINTS.size():
+	for i in (layout["hull_points"] as Array).size():
 		if not _hull_claims.has(i):
 			free.append(i)
 	if free.is_empty():
@@ -632,7 +828,7 @@ func release_hull_point(idx: int, owner_id: int) -> void:
 
 func claim_hatch(owner_id: int) -> int:
 	var free: Array[int] = []
-	for i in ShipBuilder.HATCHES.size():
+	for i in (layout["hatch_list"] as Array).size():
 		if not _hatch_claims.has(i):
 			free.append(i)
 	if free.is_empty():
@@ -648,21 +844,21 @@ func release_hatch(idx: int, owner_id: int) -> void:
 
 
 ## Server: an infiltrator cut through a hatch; spawn a boarder inside.
-func spawn_boarder(hatch: int, hp_mult: float) -> void:
+func spawn_boarder(hatch_i: int, hp_mult: float) -> void:
 	if not multiplayer.is_server() or not alive:
 		return
 	_boarder_seq += 1
-	var inside: Vector3 = ShipBuilder.HATCHES[hatch]["inside"]
+	var inside: Vector3 = hatch(hatch_i)["inside"]
 	boarder_spawner.spawn({"name": "B%d" % _boarder_seq, "pos": inside + Vector3(0, 2.6, 0), "hp": 55.0 * hp_mult})
 	notify.rpc("INTRUDER ALERT - aliens are inside the ship!", 2)
-	_fx_breach.rpc(hatch)
+	_fx_breach.rpc(hatch_i)
 
 
 ## Point where the segment a→b first enters the shield ellipsoid, or null.
 func shield_hit(a: Vector3, b: Vector3) -> Variant:
-	var inv := Vector3.ONE / ShipBuilder.SHIELD_RADII
-	var la := (to_local(a) - ShipBuilder.SHIELD_CENTER) * inv
-	var lb := (to_local(b) - ShipBuilder.SHIELD_CENTER) * inv
+	var inv := Vector3.ONE / shield_radii()
+	var la := (to_local(a) - shield_center()) * inv
+	var lb := (to_local(b) - shield_center()) * inv
 	var d := lb - la
 	var qa := d.dot(d)
 	var qb := 2.0 * la.dot(d)
@@ -723,7 +919,7 @@ func emergency_blast() -> void:
 	shield_down = true
 	shield_reboot = float(stats["shield_reboot"])
 	_last_hit = _time
-	var center := to_global(ShipBuilder.SHIELD_CENTER)
+	var center := to_global(shield_center())
 	var shape := SphereShape3D.new()
 	shape.radius = BLAST_RADIUS
 	var q := PhysicsShapeQueryParameters3D.new()
@@ -755,7 +951,7 @@ func emergency_blast() -> void:
 
 @rpc("authority", "call_local", "reliable")
 func _fx_blast() -> void:
-	var center := to_global(ShipBuilder.SHIELD_CENTER)
+	var center := to_global(shield_center())
 	Fx.shockwave(center, BLAST_RADIUS, Color(0.55, 0.9, 1.0))
 	Fx.flash(center, Color(0.6, 0.9, 1.0), 10.0, BLAST_RADIUS * 2.0, 0.5)
 	for i in 10:
@@ -769,25 +965,38 @@ func _fx_blast() -> void:
 
 # --- Waystations -------------------------------------------------------------------------------
 
-## The point in front of a waystation's hangar where docking starts and liftoff ends.
+## The point in the tunnel in front of a waystation's entrance gate, where docking starts.
 static func station_entrance(st: Dictionary) -> Vector3:
-	return (st["xform"] as Transform3D) * Vector3(0, StationBuilder.LAND_HEIGHT + StationBuilder.HOVER, -float(st["depth"]) + 3.0)
+	return (st["xform"] as Transform3D) * Vector3(0, StationBuilder.PASS_Y, StationBuilder.ENTRY_FACE + 14.0)
 
 
-## The waystation whose hangar entrance is within `max_dist` of the ship, or {}.
-func nearest_station(max_dist: float) -> Dictionary:
+## The next waystation ahead: the first one the ship has not landed at yet.
+func next_station() -> Dictionary:
 	if Game.mission == null:
 		return {}
-	var cave: CaveGen = Game.mission.cave
-	var s := -global_position.z
-	var best := {}
-	var best_d := max_dist
-	for st in cave.stations_in(s - max_dist, s + max_dist):
-		var d := global_position.distance_to(station_entrance(st))
-		if d < best_d:
-			best_d = d
-			best = st
-	return best
+	return (Game.mission.cave as CaveGen).station(gate_k + 1)
+
+
+## True while the ship is inside a waystation's hall (between its bulkheads).
+func in_hall(st: Dictionary) -> bool:
+	var l: Vector3 = (st["inv"] as Transform3D) * global_position
+	return absf(l.x) < StationBuilder.HALL_HALF_X and l.z < StationBuilder.ENTRY_FACE and l.z > StationBuilder.EXIT_INNER
+
+
+## How far the ship is from landing at a waystation: the distance to its entrance gate, or 0 once
+## inside its hall.
+func station_distance(st: Dictionary) -> float:
+	if in_hall(st):
+		return 0.0
+	return global_position.distance_to(station_entrance(st))
+
+
+## The next waystation if it is within `max_dist` of landing, or {}.
+func nearest_station(max_dist: float) -> Dictionary:
+	var st := next_station()
+	if st.is_empty() or station_distance(st) > max_dist:
+		return {}
+	return st
 
 
 ## True for a ship-local point inside the ship (the ramp and the station outside are not).
@@ -806,7 +1015,7 @@ func crew_outside() -> String:
 	return ""
 
 
-## Pilot (L): land at a waystation in range, or lift off once everyone is aboard.
+## Pilot (L): land at the next waystation in range, or lift off once everyone is aboard.
 @rpc("any_peer", "call_local", "reliable")
 func request_land() -> void:
 	if not multiplayer.is_server() or not alive or frozen:
@@ -825,68 +1034,81 @@ func request_land() -> void:
 				_begin_landing(st)
 		Dock.LANDED:
 			var missing := crew_outside()
+			var left := bought_crates_outside()
 			if missing != "":
 				notify_peer(pid, "Waiting for %s to come aboard" % missing, 1)
+			elif left > 0 and _time > _liftoff_confirm:
+				_liftoff_confirm = _time + 6.0
+				notify_peer(pid, "%d bought item%s still in the shop - press L again to leave without %s" % [
+					left, "s are" if left > 1 else " is", "them" if left > 1 else "it"], 1)
 			else:
 				_begin_liftoff()
 		_:
 			notify_peer(pid, "Docking manoeuvre in progress", 1)
 
 
-## Server: fly in side-on, turn round over the pad (nose out) and settle on the landing legs.
+## Server: fly to the entrance gate along the tunnel, through the gate and over the shop to above the
+## pad, then settle on the landing legs, nose towards the exit.
 func _begin_landing(st: Dictionary) -> void:
 	var xf: Transform3D = st["xform"]
-	var h := StationBuilder.LAND_HEIGHT
-	var final_yaw := atan2(xf.basis.z.x, xf.basis.z.z)
-	var yaw_a := wrapf(final_yaw + PI / 2.0, -PI, PI)
-	var yaw_b := wrapf(final_yaw - PI / 2.0, -PI, PI)
-	var along := yaw_a if absf(angle_difference(rotation.y, yaw_a)) < absf(angle_difference(rotation.y, yaw_b)) else yaw_b
-	var front := station_entrance(st)
-	var above := xf * Vector3(0, h + StationBuilder.HOVER, 0)
-	# Follow the tunnel's centre line to the hangar entrance so the ship never cuts through rock.
-	var cave: CaveGen = Game.mission.cave
-	var route := PackedVector3Array([global_position])
-	var s0 := -global_position.z
-	var s1 := float(st["s"])
-	var steps := int(absf(s1 - s0) / 15.0)
-	for i in range(1, steps):
-		route.append(cave.center3(lerpf(s0, s1, float(i) / float(steps))) + Vector3(0, -1.4, 0))
-	route.append(front)
-	var length := 0.0
-	for i in route.size() - 1:
-		length += route[i].distance_to(route[i + 1])
-	_dock_keys = [
-		{"pos": front, "route": route, "yaw": along, "time": clampf(length / DOCK_SPEED, 2.0, 16.0)},
-		{"pos": above, "yaw": along, "time": maxf(2.0, front.distance_to(above) / DOCK_SPEED_SLOW)},
-		{"pos": above, "yaw": final_yaw, "time": maxf(1.5, absf(angle_difference(along, final_yaw)) / DOCK_TURN_RATE)},
-		{"pos": xf * Vector3(0, h, 0), "yaw": final_yaw, "time": 2.2},
-	]
+	var yaw := atan2(xf.basis.z.x, xf.basis.z.z)
+	var l: Vector3 = (st["inv"] as Transform3D) * global_position
+	var outside := station_entrance(st)
+	var above := xf * Vector3(0, StationBuilder.PASS_Y, 0)
+	var pad := xf * Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	_dock_keys = []
+	var start := global_position
+	if l.z > StationBuilder.ENTRY_FACE + 14.0:
+		# Follow the tunnel's centre line to the gate so the ship never cuts through rock.
+		var cave: CaveGen = Game.mission.cave
+		var route := PackedVector3Array([global_position])
+		var s0 := -global_position.z
+		var s1 := -outside.z
+		var steps := int(absf(s1 - s0) / 15.0)
+		for i in range(1, steps):
+			route.append(cave.center3(lerpf(s0, s1, float(i) / float(steps))) + Vector3(0, -1.4, 0))
+		route.append(outside)
+		var length := 0.0
+		for i in route.size() - 1:
+			length += route[i].distance_to(route[i + 1])
+		_dock_keys.append({"pos": outside, "route": route, "yaw": yaw, "time": clampf(length / DOCK_SPEED, 2.0, 16.0)})
+		start = outside
+	elif absf(l.x) > 1.0 or absf(l.y - StationBuilder.PASS_Y) > 1.0:
+		# Close to the gate or already inside: line up with the gate axis first.
+		var lined := xf * Vector3(0, StationBuilder.PASS_Y, l.z)
+		_dock_keys.append({"pos": lined, "yaw": yaw, "time": maxf(1.5, start.distance_to(lined) / DOCK_SPEED_SLOW)})
+		start = lined
+	_dock_keys.append({"pos": above, "yaw": yaw, "time": maxf(2.0, start.distance_to(above) / DOCK_SPEED_SLOW)})
+	_dock_keys.append({"pos": pad, "yaw": yaw, "time": maxf(2.2, above.distance_to(pad) / DOCK_DESCENT)})
 	_start_dock_path()
 	landing = Dock.APPROACH
 	station_k = int(st["k"])
 	throttle = 0.0
+	# Scouts come home first: the entrance seals once the ship is down.
+	for sc: Scout in Game.mission.scouts:
+		sc.recall_for_docking()
 	notify.rpc("Docking at %s - approach on autopilot" % st["name"], 0)
 
 
-## Server: close the ramp, rise, turn to face down the tunnel and leave the hangar.
+## Server: close the ramp, rise to the gate height, wait for the exit gate and fly out through it.
 func _begin_liftoff() -> void:
 	var cave: CaveGen = Game.mission.cave
 	var st := cave.station(station_k)
 	var xf: Transform3D = st["xform"]
-	var t := cave.tangent(float(st["s"]))
-	var out_yaw := atan2(-t.x, -t.z)
-	var above := xf * Vector3(0, StationBuilder.LAND_HEIGHT + StationBuilder.HOVER, 0)
-	var front := station_entrance(st)
+	var yaw := atan2(xf.basis.z.x, xf.basis.z.z)
+	var above := xf * Vector3(0, StationBuilder.PASS_Y, 0)
+	var out := xf * Vector3(0, StationBuilder.PASS_Y, StationBuilder.EXIT_FACE - _stern - 12.0)
 	_dock_keys = [
-		{"pos": above, "yaw": rotation.y, "time": 2.0},
-		{"pos": above, "yaw": out_yaw, "time": maxf(1.5, absf(angle_difference(rotation.y, out_yaw)) / DOCK_TURN_RATE)},
-		{"pos": front, "yaw": out_yaw, "time": maxf(2.0, above.distance_to(front) / DOCK_SPEED_SLOW)},
+		{"pos": above, "yaw": yaw, "time": maxf(2.5, global_position.distance_to(above) / DOCK_DESCENT)},
+		{"wait_gate": true},
+		{"pos": out, "yaw": yaw, "time": maxf(3.0, above.distance_to(out) / DOCK_SPEED_SLOW)},
 	]
 	_start_dock_path()
 	_dock_wait = 0.4
 	landing = Dock.LIFTOFF
+	_exit_state = 1
 	_stow_station(st)
-	notify.rpc("Lifting off - ramp closing", 0)
+	notify.rpc("Lifting off - ramp closing, exit bulkhead opening", 0)
 
 
 func _start_dock_path() -> void:
@@ -909,6 +1131,12 @@ func _dock_flight(delta: float) -> void:
 		_dock_done()
 		return
 	var key: Dictionary = _dock_keys[0]
+	if key.has("wait_gate"):
+		# Hold until the exit bulkhead is fully open.
+		if gate_exit >= 0.98:
+			_dock_keys.pop_front()
+			_start_dock_path()
+		return
 	_dock_t = minf(1.0, _dock_t + delta / float(key["time"]))
 	var k := smoothstep(0.0, 1.0, _dock_t)
 	var prev := global_position
@@ -948,17 +1176,55 @@ func _dock_done() -> void:
 		landing = Dock.FLYING
 		station_k = -1
 		autopilot = true
+		_exit_state = 2
 		notify.rpc("Clear of the waystation - the helm is yours", 0)
 
 
 func _on_landed() -> void:
 	var st: Dictionary = Game.mission.cave.station(station_k)
+	# The entrance seals behind the ship: the previous stretch of tunnel is closed for good.
+	gate_k = station_k
+	gate_entry = 1.0
+	gate_exit = 0.0
+	_exit_state = 0
+	stations_docked += 1
 	_unload_station(st)
 	_fx_touchdown.rpc()
-	notify.rpc("Docked at %s - refuelling. Supplies are stacked inside the station." % st["name"], 0)
+	notify.rpc("Docked at %s - entrance bulkhead sealing. Refuelling; the shop is open." % st["name"], 0)
 
 
-# --- Supply crates -----------------------------------------------------------------------------
+## Server: animate the bulkheads of the station the ship last landed at. The exit opens for
+## liftoff and seals again once the ship and its scouts are through.
+func _server_gates(delta: float) -> void:
+	if gate_k < 0:
+		return
+	gate_entry = move_toward(gate_entry, 0.0, GATE_RATE * delta)
+	var want := 0.0
+	match _exit_state:
+		1:
+			want = 1.0
+		2:
+			if not _clear_of_exit():
+				want = 1.0
+			elif gate_exit <= 0.0:
+				_exit_state = 3
+				notify.rpc("Exit bulkhead sealed behind us - there is no way back", 0)
+	gate_exit = move_toward(gate_exit, want, GATE_RATE * delta)
+
+
+## True once the ship and every flying scout are past the exit bulkhead of station gate_k.
+func _clear_of_exit() -> bool:
+	var st: Dictionary = Game.mission.cave.station(gate_k)
+	var inv: Transform3D = st["inv"]
+	if (inv * global_position).z + _stern > StationBuilder.EXIT_FACE - 4.0:
+		return false
+	for sc: Scout in Game.mission.scouts:
+		if sc.state == Scout.State.FLYING and (inv * sc.global_position).z > StationBuilder.EXIT_FACE - 4.0:
+			return false
+	return true
+
+
+# --- Shop and supply crates --------------------------------------------------------------------
 
 ## The crate a crew member is carrying, or null.
 func crate_carried_by(pid: int) -> SupplyCrate:
@@ -969,7 +1235,8 @@ func crate_carried_by(pid: int) -> SupplyCrate:
 	return null
 
 
-## Server: put a waystation's remaining crates out (crates live in ship space; the ship is parked).
+## Server: put a waystation's shop stock out on its pedestals (crates live in ship space; the
+## ship is parked).
 func _unload_station(st: Dictionary) -> void:
 	var k := int(st["k"])
 	if not _station_cargo.has(k):
@@ -977,49 +1244,52 @@ func _unload_station(st: Dictionary) -> void:
 	var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
 	for rec: Dictionary in _station_cargo[k]:
 		_crate_seq += 1
-		cargo_spawner.spawn({"name": "C%d" % _crate_seq, "item": rec["item"], "pos": (rec["pos"] as Vector3) - lift, "yaw": rec["yaw"]})
+		cargo_spawner.spawn({"name": "C%d" % _crate_seq, "item": rec["item"], "price": int(rec.get("price", 0)),
+			"pos": (rec["pos"] as Vector3) - lift, "yaw": rec["yaw"]})
 	_station_cargo[k] = []
 
 
-## Server: crates left outside the ship stay at the station.
+## Server: crates left outside the ship stay at the station (the ship never comes back).
 func _stow_station(st: Dictionary) -> void:
 	var k := int(st["k"])
 	var left: Array = _station_cargo.get(k, [])
 	var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	var bought := 0
 	for c in cargo_root.get_children():
 		var crate := c as SupplyCrate
 		if crate == null or crate.carrier != 0 or is_aboard(crate.net_pos):
 			continue
-		left.append({"item": crate.item, "pos": crate.net_pos + lift, "yaw": crate.net_yaw})
+		if crate.price <= 0:
+			bought += 1
+		left.append({"item": crate.item, "price": crate.price, "pos": crate.net_pos + lift, "yaw": crate.net_yaw})
 		crate.queue_free()
 	_station_cargo[k] = left
+	if bought > 0:
+		notify.rpc("%d bought item%s left behind at the station" % [bought, "s" if bought > 1 else ""], 1)
 
 
-## What waystation k stocks: hull repair kits, a side-gun weapon, an auto cannon while hardpoints
-## are free, and two general upgrades, spread over the supply room's floor.
+## Bought crates that are still outside the ship (not carried).
+func bought_crates_outside() -> int:
+	var n := 0
+	for c in cargo_root.get_children():
+		var crate := c as SupplyCrate
+		if crate and crate.price <= 0 and crate.carrier == 0 and not is_aboard(crate.net_pos):
+			n += 1
+	return n
+
+
+## What waystation k's shop stocks (see RunItems.roll_shop), on its pedestals.
 func _station_offer(k: int) -> Array:
 	var rng := RandomNumberGenerator.new()
-	rng.seed = hash([int(Game.mission.mission_seed), k, "supplies"])
-	var items: Array[String] = ["hull_kit"]
-	if rng.randf() < 0.6:
-		items.append("hull_kit")
-	items.append("weapon:" + str(RunItems.WEAPON_POOL[rng.randi() % RunItems.WEAPON_POOL.size()]))
-	if autocannons + _crates_of("autocannon") < RunItems.MAX_AUTOCANNONS:
-		items.append("autocannon")
-	var pool: Array = RunItems.UPGRADE_POOL.duplicate()
-	for i in 2:
-		items.append(str(pool.pop_at(rng.randi() % pool.size())))
-	var slots: Array = StationBuilder.CRATE_SLOTS.duplicate()
-	for i in range(slots.size() - 1, 0, -1):
-		var j := rng.randi() % (i + 1)
-		var tmp: Variant = slots[i]
-		slots[i] = slots[j]
-		slots[j] = tmp
+	rng.seed = hash([int(Game.mission.mission_seed), k, "shop"])
+	var guns: Array = Game.profile.get("guns", ["pulse"])
+	var free := turret_slots() - autocannons - _crates_of("autocannon")
+	var items := RunItems.roll_shop(rng, guns, gun_weapons.values(), free)
 	var out := []
-	for i in mini(items.size(), slots.size()):
-		var sl: Array = slots[i]
-		out.append({"item": items[i], "yaw": float(sl[2]) + rng.randf_range(-0.25, 0.25),
-			"pos": Vector3(float(sl[0]), StationBuilder.DECK_Y + SupplyCrate.SIZE.y * 0.5, float(sl[1]))})
+	for i in mini(items.size(), StationBuilder.SHOP_SLOTS.size()):
+		var sl: Array = StationBuilder.SHOP_SLOTS[i]
+		out.append({"item": items[i], "price": RunItems.price(items[i], k), "yaw": float(sl[2]),
+			"pos": Vector3(float(sl[0]), StationBuilder.DECK_Y + StationBuilder.PEDESTAL_H + SupplyCrate.SIZE.y * 0.5, float(sl[1]))})
 	return out
 
 
@@ -1048,6 +1318,28 @@ func _drop_crate(crate: SupplyCrate, pos: Vector3, yaw: float) -> void:
 	crate.carrier = 0
 
 
+## Buy a shop item with the dive's credits; it can then be picked up.
+@rpc("any_peer", "call_local", "reliable")
+func request_crate_buy(crate_name: String) -> void:
+	if not multiplayer.is_server() or not alive:
+		return
+	var pid := Game.sender_id()
+	var crate := cargo_root.get_node_or_null(crate_name) as SupplyCrate
+	var who := crew_root.get_node_or_null(str(pid)) as CrewMember
+	if crate == null or who == null or not who.alive or crate.price <= 0:
+		return
+	if who.net_pos.distance_to(crate.net_pos) > 4.0:
+		return
+	if credits < crate.price:
+		notify_peer(pid, "Not enough credits: %s costs %d CR (you have %d)" % [RunItems.display_name(crate.item), crate.price, credits], 1)
+		return
+	credits -= crate.price
+	var paid := crate.price
+	crate.price = 0
+	notify.rpc("%s bought %s for %d CR" % [who.display_name, RunItems.display_name(crate.item), paid], 0)
+	_fx_buy.rpc(crate.net_pos)
+
+
 @rpc("any_peer", "call_local", "reliable")
 func request_crate_pickup(crate_name: String) -> void:
 	if not multiplayer.is_server():
@@ -1055,7 +1347,7 @@ func request_crate_pickup(crate_name: String) -> void:
 	var pid := Game.sender_id()
 	var crate := cargo_root.get_node_or_null(crate_name) as SupplyCrate
 	var who := crew_root.get_node_or_null(str(pid)) as CrewMember
-	if crate == null or who == null or not who.alive or crate.carrier != 0 or crate_carried_by(pid) != null:
+	if crate == null or who == null or not who.alive or crate.carrier != 0 or crate.price > 0 or crate_carried_by(pid) != null:
 		return
 	if who.net_pos.distance_to(crate.net_pos) > 4.0:
 		return
@@ -1077,7 +1369,7 @@ func request_crate_drop(crate_name: String, pos: Vector3, yaw: float) -> void:
 	_fx_crate.rpc(pos)
 
 
-## Install a carried crate: weapons at a gun console ("gun_l" / "gun_r"), the rest at the "hub".
+## Install a carried crate: guns at a gun console (its station id), the rest at the "hub".
 @rpc("any_peer", "call_local", "reliable")
 func request_install(crate_name: String, target: String) -> void:
 	if not multiplayer.is_server() or not alive:
@@ -1085,33 +1377,32 @@ func request_install(crate_name: String, target: String) -> void:
 	var pid := Game.sender_id()
 	var crate := cargo_root.get_node_or_null(crate_name) as SupplyCrate
 	var who := crew_root.get_node_or_null(str(pid)) as CrewMember
-	if crate == null or who == null or crate.carrier != pid or not target in ["hub", "gun_l", "gun_r"]:
+	if crate == null or who == null or crate.carrier != pid or not (target == "hub" or target in gun_stations()):
 		return
 	var spot := ShipBuilder.INSTALL_HUB
 	if target != "hub":
-		spot = ShipBuilder.STATIONS[target]["console"]
+		spot = console(target)["console"]
 	if Vector2(who.net_pos.x - spot.x, who.net_pos.z - spot.z).length() > 4.0:
 		return
 	var item := crate.item
 	var msg := ""
 	if RunItems.is_weapon(item):
 		if target == "hub":
-			notify_peer(pid, "Weapons are mounted at the gun consoles", 1)
+			notify_peer(pid, "Guns are mounted at the gun consoles", 1)
 			return
-		var key := "weapon_left" if target == "gun_l" else "weapon_right"
-		var st := stats.duplicate()
-		var old := str(st[key])
-		st[key] = RunItems.weapon_of(item)
-		stats = st
+		var old := gun_weapon(target)
+		var w := gun_weapons.duplicate()
+		w[target] = RunItems.weapon_of(item)
+		gun_weapons = w
 		_fire_cd[target] = 0.6
 		msg = "%s mounted a %s on the %s (was %s)" % [who.display_name, RunItems.display_name(item),
-			str(ShipBuilder.STATION_NAMES[target]).to_lower(), Game.WEAPONS[old]["name"]]
+			station_name(target).to_lower(), Game.GUNS[old]["name"]]
 	else:
 		if target != "hub":
 			notify_peer(pid, "Fit this at the install hub in the engine room", 1)
 			return
-		if item == "autocannon" and autocannons >= RunItems.MAX_AUTOCANNONS:
-			notify_peer(pid, "Every auto cannon hardpoint is taken", 1)
+		if item == "autocannon" and autocannons >= turret_slots():
+			notify_peer(pid, "Every turret slot is taken", 1)
 			return
 		_apply_item(item)
 		msg = "%s installed %s: %s" % [who.display_name, RunItems.display_name(item), RunItems.describe(item)]
@@ -1123,30 +1414,33 @@ func request_install(crate_name: String, target: String) -> void:
 	_fx_install.rpc(spot)
 
 
-## Server: apply a general upgrade or repair from a supply crate.
+## Server: apply a shop upgrade or repair.
 func _apply_item(item: String) -> void:
 	var st := stats.duplicate()
 	match item:
 		"hull_kit":
-			hull = minf(max_hull, hull + RunItems.HULL_KIT)
+			hull = minf(max_hull, hull + maxf(RunItems.HULL_KIT, max_hull * RunItems.HULL_KIT_SHARE))
 		"autocannon":
-			autocannons = mini(autocannons + 1, RunItems.MAX_AUTOCANNONS)
+			autocannons = mini(autocannons + 1, turret_slots())
 		"plating":
-			max_hull += 60.0
-			hull += 60.0
+			var add := float(st.get("base_hull", 400.0)) * 0.15
+			max_hull += add
+			hull += add
 		"shield_cell":
-			max_shield += 30.0
+			var add := float(st.get("base_shield", 120.0)) * 0.25
+			max_shield += add
 			if not shield_down:
-				shield += 30.0
+				shield += add
 		"shield_coil":
 			st["shield_regen"] = float(st["shield_regen"]) * 1.3
+			st["shield_reboot"] = maxf(4.0, float(st["shield_reboot"]) - 1.0)
 		"coolant":
 			st["turret_rate"] = float(st["turret_rate"]) * 1.15
 		"calibration":
 			st["turret_damage"] = float(st["turret_damage"]) * 1.2
 		"fuel_tank":
-			max_fuel += 25.0
-			fuel += 25.0
+			max_fuel += 30.0
+			fuel += 30.0
 		"injectors":
 			st["fuel_burn"] = float(st["fuel_burn"]) * 0.85
 		"thrusters":
@@ -1154,10 +1448,22 @@ func _apply_item(item: String) -> void:
 				st[key] = float(st[key]) * 1.1
 		"mining_lens":
 			st["mining_power"] = float(st["mining_power"]) * 1.25
+		"overcharge":
+			st["mining_vs_alien"] = float(st["mining_vs_alien"]) + float(st.get("overcharge_step", 0.5))
+		"tractor":
+			st["tractor_range"] = float(st["tractor_range"]) * 1.25
 		"nanobots":
 			st["self_repair"] = float(st.get("self_repair", 0.0)) + 1.2
 		"dampers":
 			st["collateral"] = float(st["collateral"]) * 0.8
+		"scout_plating":
+			st["scout_hp"] = float(st["scout_hp"]) + 30.0
+		"scout_guns":
+			st["scout_damage"] = float(st["scout_damage"]) * 1.25
+		"scout_cargo":
+			st["scout_cargo"] = float(st["scout_cargo"]) + 20.0
+		"scout_thrusters":
+			st["scout_speed"] = float(st["scout_speed"]) * 1.12
 		"blaster_mod":
 			st["blaster_damage"] = float(st["blaster_damage"]) * 1.25
 		"power_tools":
@@ -1167,9 +1473,9 @@ func _apply_item(item: String) -> void:
 	stats = st
 
 
-# --- Auto cannons ------------------------------------------------------------------------------
+# --- Auto turrets ------------------------------------------------------------------------------
 
-## Ship-local frame of auto cannon i's barrels for an aim (yaw, pitch).
+## Ship-local frame of auto turret i's barrels for an aim (yaw, pitch).
 func _auto_frame(i: int, a: Vector2) -> Transform3D:
 	var g: Dictionary = (_ext["autocannons"] as Array)[i]
 	var base: Node3D = g["root"]
@@ -1177,7 +1483,7 @@ func _auto_frame(i: int, a: Vector2) -> Transform3D:
 	return base.transform * Transform3D(Basis(Vector3.UP, a.x), head.position) * Transform3D(Basis(Vector3.RIGHT, a.y), Vector3.ZERO)
 
 
-## Aim (yaw, pitch) that points auto cannon i at a ship-local point.
+## Aim (yaw, pitch) that points auto turret i at a ship-local point.
 func _auto_aim_at(i: int, p: Vector3) -> Vector2:
 	var g: Dictionary = (_ext["autocannons"] as Array)[i]
 	var base: Node3D = g["root"]
@@ -1185,30 +1491,27 @@ func _auto_aim_at(i: int, p: Vector3) -> Vector2:
 	return Vector2(atan2(-q.x, -q.z), clampf(atan2(q.y, Vector2(q.x, q.z).length()), -0.15, 1.5))
 
 
-## Hardpoints (indices into ShipBuilder.AUTOCANNON_MOUNTS) with a cannon in service: the ones
-## bought at homebase on the hull edges, then the ones installed from waystations.
+## Hardpoints with an auto turret installed (the first ones in the ship's hardpoint list).
 func active_cannons() -> Array[int]:
 	var out: Array[int] = []
-	for i in mini(int(stats.get("edge_cannons", 0)), ShipBuilder.EDGE_CANNONS):
+	for i in mini(autocannons, turret_slots()):
 		out.append(i)
-	for i in mini(autocannons, ShipBuilder.AUTOCANNON_MOUNTS.size() - ShipBuilder.EDGE_CANNONS):
-		out.append(ShipBuilder.EDGE_CANNONS + i)
 	return out
 
 
-## Server: auto cannons track and shoot free-flying aliens on their own.
+## Server: auto turrets track and shoot free-flying aliens on their own.
 func _server_autocannons(delta: float) -> void:
 	var guns := active_cannons()
 	if guns.is_empty() or not alive:
 		return
-	var aims := auto_aim.duplicate()
+	var aims_now := auto_aim.duplicate()
 	_auto_retarget -= delta
 	var retarget := _auto_retarget <= 0.0
 	if retarget:
 		_auto_retarget = 0.3
 	var space := get_world_3d().direct_space_state
 	for i in guns:
-		var mount: Dictionary = ShipBuilder.AUTOCANNON_MOUNTS[i]
+		var mount: Dictionary = layout["hardpoints"][i]
 		var origin := to_global(mount["pos"])
 		var up := global_basis * (Basis.from_euler(mount["rot"]) * Vector3.UP)
 		if retarget:
@@ -1240,10 +1543,10 @@ func _server_autocannons(delta: float) -> void:
 		for n in 2:
 			p = alien.global_position + rel_v * (origin.distance_to(p) / AUTO_SPEED)
 		var want := _auto_aim_at(i, to_local(p))
-		var a: Vector2 = aims[i]
+		var a: Vector2 = aims_now[i]
 		a.x = wrapf(a.x + clampf(angle_difference(a.x, want.x), -AUTO_TURN * delta, AUTO_TURN * delta), -PI, PI)
 		a.y = move_toward(a.y, want.y, AUTO_TURN * delta)
-		aims[i] = a
+		aims_now[i] = a
 		if _auto_cd[i] <= 0.0 and weapons_online and absf(angle_difference(a.x, want.x)) < 0.05 and absf(a.y - want.y) < 0.05:
 			_auto_cd[i] = AUTO_COOLDOWN / float(stats["turret_rate"])
 			var frame := _auto_frame(i, a)
@@ -1251,24 +1554,24 @@ func _server_autocannons(delta: float) -> void:
 			var dir := (global_basis * (frame.basis * Vector3.FORWARD)).normalized()
 			Game.mission.projectiles.fire("pulse", muzzle, dir * AUTO_SPEED + velocity, AUTO_DAMAGE * float(stats["turret_damage"]))
 			_fx_auto.rpc(i)
-	auto_aim = aims
+	auto_aim = aims_now
 
 
 # --- Stations ----------------------------------------------------------------------------------
 
 @rpc("any_peer", "call_local", "reliable")
 func request_station(id: String) -> void:
-	if not multiplayer.is_server() or not alive or not id in STATIONS:
+	if not multiplayer.is_server() or not alive or not has_station(id):
 		return
 	var pid := Game.sender_id()
 	var holder := int(occupants.get(id, 0))
 	if Net.is_bot(holder):
 		_release(id)  # Crew bots make room for human crew.
 	elif holder != 0 and holder != pid and Net.roster.has(holder):
-		_station_denied.rpc_id(pid, "%s is in use by %s" % [ShipBuilder.STATION_NAMES[id], Net.player_name(holder)])
+		_station_denied.rpc_id(pid, "%s is in use by %s" % [station_name(id), Net.player_name(holder)])
 		return
-	if id == "scout":
-		var scout: Scout = Game.mission.scout
+	if is_scout_station(id):
+		var scout: Scout = Game.mission.scout_at(id)
 		if scout == null or not scout.can_launch():
 			_station_denied.rpc_id(pid, scout.status_text() if scout else "Scout unavailable")
 			return
@@ -1279,8 +1582,8 @@ func request_station(id: String) -> void:
 	o[id] = pid
 	occupants = o
 	_inputs.erase(id)
-	if id == "scout":
-		Game.mission.scout.launch(pid)
+	if is_scout_station(id):
+		Game.mission.scout_at(id).launch(pid)
 	_station_granted.rpc_id(pid, id)
 
 
@@ -1307,8 +1610,10 @@ func _release(id: String) -> void:
 	o.erase(id)
 	occupants = o
 	_inputs.erase(id)
-	if id == "scout" and Game.mission and Game.mission.scout:
-		Game.mission.scout.pilot_left()
+	if is_scout_station(id) and Game.mission:
+		var scout: Scout = Game.mission.scout_at(id)
+		if scout:
+			scout.pilot_left()
 	if pid == multiplayer.get_unique_id() or pid in multiplayer.get_peers():
 		_station_released.rpc_id(pid, id)
 
@@ -1322,7 +1627,7 @@ func station_input(id: String, data: Dictionary) -> void:
 
 ## Server: a crew bot takes a free station. Returns false if someone else holds it.
 func bot_claim_station(bot_id: int, id: String) -> bool:
-	if not multiplayer.is_server() or not alive or not id in STATIONS:
+	if not multiplayer.is_server() or not alive or not has_station(id):
 		return false
 	if occupants.has(id) and int(occupants[id]) != bot_id:
 		return false
@@ -1341,15 +1646,10 @@ func bot_station_input(bot_id: int, id: String, data: Dictionary) -> void:
 
 func _apply_station_input(id: String, data: Dictionary) -> void:
 	_inputs[id] = data
-	if data.has("aim"):
-		var a: Vector2 = data["aim"]
-		match id:
-			"gun_l":
-				aim_l = (turrets["gun_l"] as Turret).clamp_aim(a)
-			"gun_r":
-				aim_r = (turrets["gun_r"] as Turret).clamp_aim(a)
-			"mining":
-				aim_m = (turrets["mining"] as Turret).clamp_aim(a)
+	if data.has("aim") and turrets.has(id):
+		var i := (layout["aimables"] as Array).find(id)
+		if i >= 0:
+			aims[i] = (turrets[id] as Turret).clamp_aim(data["aim"])
 
 
 @rpc("any_peer", "call_local", "reliable")
@@ -1431,10 +1731,12 @@ func _fx_hit(local_pos: Vector3, shielded: bool, kind: String) -> void:
 
 @rpc("authority", "call_local", "unreliable")
 func _fx_shot(id: String, weapon: String) -> void:
-	var t: Turret = turrets[id]
+	var t: Turret = turrets.get(id)
+	if t == null:
+		return
 	t.kick()
 	var muzzle := to_global(t.muzzle_local(t.aim))
-	Sfx.play(weapon, muzzle, -8.0)
+	Sfx.play(weapon, muzzle, -8.0 if t.style != "heavy" else -5.0, 1.0 if t.style != "heavy" else 0.85)
 	Fx.flash(muzzle, Color(0.4, 0.8, 1.0) if weapon != "flak" else Color(1.0, 0.7, 0.3), 2.5, 6.0, 0.06)
 
 
@@ -1446,8 +1748,9 @@ func _fx_collect(_kind: String, value: int) -> void:
 
 
 @rpc("authority", "call_local", "reliable")
-func _fx_breach(hatch: int) -> void:
-	var pos := to_global(ShipBuilder.HATCHES[hatch]["inside"] + Vector3(0, 3.0, 0))
+func _fx_breach(hatch_i: int) -> void:
+	var inside: Vector3 = hatch(hatch_i)["inside"]
+	var pos := to_global(inside + Vector3(0, 3.0, 0))
 	Fx.sparks(pos, Color(1.0, 0.5, 0.2), 30, 8.0)
 	Sfx.play("breach", pos)
 	if Game.mission:
@@ -1477,8 +1780,8 @@ func _fx_auto(i: int) -> void:
 
 @rpc("authority", "call_local", "reliable")
 func _fx_touchdown() -> void:
-	for lp: Vector3 in ShipBuilder.LEGS:
-		var foot := to_global(lp + Vector3(0, -ShipBuilder.LEG_LENGTH, 0))
+	for lp: Vector3 in layout["legs"]:
+		var foot := to_global(lp + Vector3(0, -float(layout["leg_length"]), 0))
 		Fx.sparks(foot, Color(0.85, 0.8, 0.7), 10, 4.0, 0.05, 0.5)
 	Sfx.play("dock", global_position, 2.0, 0.7)
 	if Game.mission:
@@ -1488,6 +1791,13 @@ func _fx_touchdown() -> void:
 @rpc("authority", "call_local", "unreliable")
 func _fx_crate(local_pos: Vector3) -> void:
 	Sfx.play("dock", to_global(local_pos), -10.0, 1.6)
+
+
+@rpc("authority", "call_local", "unreliable")
+func _fx_buy(local_pos: Vector3) -> void:
+	var pos := to_global(local_pos)
+	Sfx.play("buy", pos, -2.0)
+	Fx.sparks(pos + Vector3(0, 0.3, 0), Color(1.0, 0.85, 0.35), 14, 3.5, 0.04, 0.5)
 
 
 @rpc("authority", "call_local", "reliable")
@@ -1540,19 +1850,21 @@ func _update_dock_parts(delta: float) -> void:
 func _update_visuals(delta: float) -> void:
 	var lp: CrewMember = Game.mission.local_player if Game.mission else null
 	var guns: Array = _ext["autocannons"]
-	var active := active_cannons()
+	var slots := turret_slots()
+	var active := mini(autocannons, slots)
 	for i in guns.size():
 		var g: Dictionary = guns[i]
-		(g["root"] as Node3D).visible = i in active
-		if i in active and i < auto_aim.size():
+		(g["root"] as Node3D).visible = i < slots
+		(g["head"] as Node3D).visible = i < active
+		if i < active and i < auto_aim.size():
 			(g["head"] as Node3D).rotation.y = auto_aim[i].x
 			(g["pitch"] as Node3D).rotation.x = auto_aim[i].y
 	var hub_text := _hub_listing()
 	if hub_text != _hub_text:
 		_hub_text = hub_text
 		(_int["hub_label"] as Label3D).text = hub_text
-	for id: String in ["gun_l", "gun_r", "mining"]:
-		var a: Vector2 = aim_l if id == "gun_l" else (aim_r if id == "gun_r" else aim_m)
+	for id: String in turrets:
+		var a := aim_of(id)
 		if lp and lp.station == id:
 			a = lp.station_aim
 		(turrets[id] as Turret).set_aim(a)
@@ -1562,24 +1874,29 @@ func _update_visuals(delta: float) -> void:
 	_shield_flash = maxf(0.0, _shield_flash - delta * 2.5)
 	_shield_mat.set_shader_parameter("intensity", _shield_flash)
 	_shield_mat.set_shader_parameter("base", 0.0 if shield_down else 0.025 * clampf(shield / max_shield, 0.0, 1.0))
-	_beam.visible = mining_on
-	if mining_on:
-		var t: Turret = turrets["mining"]
-		var from := t.muzzle_local(t.aim)
-		var to := to_local(mining_end)
-		Models.place_strut(_beam, from, to)
-		_beam.scale = Vector3(1.0 + randf() * 0.4, 1.0, 1.0 + randf() * 0.4) * _beam.scale
-		_beam_light.position = to
-		_beam_light.light_energy = 2.5 + randf() * 1.5
-		if randf() < 0.35:
-			Fx.sparks(mining_end, Color(1.0, 0.6, 0.25), 4, 6.0, 0.05, 0.35)
-	else:
-		_beam_light.light_energy = 0.0
-	if mining_on != _mine_audio.playing:
-		if mining_on:
-			_mine_audio.play()
+	for id: String in _beams:
+		var bm: Dictionary = _beams[id]
+		var mesh: MeshInstance3D = bm["mesh"]
+		var light: OmniLight3D = bm["light"]
+		var audio: AudioStreamPlayer3D = bm["audio"]
+		var on := laser_on(id)
+		mesh.visible = on
+		if on:
+			var t: Turret = turrets[id]
+			var to := to_local(laser_end(id))
+			Models.place_strut(mesh, t.muzzle_local(t.aim), to)
+			mesh.scale = Vector3(1.0 + randf() * 0.4, 1.0, 1.0 + randf() * 0.4) * mesh.scale
+			light.position = to
+			light.light_energy = 2.5 + randf() * 1.5
+			if randf() < 0.35:
+				Fx.sparks(laser_end(id), Color(1.0, 0.6, 0.25), 4, 6.0, 0.05, 0.35)
 		else:
-			_mine_audio.stop()
+			light.light_energy = 0.0
+		if on != audio.playing:
+			if on:
+				audio.play()
+			else:
+				audio.stop()
 	_engine_audio.pitch_scale = 0.75 + clampf(velocity.length() / 14.0, 0.0, 1.0) * 0.6
 	# Alarm lights inside the ship.
 	var alarm := alive and (boarders > 0 or hull < max_hull * 0.3 or not engine_online or not weapons_online or shield_down)
@@ -1620,5 +1937,5 @@ func _hub_listing() -> String:
 	if lines.size() == 1:
 		lines.append("(nothing yet)")
 	lines.append("")
-	lines.append("Auto cannons %d/%d" % [autocannons, RunItems.MAX_AUTOCANNONS])
+	lines.append("Auto turrets %d/%d" % [mini(autocannons, turret_slots()), turret_slots()])
 	return "\n".join(lines)

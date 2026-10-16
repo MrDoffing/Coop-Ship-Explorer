@@ -1,11 +1,12 @@
 class_name SupplyCrate
 extends Node3D
-## A crate of free supplies from a waystation (see RunItems).
+## A crate of supplies from a waystation shop (see RunItems).
 ##
-## Crates live in the mothership's interior (Interior/Cargo, ship-local space like the crew), so
-## once carried aboard they ride along. While the ship is landed its frame is fixed, so the same
-## space also covers the pier and the station building. The server decides who carries a crate;
-## every peer places a carried crate in its carrier's hands.
+## Shop stock sits on the shop's pedestals with a price tag until the crew buys it with the dive's
+## credits; then it can be picked up. Crates live in the mothership's interior (Interior/Cargo,
+## ship-local space like the crew), so once carried aboard they ride along. While the ship is
+## landed its frame is fixed, so the same space also covers the pier and the shop. The server
+## decides who carries a crate; every peer places a carried crate in its carrier's hands.
 
 const SIZE := Vector3(0.9, 0.6, 0.6)
 
@@ -13,23 +14,28 @@ const SIZE := Vector3(0.9, 0.6, 0.6)
 var carrier := 0
 var net_pos := Vector3.ZERO
 var net_yaw := 0.0
+## Shop price in credits; 0 once bought.
+var price := 0
 
 var item := ""
 var _ship: Mothership
 var _area: Area3D
 var _label: Label3D
 var _last_carrier := -1
+var _last_price := -1
+var _tag: Node3D
 ## Server: where the carrier last stood (to drop the crate if they disconnect or are knocked out).
 var last_carrier_pos := Vector3.ZERO
 
 
 func _init() -> void:
-	NetUtil.add_sync(self, [], ["carrier", "net_pos", "net_yaw"], 0.05)
+	NetUtil.add_sync(self, [], ["carrier", "net_pos", "net_yaw", "price"], 0.05)
 
 
 func setup(data: Dictionary) -> void:
 	name = str(data["name"])
 	item = str(data["item"])
+	price = int(data.get("price", 0))
 	position = data["pos"]
 	net_pos = position
 	net_yaw = float(data.get("yaw", 0.0))
@@ -86,14 +92,41 @@ func _build() -> void:
 	_label.outline_size = 8
 	_label.modulate = col.lerp(Color.WHITE, 0.4)
 	_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	_label.position = Vector3(0, SIZE.y * 0.5 + 0.32, 0)
+	_label.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+	_label.position = Vector3(0, SIZE.y * 0.5 + 0.2, 0)
 	_label.visibility_range_end = 9.0
+	# Right up close the prompt says the same, and a billboard that big would fill the view.
+	_label.visibility_range_begin = 1.6
 	add_child(_label)
+	# Holographic price tag frame around crates for sale.
+	_tag = Node3D.new()
+	add_child(_tag)
+	var holo := Models.emissive(Color(0.35, 0.85, 1.0), 1.6, Color(0.02, 0.05, 0.06))
+	for x: float in [-0.52, 0.52]:
+		for z: float in [-0.37, 0.37]:
+			Models.box(_tag, Vector3(x, 0.05, z), Vector3(0.03, SIZE.y + 0.2, 0.03), holo)
+	for y: float in [-0.35, 0.45]:
+		Models.box(_tag, Vector3(0, y, -0.37), Vector3(1.07, 0.03, 0.03), holo)
+		Models.box(_tag, Vector3(0, y, 0.37), Vector3(1.07, 0.03, 0.03), holo)
+	_refresh_label()
+
+
+func _refresh_label() -> void:
+	_last_price = price
+	if price > 0:
+		_label.text = "%s\n%d CR\n%s" % [RunItems.display_name(item), price, RunItems.describe(item)]
+		_label.font_size = 34
+	else:
+		_label.text = RunItems.display_name(item)
+		_label.font_size = 40
+	_tag.visible = price > 0
 
 
 func _physics_process(_delta: float) -> void:
 	if _ship == null:
 		return
+	if price != _last_price:
+		_refresh_label()
 	if carrier != 0:
 		var c := _ship.crew_root.get_node_or_null(str(carrier)) as CrewMember
 		if c:

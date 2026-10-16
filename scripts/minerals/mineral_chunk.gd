@@ -47,13 +47,18 @@ func _physics_process(delta: float) -> void:
 	var mission := Game.mission as MissionLevel
 	if mission == null:
 		return
+	var catcher: Scout = null
 	if kind == "fuel":
-		var scout := mission.scout
-		if scout and scout.state == Scout.State.FLYING and scout.cargo < scout.max_cargo - 0.5:
-			if scout.global_position.distance_to(global_position) < Scout.PICKUP_RANGE:
-				attracted = true
-				target = scout.global_position
-				carrier = scout.velocity if multiplayer.is_server() else scout.net_vel
+		var best := Scout.PICKUP_RANGE
+		for scout in mission.flying_scouts():
+			var d := scout.global_position.distance_to(global_position)
+			if scout.cargo < scout.max_cargo - 0.5 and d < best:
+				best = d
+				catcher = scout
+		if catcher:
+			attracted = true
+			target = catcher.global_position
+			carrier = catcher.velocity if multiplayer.is_server() else catcher.net_vel
 	else:
 		var ship := mission.ship
 		if ship and ship.alive:
@@ -66,7 +71,7 @@ func _physics_process(delta: float) -> void:
 		var to := target - global_position
 		vel = vel.move_toward(to.normalized() * 24.0 + carrier, 45.0 * delta)
 		if to.length() < 2.2:
-			_collect(mission)
+			_collect(mission, catcher)
 			return
 	position += vel * delta
 	rotation += _spin * delta
@@ -74,7 +79,7 @@ func _physics_process(delta: float) -> void:
 		queue_free()
 
 
-func _collect(mission: MissionLevel) -> void:
+func _collect(mission: MissionLevel, catcher: Scout) -> void:
 	if not multiplayer.is_server():
 		# Hide locally; the server despawns it.
 		visible = false
@@ -82,7 +87,7 @@ func _collect(mission: MissionLevel) -> void:
 		return
 	_collected = true
 	if kind == "fuel":
-		var taken := mission.scout.add_cargo(fuel)
+		var taken := catcher.add_cargo(fuel) if catcher else 0.0
 		if taken > 0.0:
 			mission.fx_event.rpc("fuel_pickup", global_position, 0)
 	else:

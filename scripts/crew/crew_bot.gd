@@ -4,10 +4,10 @@ extends RefCounted
 ##
 ## Priorities: defend themselves against boarders in sight with their blasters, then repair the
 ## engine or weapon systems when they are damaged (offline systems first). When no aliens have
-## been around for a while, one bot mines crystals with the mining laser; otherwise bots man the
-## free side guns and shoot aliens (or nearby egg sacs), and a bot left without a gun turns the
-## mining laser on the aliens. Bots walk the interior waypoint graph, take stations like crew do
-## and give them up when a human wants them.
+## been around for a while, bots mine crystals with the mining lasers (one bot per laser);
+## otherwise bots man the free guns and shoot aliens (or nearby egg sacs), and a bot left without
+## a gun turns a mining laser on the aliens. Bots walk the interior waypoint graph, take stations
+## like crew do and give them up when a human wants them.
 
 const THINK_INTERVAL := 0.5
 ## Start repairing a system once it drops below this.
@@ -40,7 +40,7 @@ var crew: CrewMember
 var task := ""
 var system := ""
 var panel := -1
-## The station the bot works at for "gun" ("gun_l" / "gun_r") and "mine" ("mining").
+## The station the bot works at: a gun station for "gun", a mining laser station for "mine".
 var gun := ""
 var seated := false
 
@@ -136,12 +136,13 @@ func _decide() -> void:
 		return
 	var safe := _threats == 0 and _safe_t >= SAFE_DELAY
 	var g := _pick_gun()
-	# Quiet: mine crystals. Aliens about: man a free gun, or use the laser on them if none is free.
-	if safe and _can_mine() and _pick_deposit() != null:
-		_start_mining()
+	var laser := _free_laser()
+	# Quiet: mine crystals. Aliens about: man a free gun, or use a laser on them if none is free.
+	if safe and laser != "" and _pick_deposit(laser) != null:
+		_start_mining(laser)
 		return
-	if not safe and g == "" and _can_mine():
-		_start_mining()
+	if not safe and g == "" and laser != "":
+		_start_mining(laser)
 		return
 	if g != "":
 		if task != "gun" or gun != g:
@@ -178,7 +179,7 @@ func _repair_need() -> String:
 func _pick_gun() -> String:
 	var ship := crew.ship
 	var options: Array[String] = []
-	for g: String in ["gun_l", "gun_r"]:
+	for g: String in ship.gun_stations():
 		var holder := int(ship.occupants.get(g, 0))
 		if holder != 0 and holder != crew.peer_id:
 			continue
@@ -259,27 +260,35 @@ func _start_gun(g: String) -> void:
 	_goal = Vector3(INF, INF, INF)
 
 
-func _start_mining() -> void:
-	if task == "mine":
+func _start_mining(laser: String) -> void:
+	if task == "mine" and gun == laser:
 		return
-	if seated and gun != "mining":
+	if seated and gun != laser:
 		_unseat(true)
 	task = "mine"
-	gun = "mining"
+	gun = laser
 	crew.tool = 0
 	_target_id = 0
 	_goal = Vector3(INF, INF, INF)
 
 
-## The mining laser is free for this bot (and the ship is not docked).
-func _can_mine() -> bool:
+## A mining laser this bot may use (the one it is on, or a free one), or "" (also while docked).
+func _free_laser() -> String:
 	var ship := crew.ship
 	if ship.landing != Mothership.Dock.FLYING:
-		return false
-	var holder := int(ship.occupants.get("mining", 0))
-	if holder != 0 and holder != crew.peer_id:
-		return false
-	return _bot_on("mine", "mining") == null
+		return ""
+	if task == "mine" and gun in ship.laser_stations():
+		var mine_holder := int(ship.occupants.get(gun, 0))
+		if mine_holder == 0 or mine_holder == crew.peer_id:
+			return gun
+	for id: String in ship.laser_stations():
+		var holder := int(ship.occupants.get(id, 0))
+		if holder != 0 and holder != crew.peer_id:
+			continue
+		if _bot_on("mine", id) != null:
+			continue
+		return id
+	return ""
 
 
 ## Free-flying aliens near the ship.
@@ -322,7 +331,7 @@ func _do_repair(delta: float) -> void:
 ## Walk to a station's seat and claim it. Returns true while seated there.
 func _sit(id: String, delta: float) -> bool:
 	var ship := crew.ship
-	var st: Dictionary = ShipBuilder.STATIONS[id]
+	var st := ship.console(id)
 	var seat: Vector3 = st["seat"]
 	if not seated:
 		if not _walk_to(seat, delta):
@@ -331,16 +340,16 @@ func _sit(id: String, delta: float) -> bool:
 			seated = true
 			crew.station = id
 			crew.position = seat
-			crew.rotation.y = st["yaw"]
+			crew.rotation.y = st["seat_yaw"]
 			crew.velocity = Vector3.ZERO
 			crew.reset_physics_interpolation()
-			_aim = ship.aim_l if id == "gun_l" else (ship.aim_r if id == "gun_r" else ship.aim_m)
+			_aim = ship.aim_of(id)
 			_target_id = 0
 		else:
 			_think = 0.0
 		return false
 	crew.position = seat
-	crew.rotation.y = st["yaw"]
+	crew.rotation.y = st["seat_yaw"]
 	crew.velocity = Vector3.ZERO
 	return true
 
@@ -362,7 +371,7 @@ func _do_gun(delta: float) -> void:
 		_aim.y = move_toward(_aim.y, desired.y, TURN_RATE * delta)
 		_aim = t.clamp_aim(_aim)
 		_target_t += delta
-		var weapon := str(ship.stats["weapon_left" if gun == "gun_l" else "weapon_right"])
+		var weapon := ship.gun_weapon(gun)
 		var tolerance := FIRE_TOLERANCE * (2.5 if weapon == "flak" else 1.0)
 		firing = _target_t > REACTION and (_aim - desired).length() < tolerance and ship.weapons_online
 	crew.station_aim = _aim
@@ -372,9 +381,9 @@ func _do_gun(delta: float) -> void:
 ## Mining laser: crystals when it is quiet, aliens when they are about.
 func _do_mine(delta: float) -> void:
 	var ship := crew.ship
-	if not _sit("mining", delta):
+	if not _sit(gun, delta):
 		return
-	var t: Turret = ship.turrets["mining"]
+	var t: Turret = ship.turrets[gun]
 	_retarget -= delta
 	if _retarget <= 0.0:
 		_retarget = 0.4
@@ -389,7 +398,7 @@ func _do_mine(delta: float) -> void:
 		_target_t += delta
 		firing = _target_t > REACTION and (_aim - desired).length() < LASER_TOLERANCE and ship.weapons_online
 	crew.station_aim = _aim
-	ship.bot_station_input(crew.peer_id, "mining", {"aim": _aim, "fire": firing})
+	ship.bot_station_input(crew.peer_id, gun, {"aim": _aim, "fire": firing})
 
 
 func _choose_laser_target(t: Turret) -> void:
@@ -417,7 +426,7 @@ func _choose_laser_target(t: Turret) -> void:
 			best_d = score
 			found = alien
 	else:
-		found = _pick_deposit()
+		found = _pick_deposit(gun)
 	var id := found.get_instance_id() if found else 0
 	if id != _target_id:
 		_target_id = id
@@ -443,17 +452,18 @@ func _laser_point() -> Vector3:
 	return alien.global_position
 
 
-## Nearest crystal deposit the mining laser can reach and see (not fuel, not next to a nest).
-func _pick_deposit() -> Deposit:
+## Nearest crystal deposit a mining laser can reach and see (not fuel, not next to a nest), and
+## that no other bot is cutting.
+func _pick_deposit(laser: String) -> Deposit:
 	var ship := crew.ship
-	var t: Turret = ship.turrets["mining"]
+	var t: Turret = ship.turrets[laser]
 	var mount := ship.to_global(t.transform.origin)
 	var space := crew.get_world_3d().direct_space_state
 	var best: Deposit = null
 	var best_d := float(ship.stats["mining_range"]) - 3.0
 	for d in crew.get_tree().get_nodes_in_group("deposits"):
 		var dep := d as Deposit
-		if dep == null or dep.kind == "fuel" or dep.hp <= 0.0:
+		if dep == null or dep.kind == "fuel" or dep.hp <= 0.0 or _deposit_taken(dep):
 			continue
 		var p := dep.global_position + dep.normal * 0.8
 		var dist := mount.distance_to(p)
@@ -475,6 +485,15 @@ func _pick_deposit() -> Deposit:
 	return best
 
 
+## Another bot's mining laser is already on this deposit.
+func _deposit_taken(dep: Deposit) -> bool:
+	for c in crew.ship.crew_root.get_children():
+		var m := c as CrewMember
+		if m and m != crew and m.bot and m.brain and m.brain.task == "mine" and m.brain._target_id == dep.get_instance_id():
+			return true
+	return false
+
+
 func _do_idle(delta: float) -> void:
 	var idx := absi(crew.peer_id) % IDLE_SPOTS.size()
 	if _walk_to(IDLE_SPOTS[idx], delta):
@@ -493,8 +512,8 @@ func _unseat(release: bool) -> void:
 		crew.ship.release_peer(crew.peer_id)
 	seated = false
 	if crew.station != "":
-		var st: Dictionary = ShipBuilder.STATIONS[crew.station]
-		var yaw: float = st["yaw"]
+		var st := crew.ship.console(crew.station)
+		var yaw: float = st["seat_yaw"]
 		crew.position = st["seat"] + Basis(Vector3.UP, yaw) * Vector3(0, 0.05, 0.9)
 		crew.reset_physics_interpolation()
 	crew.station = ""
@@ -664,7 +683,7 @@ func _target_point(t: Turret) -> Vector3:
 		_target_id = 0
 		return Vector3(INF, INF, INF)
 	var ship := crew.ship
-	var weapon := str(ship.stats["weapon_left" if gun == "gun_l" else "weapon_right"])
+	var weapon := ship.gun_weapon(gun)
 	var speed := float(Mothership.WEAPON_DEFS.get(weapon, Mothership.WEAPON_DEFS["pulse"])["speed"])
 	var p := alien.global_position
 	if speed > 0.0:
