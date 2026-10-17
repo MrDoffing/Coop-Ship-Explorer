@@ -6,9 +6,10 @@ extends RefCounted
 ## the magazine runs dry, and topping it up between fights), then repair the engine or weapon
 ## systems when they are damaged (offline systems first). When no aliens have
 ## been around for a while, bots mine crystals with the mining lasers (one bot per laser);
-## otherwise bots man the free guns and shoot aliens (or nearby egg sacs), and a bot left without
-## a gun turns a mining laser on the aliens. Bots walk the interior waypoint graph, take stations
-## like crew do and give them up when a human wants them.
+## otherwise bots man the free gun pods and shoot aliens (or nearby egg sacs) in bursts that never
+## overheat the guns, and a bot left without a gun turns a mining laser on the aliens. Bots walk
+## the interior waypoint graph, take stations like crew do and give them up when a human wants
+## them.
 ##
 ## When the ship has landed at an abandoned station and the host goes out exploring, bots drop
 ## their jobs and follow the host around the station. They never pick up crates, but they shoot
@@ -25,6 +26,10 @@ const TURN_RATE := 2.4
 const FIRE_TOLERANCE := 0.045
 ## Seconds a bot studies a new target before opening fire.
 const REACTION := 0.35
+## Gun pods: a bot stops firing once the heat reaches POD_HEAT_STOP and waits for it to fall to
+## POD_HEAT_RESUME, so it never fires hot (that would damage the weapon systems).
+const POD_HEAT_STOP := 0.85
+const POD_HEAT_RESUME := 0.4
 ## Self-defence: boarders closer than this (and in line of sight) are shot on sight. Bots react
 ## and shoot a little slower and less accurately than a player would.
 const DEFEND_RANGE := 10.0
@@ -64,6 +69,8 @@ var _target_id := 0
 var _target_sac := -1
 var _target_t := 0.0
 var _retarget := 0.0
+## Letting a hot gun pod cool down before firing again.
+var _cooling := false
 var _fx_t := 0.0
 ## Boarder being fought (instance id), and the self-defence timers.
 var _foe_id := 0
@@ -380,6 +387,11 @@ func _do_gun(delta: float) -> void:
 		_retarget = 0.4
 		_choose_target(t)
 	var firing := false
+	var heat := ship.gun_heat_of(gun)
+	if heat >= POD_HEAT_STOP:
+		_cooling = true
+	elif heat <= POD_HEAT_RESUME:
+		_cooling = false
 	var target := _target_point(t)
 	if target.is_finite():
 		var desired := t.aim_at_local(ship.to_local(target))
@@ -387,9 +399,7 @@ func _do_gun(delta: float) -> void:
 		_aim.y = move_toward(_aim.y, desired.y, TURN_RATE * delta)
 		_aim = t.clamp_aim(_aim)
 		_target_t += delta
-		var weapon := ship.gun_weapon(gun)
-		var tolerance := FIRE_TOLERANCE * (2.5 if weapon == "flak" else 1.0)
-		firing = _target_t > REACTION and (_aim - desired).length() < tolerance and ship.weapons_online
+		firing = _target_t > REACTION and (_aim - desired).length() < FIRE_TOLERANCE and ship.weapons_online and not _cooling
 	crew.station_aim = _aim
 	ship.bot_station_input(crew.peer_id, gun, {"aim": _aim, "fire": firing})
 
@@ -759,14 +769,11 @@ func _target_point(t: Turret) -> Vector3:
 		_target_id = 0
 		return Vector3(INF, INF, INF)
 	var ship := crew.ship
-	var weapon := ship.gun_weapon(gun)
-	var speed := float(Mothership.WEAPON_DEFS.get(weapon, Mothership.WEAPON_DEFS["pulse"])["speed"])
 	var p := alien.global_position
-	if speed > 0.0:
-		var muzzle := ship.to_global(t.muzzle_local(_aim))
-		var rel_v := alien.net_vel - ship.velocity
-		for i in 2:
-			p = alien.global_position + rel_v * (muzzle.distance_to(p) / speed)
+	var muzzle := ship.to_global(t.muzzle_local(_aim))
+	var rel_v := alien.net_vel - ship.velocity
+	for i in 2:
+		p = alien.global_position + rel_v * (muzzle.distance_to(p) / GunPod.SPEED)
 	return p
 
 

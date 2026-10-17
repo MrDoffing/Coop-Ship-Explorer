@@ -4,9 +4,14 @@ extends Node3D
 ##
 ## The server simulates authoritative projectiles and applies damage. Every shot is announced to
 ## clients, which fly cosmetic copies that stop on the same geometry but never deal damage.
+##
+## Kinds with "trail" (the gun pods' tracer rounds) draw as a streak behind the round that grows
+## to "len" as it leaves the muzzle: fast rounds that hit a tunnel wall a few metres off are still
+## seen in flight.
 
 const KINDS := {
 	"pulse": {"color": Color(0.35, 0.85, 1.0), "len": 2.4, "width": 0.13, "life": 1.6},
+	"hmg": {"color": Color(0.75, 0.48, 0.2), "len": 5.0, "width": 0.04, "life": 1.4, "trail": true},
 	"flak": {"color": Color(1.0, 0.75, 0.3), "len": 1.0, "width": 0.1, "life": 0.5},
 	"plasma": {"color": Color(0.75, 0.4, 1.0), "orb": 0.75, "life": 3.0, "splash": 16.0},
 	"scout": {"color": Color(0.45, 1.0, 0.45), "len": 1.6, "width": 0.09, "life": 1.3},
@@ -82,9 +87,10 @@ func _spawn(kind: String, pos: Vector3, vel: Vector3, dmg: float, auth: bool) ->
 	mi.material_override = _material(kind)
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mi)
-	mi.global_transform = _xform(pos, vel)
+	var s := {"kind": kind, "pos": pos, "vel": vel, "life": def["life"], "dmg": dmg, "auth": auth, "node": mi, "from": pos}
+	mi.global_transform = _shot_xform(s, pos, vel)
 	mi.reset_physics_interpolation()
-	_shots.append({"kind": kind, "pos": pos, "vel": vel, "life": def["life"], "dmg": dmg, "auth": auth, "node": mi})
+	_shots.append(s)
 
 
 func _physics_process(delta: float) -> void:
@@ -133,7 +139,7 @@ func _physics_process(delta: float) -> void:
 			_shots.remove_at(i)
 		else:
 			s["pos"] = to
-			(s["node"] as Node3D).global_transform = _xform(to, vel)
+			(s["node"] as Node3D).global_transform = _shot_xform(s, to, vel)
 
 
 func _spit_step(s: Dictionary, from: Vector3, to: Vector3, ship: Mothership, scouts: Array[Scout], space: PhysicsDirectSpaceState3D) -> bool:
@@ -213,6 +219,17 @@ func _xform(pos: Vector3, vel: Vector3) -> Transform3D:
 	return Transform3D(Basis.looking_at(dir, up), pos)
 
 
+## A shot's transform at `pos`; a trail is stretched over the distance it has flown so far (up to
+## its full length), so it never reaches back past the muzzle.
+func _shot_xform(s: Dictionary, pos: Vector3, vel: Vector3) -> Transform3D:
+	var x := _xform(pos, vel)
+	var def: Dictionary = KINDS[s["kind"]]
+	if def.get("trail", false):
+		var flown := (s["from"] as Vector3).distance_to(pos)
+		x = x.scaled_local(Vector3(1.0, 1.0, clampf(flown / float(def["len"]), 0.02, 1.0)))
+	return x
+
+
 func _mesh(kind: String) -> Mesh:
 	if _meshes.has(kind):
 		return _meshes[kind]
@@ -238,8 +255,10 @@ func _mesh(kind: String) -> Mesh:
 		var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
 		var norms: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
 		var rot := Basis(Vector3.RIGHT, -PI / 2.0)
+		# A trail starts at the round and streams out behind it (+Z).
+		var shift := Vector3(0, 0, float(def["len"]) * 0.5) if def.get("trail", false) else Vector3.ZERO
 		for i in verts.size():
-			verts[i] = rot * verts[i]
+			verts[i] = rot * verts[i] + shift
 			norms[i] = rot * norms[i]
 		arr[Mesh.ARRAY_VERTEX] = verts
 		arr[Mesh.ARRAY_NORMAL] = norms

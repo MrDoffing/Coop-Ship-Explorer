@@ -3,7 +3,8 @@ extends CanvasLayer
 ## In-mission HUD: ship systems (percentage inside each bar, absolute value beside it), depth,
 ## credits and research points, crew roster, interaction prompts, station read-outs, alerts, the
 ## scouts' dock markers, waystation and abandoned station markers, carried crates and
-## end-of-mission banners.
+## end-of-mission banners. In a gun pod there is no crosshair or station read-out: the pod has its
+## own sight and displays.
 
 ## Waystations closer than this get a marker on screen.
 const STATION_MARKER_RANGE := 320.0
@@ -488,7 +489,8 @@ func _update_player(player: CrewMember, ship: Mothership, _delta: float) -> void
 		show_banner("", "")
 	if player.alive:
 		_prompt.text = player.prompt if player.station == "" else ""
-	_crosshair.visible = player.alive and (player.station == "" or ship.is_turret_station(player.station) or ship.is_scout_station(player.station))
+	# A gun pod has its own reflector sight in front of the gunner.
+	_crosshair.visible = player.alive and (player.station == "" or ship.station_kind(player.station) == "laser" or ship.is_scout_station(player.station))
 
 
 ## The tool in hand: the hand weapon with its magazine (or the reload under way, or a reminder to
@@ -514,7 +516,8 @@ func _update_tool_label(player: CrewMember) -> void:
 
 
 func _update_station(player: CrewMember, ship: Mothership, mission: MissionLevel) -> void:
-	if player == null or player.station == "" or not player.alive:
+	# Gun pods show everything on their own control panel.
+	if player == null or player.station == "" or not player.alive or ship.station_kind(player.station) == "gun":
 		_station_panel.visible = false
 		return
 	_station_panel.visible = true
@@ -547,10 +550,6 @@ func _update_station(player: CrewMember, ship: Mothership, mission: MissionLevel
 				Mothership.Dock.LIFTOFF:
 					_station_info.text = "Lifting off..."
 			_station_help.text = "W/S throttle   A/D turn   Space/Ctrl up/down\nT autopilot   X full stop   B emergency blast\nL land at / lift off from a station\nMouse: look around   E: leave"
-		"gun":
-			var w := ship.gun_weapon(player.station)
-			_station_info.text = "%s%s" % [Game.GUNS[w]["name"], "" if ship.weapons_online else "\nWEAPONS OFFLINE - needs repair"]
-			_station_help.text = "Mouse: aim   LMB: fire   RMB: zoom   E: leave"
 		"laser":
 			var reach := "Beam active" if ship.laser_on(player.station) else "Hold LMB to fire the mining laser"
 			_station_info.text = "%s%s" % [reach, "" if ship.weapons_online else "\nWEAPONS OFFLINE - needs repair"]
@@ -671,7 +670,8 @@ func _crew_report(ship: Mothership, mission: MissionLevel) -> String:
 	lines.append("Research so far: %d RP (depth %d, waystations %d, nests %d)" % [rp["total"], rp["depth"], rp["stations"], rp["nests"]])
 	var guns := PackedStringArray()
 	for g: String in ship.gun_stations():
-		guns.append("%s: %s" % [ship.station_name(g), Game.GUNS[ship.gun_weapon(g)]["name"]])
+		guns.append("%s: %s, heat %d%%" % [ship.station_name(g), "new belt loading" if ship.gun_reloading(g) else "%d rounds" % ship.gun_ammo_of(g),
+			int(ship.gun_heat_of(g) * 100.0)])
 	lines.append(", ".join(guns))
 	if not ship.run_mods.is_empty():
 		var mods := PackedStringArray()

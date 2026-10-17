@@ -14,11 +14,14 @@ const ORDER := ["prospector", "vanguard", "excavator", "dreadnought"]
 ## Ship catalogue. Station entries: "kind" is "pilot", "gun", "laser" or "scout", "spot" the
 ## console spot in the ship's interior (ShipInteriors); guns and lasers have a hull mount ("pos", rest "yaw" in degrees, "limits" = [yaw min, yaw max, pitch min,
 ## pitch max] in degrees relative to the rest direction, "style"), scouts a dock ("dock") and the
-## direction they are launched in ("launch", ship-local velocity).
+## direction they are launched in ("launch", ship-local velocity). Guns are gun pods (GunPod;
+## "pos" is the centre of the ball) on a "mount": a "barbette" up from the roof or deck at height
+## "base", or a "tower" (a column on an outrigger arm) for a pod out beside the hull. The pods sit
+## where their barrels clear the hull over the whole aim range (checked by the gunpod autotest).
 const TYPES := {
 	"prospector": {
 		"name": "Prospector", "role": "Mining frigate", "cost": 0,
-		"desc": "The crew's trusty all-rounder: a manned gun on each side, a nose-mounted mining laser and a scout pod under the belly.",
+		"desc": "The crew's trusty all-rounder: a gun pod on each side, a nose-mounted mining laser and a scout pod under the belly.",
 		"hull": 400.0, "shield": 120.0, "speed": 9.0, "accel": 2.6, "yaw": 26.0, "vert": 5.0, "slots": 1,
 		"mining": 1.0, "laser_vs_alien": 1.0, "scout_hp": 1.0, "scout_damage": 1.0, "scout_speed": 1.0,
 		"scout_style": "standard", "chase": 40.0,
@@ -31,9 +34,9 @@ const TYPES := {
 		"stations": [
 			{"id": "pilot", "kind": "pilot", "spot": "cockpit", "name": "Pilot Seat", "label": "PILOT"},
 			{"id": "gun_l", "kind": "gun", "spot": "port_window", "name": "Port Gun", "label": "PORT GUN",
-				"pos": Vector3(-8.8, 1.8, -5.2), "yaw": 90.0, "limits": [-124.0, 88.0, -60.0, 72.0], "style": "gun"},
+				"pos": Vector3(-10.0, 1.9, -5.0), "yaw": 90.0, "limits": [-124.0, 88.0, -60.0, 72.0], "style": "gun", "mount": "tower"},
 			{"id": "gun_r", "kind": "gun", "spot": "stbd_window", "name": "Starboard Gun", "label": "STARBOARD GUN",
-				"pos": Vector3(8.8, 1.8, -5.2), "yaw": -90.0, "limits": [-88.0, 124.0, -60.0, 72.0], "style": "gun"},
+				"pos": Vector3(10.0, 1.9, -5.0), "yaw": -90.0, "limits": [-88.0, 124.0, -60.0, 72.0], "style": "gun", "mount": "tower"},
 			{"id": "mining", "kind": "laser", "spot": "front_port", "name": "Mining Laser", "label": "MINING LASER",
 				"pos": Vector3(0, 1.45, -14.35), "yaw": 0.0, "limits": [-82.0, 82.0, -80.0, 78.0], "style": "laser"},
 			{"id": "scout", "kind": "scout", "spot": "bay", "name": "Scout Bay", "label": "SCOUT BAY",
@@ -63,7 +66,7 @@ const TYPES := {
 	},
 	"vanguard": {
 		"name": "Vanguard Carrier", "role": "Scout carrier", "cost": 250,
-		"desc": "A carrier with a flight deck and two combat scouts (tougher, faster and harder-hitting than the standard pod). Only one manned gun, on the bow.",
+		"desc": "A carrier with a flight deck and two combat scouts (tougher, faster and harder-hitting than the standard pod). Only one gun pod, on the bow.",
 		"hull": 380.0, "shield": 140.0, "speed": 9.4, "accel": 2.8, "yaw": 27.0, "vert": 5.2, "slots": 1,
 		"mining": 1.0, "laser_vs_alien": 1.0, "scout_hp": 1.6, "scout_damage": 1.5, "scout_speed": 1.15,
 		"scout_style": "combat", "chase": 42.0,
@@ -76,7 +79,7 @@ const TYPES := {
 		"stations": [
 			{"id": "pilot", "kind": "pilot", "spot": "bridge_pilot", "name": "Pilot Seat", "label": "PILOT"},
 			{"id": "gun_f", "kind": "gun", "spot": "bridge_port", "name": "Bow Gun", "label": "BOW GUN",
-				"pos": Vector3(0, 5.95, -17.4), "yaw": 0.0, "limits": [-150.0, 150.0, -35.0, 80.0], "style": "gun"},
+				"pos": Vector3(0, 6.75, -17.4), "yaw": 0.0, "limits": [-150.0, 150.0, -35.0, 80.0], "style": "gun", "mount": "barbette", "base": 5.0},
 			{"id": "mining", "kind": "laser", "spot": "bridge_stbd", "name": "Mining Laser", "label": "MINING LASER",
 				"pos": Vector3(0, 1.2, -16.15), "yaw": 0.0, "limits": [-82.0, 82.0, -80.0, 55.0], "style": "laser"},
 			{"id": "scout", "kind": "scout", "spot": "flight_a", "name": "Scout Bay A", "label": "SCOUT A",
@@ -109,7 +112,7 @@ const TYPES := {
 	},
 	"excavator": {
 		"name": "Excavator Prime", "role": "Heavy mining ship", "cost": 300,
-		"desc": "An industrial miner with two arm-mounted mining lasers that cut crystal (and aliens) far faster. One manned gun on the front corner, and two auto turret slots.",
+		"desc": "An industrial miner with two arm-mounted mining lasers that cut crystal (and aliens) far faster. One gun pod on the front corner, and two auto turret slots.",
 		"hull": 460.0, "shield": 110.0, "speed": 8.4, "accel": 2.4, "yaw": 24.0, "vert": 4.8, "slots": 2,
 		"mining": 1.45, "laser_vs_alien": 1.6, "scout_hp": 1.0, "scout_damage": 1.0, "scout_speed": 1.0,
 		"scout_style": "standard", "chase": 42.0,
@@ -122,7 +125,7 @@ const TYPES := {
 		"stations": [
 			{"id": "pilot", "kind": "pilot", "spot": "ctl_pilot", "name": "Pilot Seat", "label": "PILOT"},
 			{"id": "gun_f", "kind": "gun", "spot": "gunnery", "name": "Forward Gun", "label": "FORWARD GUN",
-				"pos": Vector3(5.6, 5.55, -5.6), "yaw": -45.0, "limits": [-150.0, 150.0, -35.0, 80.0], "style": "gun"},
+				"pos": Vector3(5.6, 6.5, -5.6), "yaw": -45.0, "limits": [-150.0, 150.0, -35.0, 80.0], "style": "gun", "mount": "barbette", "base": 4.8},
 			{"id": "mining", "kind": "laser", "spot": "ctl_port", "name": "Port Mining Laser", "label": "PORT LASER",
 				"pos": Vector3(-3.8, 0.15, -16.7), "yaw": 0.0, "limits": [-78.0, 62.0, -75.0, 70.0], "style": "drill"},
 			{"id": "mining2", "kind": "laser", "spot": "ctl_stbd", "name": "Starboard Mining Laser", "label": "STARBOARD LASER",
@@ -155,7 +158,7 @@ const TYPES := {
 	},
 	"dreadnought": {
 		"name": "Dreadnought", "role": "Heavy warship", "cost": 400,
-		"desc": "Big, armoured and slow. Three manned guns (one on each side and one on the front corner) and two auto turret slots.",
+		"desc": "Big, armoured and slow. Three armoured gun pods (one on each side and one on the front corner) and two auto turret slots.",
 		"hull": 640.0, "shield": 160.0, "speed": 7.6, "accel": 2.2, "yaw": 22.0, "vert": 4.4, "slots": 2,
 		"mining": 1.0, "laser_vs_alien": 1.0, "scout_hp": 1.0, "scout_damage": 1.0, "scout_speed": 1.0,
 		"scout_style": "standard", "chase": 47.0,
@@ -168,11 +171,11 @@ const TYPES := {
 		"stations": [
 			{"id": "pilot", "kind": "pilot", "spot": "helm", "name": "Pilot Seat", "label": "HELM"},
 			{"id": "gun_l", "kind": "gun", "spot": "battery_port", "name": "Port Gun", "label": "PORT BATTERY",
-				"pos": Vector3(-10.5, 2.4, -6.4), "yaw": 90.0, "limits": [-124.0, 88.0, -60.0, 72.0], "style": "heavy"},
+				"pos": Vector3(-11.4, 2.4, -6.0), "yaw": 90.0, "limits": [-124.0, 88.0, -60.0, 72.0], "style": "heavy", "mount": "tower"},
 			{"id": "gun_r", "kind": "gun", "spot": "battery_stbd", "name": "Starboard Gun", "label": "STARBOARD BATTERY",
-				"pos": Vector3(10.5, 2.4, -6.4), "yaw": -90.0, "limits": [-88.0, 124.0, -60.0, 72.0], "style": "heavy"},
+				"pos": Vector3(11.4, 2.4, -6.0), "yaw": -90.0, "limits": [-88.0, 124.0, -60.0, 72.0], "style": "heavy", "mount": "tower"},
 			{"id": "gun_f", "kind": "gun", "spot": "bridge_stbd", "name": "Forward Gun", "label": "FORWARD GUN",
-				"pos": Vector3(5.9, 6.25, -10.2), "yaw": -45.0, "limits": [-150.0, 150.0, -35.0, 80.0], "style": "heavy"},
+				"pos": Vector3(5.9, 6.8, -10.2), "yaw": -45.0, "limits": [-150.0, 150.0, -35.0, 80.0], "style": "heavy", "mount": "barbette", "base": 4.0},
 			{"id": "mining", "kind": "laser", "spot": "bridge_port", "name": "Mining Laser", "label": "MINING LASER",
 				"pos": Vector3(0, 2.3, -17.45), "yaw": 0.0, "limits": [-82.0, 82.0, -80.0, 78.0], "style": "laser"},
 			{"id": "scout", "kind": "scout", "spot": "scout_bay", "name": "Scout Bay", "label": "SCOUT BAY",

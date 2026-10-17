@@ -18,6 +18,9 @@ extends CharacterBody3D
 ##
 ## Crew bots are CrewMembers with `bot = true`: the server owns them and a CrewBot brain drives
 ## them (repairs and side guns); everyone else sees them like any other crew member.
+##
+## A gunner sits inside the gun pod (GunPod) and looks out through its sight in first person; the
+## heavy pod swings after the mouse at its own pace. Everyone else sees the gunner in the pod.
 
 const WALK := 4.6
 const SPRINT := 7.2
@@ -51,8 +54,11 @@ var alive := true
 
 var ship: Mothership
 var camera: Camera3D
-## Gun / mining aim relative to the mount, or the scout's (yaw, pitch) while flying it.
+## Gun / mining aim relative to the mount, or the scout's (yaw, pitch) while flying it. In a gun
+## pod this is where the gunner wants it to point; pod_aim is where the pod points as it swings
+## after it.
 var station_aim := Vector2.ZERO
+var pod_aim := Vector2.ZERO
 ## Interaction hint shown by the HUD.
 var prompt := ""
 ## The supply crate this crew member is carrying, if any (looked up every tick).
@@ -85,6 +91,8 @@ var _last_hurt := -100.0
 var _clock := 0.0
 var _chase_yaw := 0.0
 var _chase_pitch := -0.22
+## Leaning into a gun pod's sight (0..1, RMB).
+var _lean := 0.0
 var _bob := 0.0
 var _recoil := 0.0
 var _was_on_floor := true
@@ -357,9 +365,7 @@ func _bot_physics(delta: float) -> void:
 		brain.tick(delta)
 	net_pos = position
 	_head.rotation.x = look_pitch * 0.6
-	_body.visible = alive
-	_body.position.y = -0.3 if station != "" else 0.0
-	_name_label.visible = alive
+	_show_body()
 	_update_held()
 
 
@@ -380,7 +386,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			_:
 				if ship.is_turret_station(station):
 					var t: Turret = ship.turrets[station]
-					station_aim = t.clamp_aim(station_aim + Vector2(-d.x, -d.y) * 0.75)
+					# In a gun pod the view turns with the aim, so it takes the walking sensitivity.
+					station_aim = t.clamp_aim(station_aim + Vector2(-d.x, -d.y) * (1.0 if t is GunPod else 0.75))
 				elif ship.is_scout_station(station):
 					station_aim.x = wrapf(station_aim.x - d.x, -PI, PI)
 					station_aim.y = clampf(station_aim.y - d.y, -1.45, 1.45)
@@ -742,7 +749,13 @@ func _station_physics(blocked: bool) -> void:
 				if Input.is_action_just_pressed("land"):
 					ship.request_land.rpc_id(1)
 			ship.station_input.rpc_id(1, station, data)
-		"gun", "laser":
+		"gun":
+			# The pod is heavy: it swings after the aim at most GunPod.TURN_RATE.
+			pod_aim += (station_aim - pod_aim).limit_length(GunPod.TURN_RATE * get_physics_process_delta_time())
+			data["aim"] = pod_aim
+			data["fire"] = not blocked and Input.is_action_pressed("fire")
+			ship.station_input.rpc_id(1, station, data)
+		"laser":
 			data["aim"] = station_aim
 			data["fire"] = not blocked and Input.is_action_pressed("fire")
 			ship.station_input.rpc_id(1, station, data)
@@ -769,6 +782,8 @@ func enter_station(id: String) -> void:
 	match ship.station_kind(id):
 		"gun", "laser":
 			station_aim = ship.aim_of(id)
+			pod_aim = station_aim
+			_lean = 0.0
 		"scout":
 			station_aim = Vector2(ship.rotation.y, 0.15 if ship.dock_launch(id).y > 0.0 else -0.25)
 		"pilot":
@@ -885,6 +900,7 @@ func _update_camera(delta: float) -> void:
 		shake = Game.mission.shake_offset()
 	var ship_x := ship.get_global_transform_interpolated()
 	_cam_light.visible = station != "" or not alive or not ship.alive
+	_cam_light.position = Vector3.ZERO
 	if not alive or not ship.alive:
 		_chase_camera(ship_x, delta)
 		camera.global_position += shake
@@ -909,7 +925,9 @@ func _update_camera(delta: float) -> void:
 			_chase_camera(ship_x, delta)
 			camera.global_position += shake
 		_:
-			if ship.is_turret_station(station):
+			if ship.is_turret_station(station) and ship.turrets[station] is GunPod:
+				_pod_camera(ship.turrets[station] as GunPod, delta, shake)
+			elif ship.is_turret_station(station):
 				var t: Turret = ship.turrets[station]
 				camera.global_transform = ship_x * t.camera_local(station_aim)
 				camera.global_position += shake * 0.4
@@ -923,6 +941,26 @@ func _update_camera(delta: float) -> void:
 				camera.global_position += shake * 0.3
 				camera.fov = 80.0
 			_view.visible = false
+
+
+## Inside a gun pod: the gunner's eye. It follows the pod's displayed (interpolated) transform, so
+## the view and the pod around it never drift apart. Holding RMB leans in towards the sight, and
+## the guns shake the view while they fire.
+func _pod_camera(pod: GunPod, delta: float, shake: Vector3) -> void:
+	var lean_in := Input.is_action_pressed("aim") and not Game.ui_blocking
+	_lean = move_toward(_lean, 1.0 if lean_in else 0.0, delta * 4.0)
+	var lean := smoothstep(0.0, 1.0, _lean)
+	var x := pod.eye.get_global_transform_interpolated()
+	var kick := pod.shake()
+	var jitter := Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), randf_range(-0.5, 0.5)) * kick * 0.006
+	# Leaning moves straight along the sight line, so the sight stays in the middle of the view.
+	x.origin += x.basis * (Vector3(0, 0, -0.11) * lean + jitter) + shake * 0.3
+	if kick > 0.0:
+		x.basis = x.basis * Basis.from_euler(Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), 0.0) * kick * 0.003)
+	camera.global_transform = x
+	camera.fov = lerpf(74.0, 46.0, lean)
+	# The fill light sits out in front of the glass: it lights the cave, not the cabin.
+	_cam_light.position = Vector3(0, 0, -3.0)
 
 
 func _chase_camera(ship_x: Transform3D, _delta: float) -> void:
@@ -943,6 +981,15 @@ func _clip_to_cave(from: Vector3, to: Vector3) -> Vector3:
 	var dir := (to - from).normalized()
 	var d := from.distance_to(hit["position"])
 	return from + dir * maxf(d - 1.5, d * 0.5)
+
+
+## The body as everyone else sees it: seated at a station's console, or gone into a gun pod (the
+## pod shows a figure of the gunner instead).
+func _show_body() -> void:
+	var in_pod := station != "" and ship.station_kind(station) == "gun"
+	_body.visible = alive and not in_pod
+	_body.position.y = -0.3 if station != "" else 0.0
+	_name_label.visible = alive and not in_pod
 
 
 func _update_held() -> void:
@@ -968,7 +1015,5 @@ func _remote_update(delta: float) -> void:
 		if reloading or (tool == 0 and alive):
 			_reload_sound("reload" if reloading else "reload_done")
 	_head.rotation.x = look_pitch * 0.6
-	_body.visible = alive
-	_body.position.y = -0.3 if station != "" else 0.0
-	_name_label.visible = alive
+	_show_body()
 	_update_held()

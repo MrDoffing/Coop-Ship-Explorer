@@ -100,6 +100,10 @@ func _ready() -> void:
 			await _run_host_derelict()
 		"join_derelict":
 			await _run_join_derelict()
+		"gunpod":
+			await _run_gunpod(true)
+		"gunpod_check":
+			await _run_gunpod(false)
 		_:
 			print("[autotest] unknown scenario")
 	print("[autotest] done")
@@ -894,27 +898,25 @@ func _run_combat() -> void:
 	var p := m.local_player
 	p.max_hp = 99999.0
 	p.hp = 99999.0
-	# 1) Every turret weapon kills a spitter in its arc.
-	for weapon: String in ["pulse", "flak", "plasma", "rail"]:
-		ship.gun_weapons["gun_l"] = weapon
-		ship.request_station.rpc_id(1, "gun_l")
-		await wait(0.3)
-		var gun: Turret = ship.turrets["gun_l"]
-		var a := m.spawn_alien(Alien.Kind.SPITTER, ship.to_global(Vector3(-15, 2, -8)), 1.0, 1.0) as Alien
-		a.set_physics_process(false)
-		var t0 := Time.get_ticks_msec()
-		for i in 120:
-			if not is_instance_valid(a):
-				break
-			p.station_aim = _aim_for(ship, gun, a.global_position)
-			Input.action_press("fire")
-			await get_tree().physics_frame
-		Input.action_release("fire")
-		print("[autotest] %s: spitter %s after %d ms" % [weapon, "KILLED" if not is_instance_valid(a) else "alive (hp %.0f)" % a.hp, Time.get_ticks_msec() - t0])
-		if is_instance_valid(a):
-			a.queue_free()
-		p.exit_station(true)
-		await wait(0.2)
+	# 1) The port gun pod kills a spitter in its arc.
+	ship.request_station.rpc_id(1, "gun_l")
+	await wait(0.3)
+	var gun: Turret = ship.turrets["gun_l"]
+	var a := m.spawn_alien(Alien.Kind.SPITTER, ship.to_global(Vector3(-17, 2, -10)), 1.0, 1.0) as Alien
+	a.set_physics_process(false)
+	var t0 := Time.get_ticks_msec()
+	for i in 120:
+		if not is_instance_valid(a):
+			break
+		p.station_aim = _aim_for(ship, gun, a.global_position)
+		Input.action_press("fire")
+		await get_tree().physics_frame
+	Input.action_release("fire")
+	print("[autotest] gun pod: spitter %s after %d ms" % ["KILLED" if not is_instance_valid(a) else "alive (hp %.0f)" % a.hp, Time.get_ticks_msec() - t0])
+	if is_instance_valid(a):
+		a.queue_free()
+	p.exit_station(true)
+	await wait(0.2)
 	# 2) Blaster vs boarder.
 	ship.spawn_boarder(0, 1.0)
 	await wait(1.5)
@@ -1847,9 +1849,11 @@ func _run_meta() -> void:
 	hb._tabs.current_tab = 1
 	await wait(0.3)
 	await shot("meta03_upgrades")
-	hb._tabs.current_tab = 2
-	await wait(0.3)
-	await shot("meta04_armory")
+	# No Armory tab while the ship guns are shelved (every gun pod carries a heavy machine gun).
+	var tabs := PackedStringArray()
+	for i in hb._tabs.get_tab_count():
+		tabs.append(hb._tabs.get_tab_title(i))
+	print("[autotest] shipyard tabs: %s" % ", ".join(tabs))
 	Game.request_select_ship("prospector")
 	await wait(0.3)
 	print("[autotest] selected back: ", Game.selected_ship())
@@ -2276,36 +2280,31 @@ func _run_backlog(shots: bool) -> void:
 	print("[autotest] guns: %s" % ", ".join(PackedStringArray(Game.GUN_ORDER.map(func(g): return Game.GUNS[g]["name"]))))
 	print("[autotest] egg sac health: %.0f at the surface, %.0f at 1000 m (other aliens x%.2f)" % [Nest.SAC_HP,
 		Nest.SAC_HP * (1.0 + (m.hp_mult(1000.0) - 1.0) * 0.5), m.hp_mult(1000.0)])
-	# Weapon tuning and spread (turrets measured from the bolts they fire).
+	# Gun pod tuning and spread (measured from the rounds it fires: each one aims from its muzzle at
+	# the point under the sight, then scatters).
 	await _put_ship(m, 560.0)
 	ship.gate_k = 0
 	ship.gate_entry = 0.0
 	ship._exit_state = 3
 	var g: String = ship.gun_stations()[0]
-	var t: Turret = ship.turrets[g]
-	for w: String in ["pulse", "flak", "plasma"]:
-		var def: Dictionary = Mothership.WEAPON_DEFS[w]
-		var before: int = m.projectiles._shots.size()
-		var cd := 0.0
-		for i in 10:
-			cd = ship._fire_turret(g, w)
-		var fwd := -(ship.global_basis * t.aim_basis_local(ship.aim_of(g))).z
-		var max_a := 0.0
-		var sum := 0.0
-		var n := 0
-		for i in range(before, m.projectiles._shots.size()):
-			var v: Vector3 = (m.projectiles._shots[i]["vel"] as Vector3) - ship.velocity
-			var a := rad_to_deg(v.angle_to(fwd))
-			max_a = maxf(max_a, a)
-			sum += a
-			n += 1
-		print("[autotest] %s: %d bolts, spread mean %.2f max %.2f deg (cone %.2f), every %.2f s, %.0f dmg x%d, dps %.0f" % [Game.GUNS[w]["name"], n,
-			sum / maxf(n, 1), max_a, float(def["spread"]), cd, float(def["damage"]), int(def["pellets"]),
-			float(def["damage"]) * int(def["pellets"]) / cd])
-	var rail_max := 0.0
-	for i in 300:
-		rail_max = maxf(rail_max, rad_to_deg(Mothership.scatter(Vector3.FORWARD, deg_to_rad(float(Mothership.WEAPON_DEFS["rail"]["spread"]))).angle_to(Vector3.FORWARD)))
-	print("[autotest] rail lance: spread max %.2f deg over 300 shots" % rail_max)
+	var pod: GunPod = ship.turrets[g]
+	var before: int = m.projectiles._shots.size()
+	for i in 12:
+		ship._fire_round(g, ship.gun_index(g), false)
+	var sight := _gp_sight_point(ship, g)
+	var max_a := 0.0
+	var sum := 0.0
+	var n := 0
+	for i in range(before, m.projectiles._shots.size()):
+		var s: Dictionary = m.projectiles._shots[i]
+		var v: Vector3 = (s["vel"] as Vector3) - ship.velocity
+		var a := rad_to_deg(v.angle_to(sight - (s["pos"] as Vector3)))
+		max_a = maxf(max_a, a)
+		sum += a
+		n += 1
+	print("[autotest] gun pod: %d rounds, spread mean %.2f max %.2f deg (cone %.2f) round the sight point %.0f m out, every %.3f s, %.0f dmg, dps %.0f" % [n,
+		sum / maxf(n, 1), max_a, GunPod.SPREAD, ship.to_global(pod.eye_local(ship.aim_of(g))).distance_to(sight), GunPod.FIRE_INTERVAL,
+		GunPod.DAMAGE, GunPod.DAMAGE / GunPod.FIRE_INTERVAL])
 	for id: String in CrewWeapons.ORDER:
 		var d := CrewWeapons.def(id)
 		print("[autotest] hand %s: spread %.3f rad, every %.2f s, %d x %.0f dmg = %.0f dps%s" % [d["name"], float(d["spread"]),
@@ -3979,3 +3978,395 @@ func _bl2_derelict(m: MissionLevel, shots: bool) -> void:
 			break
 	print("[autotest] flying again %s: the critter %s" % [ship.landing == Mothership.Dock.FLYING,
 		"came back for the hull" if back else ("is gone" if not is_instance_valid(critter) else "is still roaming (%.0f m off)" % critter.global_position.distance_to(ship.global_position))])
+
+
+## Gun pods (the 2026-10-17 backlog). First every ship's pods in a studio: barrels and receivers
+## clear of the hull and of the pod's own tower over the whole aim range, the gunner's eye outside
+## the hull, and views of them. Then the Prospector's port pod in a dive: the gunner's view from
+## the pod's eye (no HUD crosshair or gun panel), the pod swinging after the aim, a spitter shot
+## down, heat building up and firing hot into the weapon systems, cooling down, the belt running
+## dry and a new one loading by itself, leaning into the sight, the weapon systems offline, and a
+## crew bot gunner that never fires hot, seen in its pod from outside. gunpod_check: no shots.
+func _run_gunpod(shots: bool) -> void:
+	await _gp_studio(shots)
+	Game.bot_count = 1
+	var m := await _start_solo_mission()
+	Game.bot_count = 0
+	if m == null:
+		print("[autotest] FAIL: mission not ready")
+		return
+	var ship := m.ship
+	# Nothing but the guns may hurt the weapon systems: no hull damage spills into them.
+	var tough := ship.stats.duplicate()
+	tough["crew_hp"] = 99999.0
+	tough["collateral"] = 0.0
+	ship.stats = tough
+	ship.max_hull = 99999.0
+	ship.hull = 99999.0
+	m._director_t = 99999.0
+	await _put_ship(m, 60.0)
+	_clear_aliens()
+	# The bot waits its turn.
+	var bot: CrewMember = null
+	for c in ship.crew_root.get_children():
+		var cm := c as CrewMember
+		if cm and cm.bot:
+			bot = cm
+	if bot:
+		bot.set_physics_process(false)
+	await _gp_gunner(m, shots)
+	await _gp_bot(m, bot, shots)
+	_status(m)
+
+
+## Every ship's gun pods in a studio: their clearances (see _gp_clearance) and, with shots, each
+## pod from outside at rest and swung round, and the cabin from the gunner's eye.
+func _gp_studio(shots: bool) -> void:
+	Game.main.menu.hide()
+	var world := Node3D.new()
+	add_child(world)
+	var env := Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color(0.09, 0.1, 0.13)
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color(0.55, 0.6, 0.7)
+	env.ambient_light_energy = 0.5
+	env.tonemap_mode = Environment.TONE_MAPPER_ACES
+	env.glow_enabled = true
+	var we := WorldEnvironment.new()
+	we.environment = env
+	world.add_child(we)
+	var sun := DirectionalLight3D.new()
+	sun.rotation_degrees = Vector3(-50, -35, 0)
+	sun.light_energy = 1.2
+	sun.shadow_enabled = true
+	world.add_child(sun)
+	var cam := Camera3D.new()
+	cam.fov = 50.0
+	cam.near = 0.03
+	world.add_child(cam)
+	cam.current = true
+	for id: String in ShipTypes.ORDER:
+		var ship := Node3D.new()
+		world.add_child(ship)
+		var parts := ShipBuilder.build_exterior(ship, id)
+		var t := ShipTypes.get_type(id)
+		for g: String in t["guns"]:
+			var pod: GunPod = parts["turrets"][g]
+			var mount := str(t["by_id"][g].get("mount", "?"))
+			var c := _gp_clearance(t, g, pod)
+			var eye_out := -_hull_margin(t["sections"], float(t["chamfer"]), pod.transform * GunPod.EYE)
+			print("[autotest] %s %s (%s pod on a %s): barrels and receivers clear the hull%s by %.2f m at worst (%s); the gunner's eye is %.2f m outside the hull" % [
+				id, g, pod.style, mount, " and the tower arm" if mount == "tower" else "", c[0], c[1], eye_out])
+			if not shots:
+				continue
+			var p := pod.position
+			var fwd := -pod.transform.basis.z
+			var side := fwd.cross(Vector3.UP).normalized()
+			# "back": from above and behind, on the pod's side of the ship (never inside the hull).
+			var out := signf(p.x) if absf(p.x) > 2.0 else 1.0
+			for v: Array in [["front", fwd * 4.6 + side * 2.2 + Vector3(0, 1.2, 0), Vector2.ZERO],
+					["back", Vector3(out * 2.6, 2.3, 4.8), Vector2.ZERO],
+					["swung", fwd * 3.6 - side * 3.4 + Vector3(0, 0.6, 0), Vector2(pod.yaw_min * 0.8, 0.5)]]:
+				pod.set_aim(v[2])
+				cam.global_position = ship.to_global(p + (v[1] as Vector3))
+				cam.look_at(ship.to_global(p))
+				await wait(0.15)
+				await shot("gp_%s_%s_%s" % [id, g, v[0]])
+			pod.set_aim(Vector2.ZERO)
+		if shots:
+			var first: GunPod = parts["turrets"][t["guns"][0]]
+			cam.fov = 74.0
+			cam.global_transform = ship.global_transform * first.camera_local(Vector2.ZERO)
+			await wait(0.15)
+			await shot("gp_%s_cabin" % id)
+			cam.fov = 50.0
+		ship.queue_free()
+		await wait(0.1)
+	world.queue_free()
+	await wait(0.2)
+
+
+## Worst clearance (m) of a gun pod's barrels and receivers from its ship's hull, and from the arm
+## of its tower mount, over the pod's whole aim range (negative: they clip into it), and where.
+func _gp_clearance(t: Dictionary, g: String, pod: GunPod) -> Array:
+	var sections: Array = t["sections"]
+	var chamfer := float(t["chamfer"])
+	var def: Dictionary = t["by_id"][g]
+	var pts: Array = []
+	for b: Vector3 in GunPod.BARRELS:
+		for k in 9:
+			pts.append([b + Vector3(0, 0, -GunPod.BARREL_LEN * k / 8.0), 0.075])
+	for sx: float in [-1.0, 1.0]:
+		for x: float in [1.15, 1.39]:
+			for y: float in [-0.23, 0.23]:
+				for z: float in [-0.5, 0.4]:
+					pts.append([Vector3(sx * x, y, z), 0.0])
+	var arm := AABB()
+	if str(def.get("mount", "")) == "tower":
+		var p: Vector3 = def["pos"]
+		var arm_y := p.y - GunPod.TOWER_DROP
+		var x0 := ShipBuilder.hull_x_at(sections, chamfer, p.z, arm_y) * signf(p.x)
+		var x1 := p.x + signf(p.x) * 0.3
+		arm = AABB(Vector3(minf(x0, x1), arm_y - 0.26, p.z - 0.25), Vector3(absf(x1 - x0), 0.52, 0.5))
+	var worst := INF
+	var at := ""
+	for i in 31:
+		for j in 16:
+			var a := Vector2(lerpf(pod.yaw_min, pod.yaw_max, i / 30.0), lerpf(pod.pitch_min, pod.pitch_max, j / 15.0))
+			var xf := Transform3D(pod.aim_basis_local(a), pod.transform.origin)
+			for pr: Array in pts:
+				var q: Vector3 = xf * (pr[0] as Vector3)
+				var gap := -_hull_margin(sections, chamfer, q) - float(pr[1])
+				if arm.has_volume():
+					gap = minf(gap, _gp_box_gap(arm, q) - float(pr[1]))
+				if gap < worst:
+					worst = gap
+					at = "yaw %.0f pitch %.0f at %s" % [rad_to_deg(a.x), rad_to_deg(a.y), q.snapped(Vector3.ONE * 0.01)]
+	return [worst, at]
+
+
+## Distance from q to a box (negative inside it: how deep).
+static func _gp_box_gap(box: AABB, q: Vector3) -> float:
+	var d := (q - box.get_center()).abs() - box.size * 0.5
+	var outside := Vector3(maxf(d.x, 0.0), maxf(d.y, 0.0), maxf(d.z, 0.0)).length()
+	return outside if outside > 0.0 else maxf(d.x, maxf(d.y, d.z))
+
+
+## Where a gun pod's rounds converge right now: the point under its sight (see
+## Mothership._fire_round).
+func _gp_sight_point(ship: Mothership, g: String) -> Vector3:
+	var pod: GunPod = ship.turrets[g]
+	var a := ship.aim_of(g)
+	var eye := ship.to_global(pod.eye_local(a))
+	var fwd := -(ship.global_basis * pod.aim_basis_local(a)).z
+	var q := PhysicsRayQueryParameters3D.create(eye, eye + fwd * GunPod.CONVERGE_MAX, Projectiles.MASK_SHIP)
+	q.collide_with_areas = true
+	var hit := ship.get_world_3d().direct_space_state.intersect_ray(q)
+	var dist := GunPod.CONVERGE_MAX if hit.is_empty() else maxf(GunPod.CONVERGE_MIN, eye.distance_to(hit["position"]))
+	return eye + fwd * dist
+
+
+## The first of `spots` (ship-local) that gun pod `g` can aim at with no rock near the line of fire
+## (the cave differs from run to run), or the last one.
+func _gp_open_spot(ship: Mothership, g: String, spots: Array) -> Vector3:
+	var pod: GunPod = ship.turrets[g]
+	var space := ship.get_world_3d().direct_space_state
+	var from := ship.to_global(pod.position)
+	for spot: Vector3 in spots:
+		if not pod.within_limits(pod.aim_at_local(spot)):
+			continue
+		var clear := true
+		for off: Vector3 in [Vector3.ZERO, Vector3(0, 2, 0), Vector3(0, -2, 0), Vector3(2, 0, 0), Vector3(-2, 0, 0)]:
+			if not space.intersect_ray(PhysicsRayQueryParameters3D.create(from, ship.to_global(spot + off), Game.LAYER_CAVE)).is_empty():
+				clear = false
+				break
+		if clear:
+			return spot
+	return spots[spots.size() - 1]
+
+
+## Set a gun pod's belt and heat (and stop a belt change).
+func _gp_set(ship: Mothership, gi: int, rounds: int, heat: float) -> void:
+	var am := ship.gun_ammo
+	am[gi] = rounds
+	ship.gun_ammo = am
+	var ht := ship.gun_heat
+	ht[gi] = heat
+	ship.gun_heat = ht
+	var rl := ship.gun_reload
+	rl[gi] = 0.0
+	ship.gun_reload = rl
+
+
+## The local player in the Prospector's port pod (see _run_gunpod).
+func _gp_gunner(m: MissionLevel, shots: bool) -> void:
+	var ship := m.ship
+	var p := m.local_player
+	var g := "gun_l"
+	var gi := ship.gun_index(g)
+	var pod: GunPod = ship.turrets[g]
+	ship.request_station.rpc_id(1, g)
+	await wait(0.6)
+	var cam := p.camera
+	var middle := get_viewport().get_visible_rect().size * 0.5
+	# (The camera and the pod are both drawn where physics interpolation puts them.)
+	print("[autotest] in the %s: station %s, camera %.3f m from the pod's eye and %s, fov %.0f, sight %.1f px from the middle of the screen, HUD crosshair %s, gun panel %s; belt %d, heat %.2f" % [
+		ship.station_name(g), p.station, cam.global_position.distance_to(pod.eye.get_global_transform_interpolated().origin),
+		"looking along the pod" if cam.global_basis.z.dot(pod.eye.global_basis.z) > 0.999 else "NOT looking along the pod", cam.fov,
+		cam.unproject_position(pod._reticle.get_global_transform_interpolated().origin).distance_to(middle), m.hud._crosshair.visible,
+		m.hud._station_panel.visible, ship.gun_ammo[gi], ship.gun_heat[gi]])
+	await _shot_if(shots, "gp10_gunner_view")
+	# The pod swings after the aim at its own pace.
+	var want := Vector2(pod.yaw_min * 0.75, 0.25)
+	var from := p.pod_aim
+	p.station_aim = want
+	var t0 := Time.get_ticks_msec()
+	while p.pod_aim.distance_to(want) > 0.005 and Time.get_ticks_msec() - t0 < 5000:
+		await get_tree().physics_frame
+	var took := (Time.get_ticks_msec() - t0) / 1000.0
+	await wait(0.3)
+	print("[autotest] swinging %.0f deg towards the bow took %.2f s (at most %.0f deg/s); the server's aim %s, the pod's %s" % [
+		rad_to_deg(from.distance_to(want)), took, rad_to_deg(GunPod.TURN_RATE), ship.aim_of(g), pod.aim])
+	await _shot_if(shots, "gp11_bow")
+	# A spitter (twice the health, harmless) out to port in the open: the four barrels converge on
+	# the sight.
+	var spot := _gp_open_spot(ship, g, [Vector3(-26, 4, -22), Vector3(-18, 3, -28), Vector3(-14, 2, -20), Vector3(-10, 4, -34), Vector3(-20, 0, -12)])
+	var a := m.spawn_alien(Alien.Kind.SPITTER, ship.to_global(spot), 2.0, 0.0) as Alien
+	a.set_physics_process(false)
+	var ammo0 := ship.gun_ammo[gi]
+	var shot_taken := false
+	t0 = Time.get_ticks_msec()
+	Input.action_press("fire")
+	while is_instance_valid(a) and Time.get_ticks_msec() - t0 < 6000:
+		p.station_aim = _aim_for(ship, pod, a.global_position)
+		await get_tree().physics_frame
+		if shots and not shot_taken and Time.get_ticks_msec() - t0 > 450:
+			shot_taken = true
+			await shot("gp12_firing")
+	Input.action_release("fire")
+	print("[autotest] spitter with twice the health: %s after %.2f s, %d rounds, heat %.2f" % ["KILLED" if not is_instance_valid(a) else "alive hp %.0f" % a.hp,
+		(Time.get_ticks_msec() - t0) / 1000.0, ammo0 - ship.gun_ammo[gi], ship.gun_heat[gi]])
+	if is_instance_valid(a):
+		a.queue_free()
+	# Hold the trigger: the heat climbs to full, and every round fired hot hurts the weapon systems.
+	p.station_aim = Vector2(-0.6, 0.35)
+	await wait(1.0)
+	_gp_set(ship, gi, GunPod.BELT, ship.gun_heat[gi])
+	var sys0 := ship.weapons_hp
+	var heat0 := ship.gun_heat[gi]
+	var full_at := -1.0
+	var rounds_to_full := 0
+	t0 = Time.get_ticks_msec()
+	Input.action_press("fire")
+	while Time.get_ticks_msec() - t0 < 15000:
+		await get_tree().physics_frame
+		var t := (Time.get_ticks_msec() - t0) / 1000.0
+		if full_at < 0.0 and ship.gun_heat[gi] >= 0.99:
+			full_at = t
+			rounds_to_full = GunPod.BELT - ship.gun_ammo[gi]
+		if full_at >= 0.0 and t > full_at + 2.0:
+			break
+	var tracers := 0
+	for s: Dictionary in m.projectiles._shots:
+		if s["kind"] == "hmg":
+			tracers += 1
+	var hot_rounds := GunPod.BELT - ship.gun_ammo[gi] - rounds_to_full
+	var shown := "ammo '%s' '%s', heat note '%s', %s, heat lamp %.1f" % [pod._ammo_label.text, pod._ammo_note.text, pod._heat_note.text,
+		pod._sys_label.text, (pod._lamps["heat"] as StandardMaterial3D).emission_energy_multiplier]
+	await _shot_if(shots, "gp13_overheat")
+	Input.action_release("fire")
+	print("[autotest] trigger held from heat %.2f: full heat after %.1f s (%d rounds); %d rounds fired hot took the weapon systems %.0f -> %.0f; %d tracers in flight; screens: %s" % [
+		heat0, full_at, rounds_to_full, hot_rounds, sys0, ship.weapons_hp, tracers, shown])
+	# Let go: the heat bleeds off.
+	var h1 := ship.gun_heat[gi]
+	await wait(2.0)
+	print("[autotest] 2 s after letting go: heat %.2f -> %.2f (cools %.2f/s), heat note '%s'" % [h1, ship.gun_heat[gi], GunPod.HEAT_COOL, pod._heat_note.text])
+	await _shot_if(shots, "gp14_cooling")
+	# The belt runs dry with the trigger held: a new one loads by itself.
+	ship.weapons_hp = 100.0
+	_gp_set(ship, gi, 8, 0.0)
+	Input.action_press("fire")
+	await wait(1.0)
+	var started := ship.gun_reload[gi] > 0.0
+	var left := ship.gun_reload[gi]
+	await wait(1.2)
+	var mid := "'%s' '%s', belt lamp %.1f" % [pod._ammo_label.text, pod._ammo_note.text, (pod._lamps["belt"] as StandardMaterial3D).emission_energy_multiplier]
+	await _shot_if(shots, "gp15_reloading")
+	t0 = Time.get_ticks_msec()
+	while ship.gun_reload[gi] > 0.0 and Time.get_ticks_msec() - t0 < 8000:
+		await get_tree().physics_frame
+	var loaded := ship.gun_ammo[gi]
+	var waited := (Time.get_ticks_msec() - t0) / 1000.0
+	await wait(0.5)
+	var firing_again := ship.gun_ammo[gi] < loaded
+	Input.action_release("fire")
+	print("[autotest] belt ran dry with the trigger held: belt change %s (%.1f of %.1f s left), mid-way %s; %.1f s later a new belt of %d, firing again %s" % [
+		started, left, GunPod.RELOAD_TIME, mid, waited, loaded, firing_again])
+	# Leaning into the sight.
+	Input.action_press("aim")
+	await wait(0.7)
+	var lean_fov := cam.fov
+	var lean_off := cam.unproject_position(pod._reticle.get_global_transform_interpolated().origin).distance_to(middle)
+	await _shot_if(shots, "gp16_sight")
+	Input.action_release("aim")
+	await wait(0.6)
+	print("[autotest] leaning into the sight: fov %.0f, sight %.1f px from the middle; let go: fov %.0f" % [lean_fov, lean_off, cam.fov])
+	# Weapon systems offline: the trigger does nothing and the screens say so.
+	ship.damage_system("weapons", 200.0)
+	await wait(0.3)
+	var before := ship.gun_ammo[gi]
+	Input.action_press("fire")
+	await wait(0.6)
+	Input.action_release("fire")
+	print("[autotest] weapon systems offline: %d rounds fired, screens '%s' / '%s', ready lamp %.1f" % [before - ship.gun_ammo[gi],
+		pod._ammo_note.text, pod._heat_note.text, (pod._lamps["ready"] as StandardMaterial3D).emission_energy_multiplier])
+	await _shot_if(shots, "gp17_offline")
+	ship.weapons_hp = 100.0
+	ship.weapons_online = true
+	p.exit_station(true)
+	await wait(0.4)
+	var guns_line := ""
+	for line in m.hud._crew_report(ship, m).split("\n"):
+		if line.contains("heat"):
+			guns_line = line
+	print("[autotest] out of the pod: station '%s', HUD crosshair %s, crew status (Tab): %s" % [p.station, m.hud._crosshair.visible, guns_line])
+
+
+## A crew bot mans a gun pod against a pack of tough, harmless spitters out to port (beside the
+## ship, clear of any waystation's defences): it fires in bursts and never fires hot, and sits in
+## the pod for everyone to see (see _run_gunpod).
+func _gp_bot(m: MissionLevel, bot: CrewMember, shots: bool) -> void:
+	if bot == null:
+		print("[autotest] FAIL: no crew bot")
+		return
+	var ship := m.ship
+	var pack: Array[Alien] = []
+	var spots: Array = [Vector3(-16, 3, -12), Vector3(-13, 6, -18), Vector3(-19, 1, -6), Vector3(-11, 4, -24), Vector3(-22, 4, -14),
+		Vector3(-15, -1, -20), Vector3(-24, 2, -2)]
+	for k in 4:
+		var spot := _gp_open_spot(ship, "gun_l", spots)
+		spots.erase(spot)
+		var a := m.spawn_alien(Alien.Kind.SPITTER, ship.to_global(spot), 8.0, 0.0) as Alien
+		a.set_physics_process(false)
+		pack.append(a)
+	# Start the bot afresh, so it picks the pod that has the pack in its arc.
+	ship.release_peer(bot.peer_id)
+	bot.station = ""
+	bot.brain.reset()
+	bot.set_physics_process(true)
+	var sys0 := ship.weapons_hp
+	var gun := ""
+	var peak := 0.0
+	var seen := ""
+	var t := 0.0
+	var left := pack.size()
+	while t < 40.0 and left > 0:
+		await get_tree().physics_frame
+		t += 1.0 / 60.0
+		if bot.station in ship.gun_stations():
+			gun = bot.station
+			peak = maxf(peak, ship.gun_heat_of(gun))
+			if seen == "" and t > 6.0:
+				var pod: GunPod = ship.turrets[gun]
+				seen = "body at the console %s, figure in the pod %s" % [bot._body.visible, pod._figure.visible]
+				if shots:
+					var cam := Camera3D.new()
+					cam.far = 400.0
+					m.add_child(cam)
+					cam.global_position = ship.to_global(pod.position + Vector3(signf(pod.position.x) * 4.5, 1.6, -4.2))
+					cam.look_at(ship.to_global(pod.position))
+					cam.current = true
+					await wait(0.1)
+					await shot("gp18_bot_pod")
+					cam.queue_free()
+					m.local_player.camera.current = true
+		left = 0
+		for a in pack:
+			if is_instance_valid(a):
+				left += 1
+	print("[autotest] crew bot gunner on %s for %.0f s: heat peaked at %.2f (it stops at %.2f), weapon systems %.0f -> %.0f, spitters left %d of %d; %s" % [
+		gun if gun != "" else "no gun", t, peak, CrewBot.POD_HEAT_STOP, sys0, ship.weapons_hp, left, pack.size(), seen])
+	for a in pack:
+		if is_instance_valid(a):
+			a.queue_free()

@@ -6,9 +6,9 @@ extends RefCounted
 ## CrewWeapons) are not installed: look at the crate and press F to swap weapons. Everything only
 ## lasts for the current dive.
 ##
-## Every shop stocks SHOP_SIZE items: a hull repair kit, a gun (one of the guns unlocked at
-## homebase) and random upgrades and hand weapons. Auto turrets only turn up while the ship has a
-## free turret slot.
+## Every shop stocks SHOP_SIZE items: a hull repair kit, a gun when it is given any (none while
+## the gun pods carry their own heavy machine guns) and random upgrades and hand weapons. Auto
+## turrets only turn up while the ship has a free turret slot.
 
 const SHOP_SIZE := 5
 ## Hull integrity restored by a repair kit: this share of max hull, but at least HULL_KIT.
@@ -36,7 +36,7 @@ const ITEMS := {
 	"plating": {"name": "Armor Plating", "desc": "+15% max hull integrity", "price": 110, "color": SHIP_COLOR},
 	"shield_cell": {"name": "Shield Cell", "desc": "+25% max shield", "price": 100, "color": SHIP_COLOR},
 	"shield_coil": {"name": "Shield Coil", "desc": "+30% shield recharge, reboots 1 s faster", "price": 90, "color": SHIP_COLOR},
-	"coolant": {"name": "Turret Coolant", "desc": "+15% fire rate for every gun and turret", "price": 120, "color": SHIP_COLOR},
+	"coolant": {"name": "Turret Coolant", "desc": "+15% fire rate and gun cooling for every gun and turret", "price": 120, "color": SHIP_COLOR},
 	"calibration": {"name": "Targeting Module", "desc": "+20% damage for every gun and turret", "price": 130, "color": SHIP_COLOR},
 	"fuel_tank": {"name": "Auxiliary Tank", "desc": "+30 fuel capacity", "price": 70, "color": SHIP_COLOR},
 	"injectors": {"name": "Fuel Injectors", "desc": "-15% fuel consumption", "price": 80, "color": SHIP_COLOR},
@@ -134,8 +134,8 @@ static func sell_price(item: String, k: int) -> int:
 	return maxi(1, int(round(price(item, k) * SELL_SHARE)))
 
 
-## The SHOP_SIZE items waystation k stocks. `guns` are the unlocked guns, `mounted` the guns on
-## the ship right now, `free_slots` how many turret slots are still empty.
+## The SHOP_SIZE items waystation k stocks. `guns` are the guns on offer (none: no gun),
+## `mounted` the guns on the ship right now, `free_slots` how many turret slots are still empty.
 static func roll_shop(rng: RandomNumberGenerator, guns: Array, mounted: Array, free_slots: int) -> Array[String]:
 	var items: Array[String] = ["hull_kit"]
 	# A gun the ship doesn't already carry everywhere, if there is one.
@@ -144,8 +144,9 @@ static func roll_shop(rng: RandomNumberGenerator, guns: Array, mounted: Array, f
 		if not (mounted.size() > 0 and mounted.count(g) == mounted.size()):
 			options.append(g)
 	if options.is_empty():
-		options = guns.duplicate() if not guns.is_empty() else ["pulse"]
-	items.append("weapon:" + str(options[rng.randi() % options.size()]))
+		options = guns.duplicate()
+	if not options.is_empty():
+		items.append("weapon:" + str(options[rng.randi() % options.size()]))
 	var pool: Array = UPGRADE_POOL.duplicate()
 	var weights: Array[float] = []
 	for p in pool:
@@ -167,7 +168,7 @@ static func roll_shop(rng: RandomNumberGenerator, guns: Array, mounted: Array, f
 
 
 ## One crate of salvage from an abandoned station: an upgrade, a hull repair kit, a gun (one of
-## the unlocked ones), a hand weapon, or an auto turret while a turret slot is free.
+## `guns`, if any), a hand weapon, or an auto turret while a turret slot is free.
 static func roll_salvage(rng: RandomNumberGenerator, guns: Array, free_slots: int) -> String:
 	var pool: Array = UPGRADE_POOL.duplicate()
 	var weights: Array[float] = []

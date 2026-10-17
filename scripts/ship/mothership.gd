@@ -3,7 +3,7 @@ extends CharacterBody3D
 ## The crew's ship. Flight, systems, weapons and damage are simulated on the server; clients get
 ## the state through the synchronizer and drive stations by sending input to the server.
 ##
-## The ship type (see ShipTypes) decides its stations: one pilot seat plus any number of guns,
+## The ship type (see ShipTypes) decides its stations: one pilot seat plus any number of gun pods,
 ## mining lasers and scout bays, and its auto turret slots, and its interior (see ShipInteriors):
 ## where the rooms, consoles, repair panels and install hub are. Crew members and boarding aliens
 ## live inside it (Interior/Crew, Interior/Boarders) in ship-local space, so they ride along with
@@ -24,20 +24,16 @@ extends CharacterBody3D
 ## crew explores the rooms behind the pier for salvage crates, guarded by aliens that live there
 ## (spawned on landing, put away again on liftoff, in ship-local space like everything else while
 ## the ship is parked).
+##
+## Every manned gun is a gun pod (GunPod) with a heavy machine gun: the gunner sits in it and the
+## server keeps each pod's belt, heat and belt changes. A belt that runs dry is replaced by itself
+## after a pause; rounds fired at full heat damage the weapon systems, which the crew repairs at
+## the repair panels as before.
 
 signal destroyed
 
 enum Dock { FLYING, APPROACH, LANDED, LIFTOFF }
 
-## Manned gun weapons. "spread" is the random cone (degrees) every bolt or pellet scatters into:
-## tight for the long-range guns, wide for the Flak Cannon, which makes up for it with a very high
-## rate of fire up close.
-const WEAPON_DEFS := {
-	"pulse": {"cooldown": 0.15, "speed": 150.0, "damage": 11.0, "pellets": 1, "spread": 1.1, "kind": "pulse"},
-	"flak": {"cooldown": 0.26, "speed": 120.0, "damage": 6.0, "pellets": 8, "spread": 5.5, "kind": "flak"},
-	"plasma": {"cooldown": 0.95, "speed": 60.0, "damage": 34.0, "pellets": 1, "spread": 1.6, "kind": "plasma"},
-	"rail": {"cooldown": 1.35, "speed": 0.0, "damage": 75.0, "pellets": 1, "spread": 0.25, "kind": "rail"},
-}
 ## Auto turrets and scout guns scatter their bolts this much (degrees).
 const AUTO_SPREAD := 1.8
 const SCOUT_SPREAD := 1.2
@@ -127,8 +123,14 @@ var aims := PackedVector2Array()
 ## Where each mining laser's beam ends (layout["lasers"] order) and which ones fire (bit mask).
 var beam_ends := PackedVector3Array()
 var beams := 0
-## Gun station -> mounted weapon (Game.GUNS id).
+## Gun station -> mounted weapon (Game.GUNS id). Shelved for now: the gun pods only carry their
+## heavy machine guns, so shops and salvage don't offer guns and this stays at the Pulse Cannon.
 var gun_weapons: Dictionary = {}
+## Gun pods, in layout["guns"] order: rounds left in the belt, heat (0..1) and seconds left of a
+## belt change (0: not reloading). See GunPod for the numbers.
+var gun_ammo := PackedInt32Array()
+var gun_heat := PackedFloat32Array()
+var gun_reload := PackedFloat32Array()
 var hull := 400.0
 var shield := 120.0
 var shield_down := false
@@ -220,6 +222,10 @@ var _stern := 14.5
 # --- Server only ---
 var _inputs: Dictionary = {}
 var _fire_cd: Dictionary = {}
+## Gun pods (layout["guns"] order): the barrel that fires next, and when the crew was last told
+## a pod is being fired hot.
+var _next_barrel := PackedInt32Array()
+var _hot_told := PackedFloat32Array()
 var _time := 0.0
 var _last_hit := -100.0
 var _yaw_rate := 0.0
@@ -262,7 +268,7 @@ func _init() -> void:
 		"weapons_online", "fuel", "throttle", "autopilot", "occupants", "beams", "gun_weapons", "credits", "ore",
 		"depth", "alive", "boarders", "frozen", "blast_cd", "landing", "station_k", "gate_k", "gate_entry",
 		"gate_exit", "stations_docked", "hostility", "derelict_k", "derelicts_docked", "hostiles", "stats", "max_hull", "max_shield",
-		"max_fuel", "run_mods", "autocannons", "auto_aim"], 1.0 / 30.0)
+		"max_fuel", "run_mods", "autocannons", "auto_aim", "gun_ammo", "gun_heat", "gun_reload"], 1.0 / 30.0)
 
 
 func setup(data: Dictionary) -> void:
@@ -288,6 +294,17 @@ func setup(data: Dictionary) -> void:
 		w[g] = "pulse"
 		_fire_cd[g] = 0.0
 	gun_weapons = w
+	var guns := (layout["guns"] as Array).size()
+	gun_ammo.resize(guns)
+	gun_ammo.fill(GunPod.BELT)
+	gun_heat.resize(guns)
+	gun_heat.fill(0.0)
+	gun_reload.resize(guns)
+	gun_reload.fill(0.0)
+	_next_barrel.resize(guns)
+	_next_barrel.fill(0)
+	_hot_told.resize(guns)
+	_hot_told.fill(-100.0)
 	var mounts := (layout["hardpoints"] as Array).size()
 	auto_aim.resize(mounts)
 	_auto_cd.resize(mounts)
@@ -505,6 +522,26 @@ func aim_of(id: String) -> Vector2:
 
 func gun_weapon(id: String) -> String:
 	return str(gun_weapons.get(id, "pulse"))
+
+
+## A gun station's index in layout["guns"] (gun_ammo, gun_heat, gun_reload), or -1.
+func gun_index(id: String) -> int:
+	return (layout["guns"] as Array).find(id)
+
+
+func gun_heat_of(id: String) -> float:
+	var i := gun_index(id)
+	return gun_heat[i] if i >= 0 and i < gun_heat.size() else 0.0
+
+
+func gun_ammo_of(id: String) -> int:
+	var i := gun_index(id)
+	return gun_ammo[i] if i >= 0 and i < gun_ammo.size() else 0
+
+
+func gun_reloading(id: String) -> bool:
+	var i := gun_index(id)
+	return i >= 0 and i < gun_reload.size() and gun_reload[i] > 0.0
 
 
 func laser_on(id: String) -> bool:
@@ -783,35 +820,67 @@ func _gate_brake(desired: Vector3) -> Vector3:
 	return desired
 
 
+## Server: the gun pods. Heat bleeds off all the time; a pod whose gunner holds the trigger fires
+## its barrels in turn until the belt runs dry, and then a new belt is loaded by itself.
 func _server_weapons(delta: float) -> void:
-	for id: String in layout["guns"]:
-		_fire_cd[id] = maxf(0.0, float(_fire_cd.get(id, 0.0)) - delta)
-		if not occupants.has(id) or not weapons_online or not alive:
-			continue
+	var guns: Array = layout["guns"]
+	var rate := float(stats["turret_rate"])
+	var ammo := gun_ammo.duplicate()
+	var heat := gun_heat.duplicate()
+	var reload := gun_reload.duplicate()
+	for i in guns.size():
+		var id: String = guns[i]
+		heat[i] = maxf(0.0, heat[i] - GunPod.HEAT_COOL * rate * delta)
+		if reload[i] > 0.0:
+			reload[i] = maxf(0.0, reload[i] - delta)
+			if reload[i] <= 0.0:
+				ammo[i] = GunPod.BELT
+		var cd := float(_fire_cd.get(id, 0.0)) - delta
 		var inp: Dictionary = _inputs.get(id, {})
-		if not inp.get("fire", false) or float(_fire_cd[id]) > 0.0:
+		if not (occupants.has(id) and weapons_online and alive and bool(inp.get("fire", false)) and reload[i] <= 0.0):
+			_fire_cd[id] = maxf(cd, 0.0)
 			continue
-		_fire_cd[id] = _fire_turret(id, gun_weapon(id))
+		while cd <= 0.0 and ammo[i] > 0 and weapons_online:
+			# A round that pushes the heat past full damages the weapon systems.
+			var hot := heat[i] + GunPod.HEAT_PER_ROUND > 1.0
+			heat[i] = minf(1.0, heat[i] + GunPod.HEAT_PER_ROUND)
+			ammo[i] -= 1
+			_fire_round(id, i, hot)
+			cd += GunPod.FIRE_INTERVAL / rate
+		_fire_cd[id] = cd
+		if ammo[i] <= 0:
+			reload[i] = GunPod.RELOAD_TIME
+	gun_ammo = ammo
+	gun_heat = heat
+	gun_reload = reload
 
 
-func _fire_turret(id: String, weapon: String) -> float:
-	var def: Dictionary = WEAPON_DEFS.get(weapon, WEAPON_DEFS["pulse"])
-	var t: Turret = turrets[id]
+## Server: one round from gun pod `id` (index `i`), from its next barrel. The barrels' fire
+## converges on whatever is under the sight (the line from the gunner's eye along the pod), so
+## the sight's ring shows where the rounds go.
+func _fire_round(id: String, i: int, hot: bool) -> void:
+	var pod: GunPod = turrets[id]
 	var a := aim_of(id)
-	var b := global_basis * t.aim_basis_local(a)
-	var muzzle := to_global(t.muzzle_local(a))
-	var dmg := float(def["damage"]) * float(stats["turret_damage"])
-	if style_of(id) == "heavy":
-		dmg *= 1.25
-	var proj: Projectiles = Game.mission.projectiles
-	var spread := deg_to_rad(float(def["spread"]))
-	if weapon == "rail":
-		proj.fire_rail(muzzle, scatter(-b.z, spread), dmg)
-	else:
-		for i in int(def["pellets"]):
-			proj.fire(def["kind"], muzzle, scatter(-b.z, spread) * float(def["speed"]) + velocity, dmg)
-	_fx_shot.rpc(id, weapon)
-	return float(def["cooldown"]) / float(stats["turret_rate"])
+	var barrel := _next_barrel[i]
+	_next_barrel[i] = (barrel + 1) % GunPod.BARRELS.size()
+	var eye := to_global(pod.eye_local(a))
+	var fwd := -(global_basis * pod.aim_basis_local(a)).z
+	var dist := GunPod.CONVERGE_MAX
+	var q := PhysicsRayQueryParameters3D.create(eye, eye + fwd * GunPod.CONVERGE_MAX, Projectiles.MASK_SHIP)
+	q.collide_with_areas = true
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	if not hit.is_empty():
+		dist = maxf(GunPod.CONVERGE_MIN, eye.distance_to(hit["position"]))
+	var muzzle := to_global(pod.barrel_muzzle_local(a, barrel))
+	var dir := scatter(eye + fwd * dist - muzzle, deg_to_rad(GunPod.SPREAD))
+	var dmg := GunPod.DAMAGE * float(stats["turret_damage"]) * (1.25 if style_of(id) == "heavy" else 1.0)
+	Game.mission.projectiles.fire("hmg", muzzle, dir * GunPod.SPEED + velocity, dmg)
+	_fx_pod_shot.rpc(i, barrel, hot)
+	if hot:
+		damage_system("weapons", GunPod.OVERHEAT_DAMAGE)
+		if _time - _hot_told[i] > 4.0:
+			_hot_told[i] = _time
+			notify.rpc("%s OVERHEATING - firing it hot damages the weapon systems!" % station_name(id).to_upper(), 1)
 
 
 ## A random direction within `cone` radians of `dir` (spread evenly over the cone's disc).
@@ -1571,7 +1640,8 @@ func _derelict_contents(d: Dictionary) -> Dictionary:
 	var hp_mult := mission.hp_mult(s)
 	# Their bites hurt more deeper down, but less steeply than the aliens in the tunnels.
 	var dmg_mult := 1.0 + (mission.dmg_mult(s) - 1.0) * 0.5
-	var guns: Array = Game.profile.get("guns", ["pulse"])
+	# No ship guns: the gun pods carry their heavy machine guns (see gun_weapons).
+	var guns: Array = []
 	var free := turret_slots() - autocannons - _crates_of("autocannon")
 	var layout: Dictionary = d["layout"]
 	var rooms: Array = layout["rooms"]
@@ -1712,9 +1782,9 @@ func bought_crates_outside() -> int:
 func _station_offer(k: int) -> Array:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash([int(Game.mission.mission_seed), k, "shop"])
-	var guns: Array = Game.profile.get("guns", ["pulse"])
+	# No ship guns: the gun pods carry their heavy machine guns (see gun_weapons).
 	var free := turret_slots() - autocannons - _crates_of("autocannon")
-	var items := RunItems.roll_shop(rng, guns, gun_weapons.values(), free)
+	var items := RunItems.roll_shop(rng, [], gun_weapons.values(), free)
 	var out := []
 	for i in mini(items.size(), StationBuilder.SHOP_SLOTS.size()):
 		var sl: Array = StationBuilder.SHOP_SLOTS[i]
@@ -2230,15 +2300,18 @@ func _fx_hit(local_pos: Vector3, shielded: bool, kind: String) -> void:
 		Sfx.play("scratch", pos, -10.0)
 
 
+## A gun pod (index `i` in layout["guns"]) fired a round from `barrel`; `hot`: at full heat.
 @rpc("authority", "call_local", "unreliable")
-func _fx_shot(id: String, weapon: String) -> void:
-	var t: Turret = turrets.get(id)
-	if t == null:
+func _fx_pod_shot(i: int, barrel: int, hot: bool) -> void:
+	var guns: Array = layout["guns"]
+	if i < 0 or i >= guns.size():
 		return
-	t.kick()
-	var muzzle := to_global(t.muzzle_local(t.aim))
-	Sfx.play(weapon, muzzle, -8.0 if t.style != "heavy" else -5.0, 1.0 if t.style != "heavy" else 0.85)
-	Fx.flash(muzzle, Color(0.4, 0.8, 1.0) if weapon != "flak" else Color(1.0, 0.7, 0.3), 2.5, 6.0, 0.06)
+	var id: String = guns[i]
+	var pod := turrets.get(id) as GunPod
+	if pod == null:
+		return
+	var lp: CrewMember = Game.mission.local_player if Game.mission else null
+	pod.fire_fx(barrel, hot, lp != null and lp.station == id)
 
 
 @rpc("authority", "call_local", "unreliable")
@@ -2382,10 +2455,24 @@ func _update_visuals(delta: float) -> void:
 		_hub_text = hub_text
 		(_int["hub_label"] as Label3D).text = hub_text
 	for id: String in turrets:
+		var t: Turret = turrets[id]
 		var a := aim_of(id)
 		if lp and lp.station == id:
-			a = lp.station_aim
-		(turrets[id] as Turret).set_aim(a)
+			a = lp.pod_aim if t is GunPod else lp.station_aim
+		elif t is GunPod:
+			# Someone else's pod: smooth out the aim that arrives 30 times a second.
+			a = t.aim.lerp(a, NetUtil.smooth(18.0, delta))
+		t.set_aim(a)
+	var pods: Array = layout["guns"]
+	for i in mini(pods.size(), gun_ammo.size()):
+		var gid: String = pods[i]
+		var pod := turrets.get(gid) as GunPod
+		if pod == null:
+			continue
+		var holder := int(occupants.get(gid, 0))
+		var mine := lp != null and lp.station == gid
+		var figure := Net.player_color(holder) if holder != 0 and not mine else Color(0, 0, 0, 0)
+		pod.set_state(gun_ammo[i], gun_heat[i], gun_reload[i], weapons_hp, weapons_online and alive, figure, mine)
 	var glow: StandardMaterial3D = _ext["engine_glow_mat"]
 	var power := clampf(absf(throttle), 0.0, 1.0) if engine_online and alive else 0.0
 	glow.albedo_color = Color(0.12, 0.2, 0.26).lerp(Color(0.7, 1.2, 1.5), 0.2 + power * 0.8 if engine_online and alive else 0.0)

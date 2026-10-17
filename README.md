@@ -36,7 +36,7 @@ depends on the ship (see **Motherships**). The rooms are signposted.
 | Station | Where (Prospector) | What it does |
 |---|---|---|
 | Pilot seat | Cockpit (front) | Throttle, turning, climb/dive. The autopilot follows the tunnel while the throttle stays set, so a solo player can leave the seat. |
-| Guns | Gunnery deck windows, or next to the cockpit door | Manned turrets. Side guns swing past straight ahead, so they can fire in front of the nose too. Every gun launches with a Pulse Cannon; shops sell Flak Cannons, Plasma Mortars and Rail Lances once unlocked. |
+| Gun pods | Gunnery deck windows | Glass gun pods outside the hull, each with a twin heavy machine gun on either side. The console takes you into the pod (see **Gun pods** below). Side pods swing past straight ahead, so they can fire in front of the nose too. |
 | Mining laser | Next to the cockpit door | A beam that breaks crystal deposits into chunks, which the tractor field pulls back to the tip of the laser. |
 | Scout bay | Starboard side room | Launches a scout pod. It fits through the narrow side tunnels where fuel crystals grow and carries fuel back when it docks. Its guns can hit critters on the hull, which the turrets can't reach. |
 | Repair panels | Engine room (rear), weapons room (port side) | Use the toolkit on these to repair the engine and weapon systems. |
@@ -46,15 +46,36 @@ depends on the ship (see **Motherships**). The rooms are signposted.
 
 ### Motherships
 
-| Ship | Unlock | Guns | Mining lasers | Scouts | Turret slots | Notes |
+| Ship | Unlock | Gun pods | Mining lasers | Scouts | Turret slots | Notes |
 |---|---|---|---|---|---|---|
-| Prospector | standard | 2 (port, starboard) | 1 (nose) | 1 (belly) | 1 (up to 4) | The all-rounder: hull 400, shield 120. |
+| Prospector | standard | 2 (port, starboard, on towers out from the hull) | 1 (nose) | 1 (belly) | 1 (up to 4) | The all-rounder: hull 400, shield 120. |
 | Vanguard Carrier | 250 RP | 1 (bow, front edge of the flight deck) | 1 (under the bow) | 2 combat scouts on the flight deck | 1 (up to 4) | Combat scouts have +60% hull, +50% damage and +15% speed. |
 | Excavator Prime | 300 RP | 1 (front corner) | 2 (on mining arms) | 1 (roof) | 2 (up to 4) | Its lasers mine 45% faster and do 60% more damage to aliens. |
-| Dreadnought | 400 RP | 3 (port, starboard, front corner; heavy, +25% damage) | 1 (nose) | 1 (belly) | 2 (up to 5) | Big and slow: hull 640, shield 160. |
+| Dreadnought | 400 RP | 3 (port, starboard, front corner; armoured, +25% damage) | 1 (nose) | 1 (belly) | 2 (up to 5) | Big and slow: hull 640, shield 160. |
 
 Turret slots hold **auto turrets**: small automatic guns that shoot any free-flying alien above
 their part of the hull. Every slot launches empty; buy turrets in waystation shops to fill them.
+
+### Gun pods
+Taking a gun console puts you in its gun pod, in first person: a glass ball held together by bolted
+steel strips, with your seat, a control panel in front and a twin heavy machine gun on each side
+(two barrels over and under, so four in all). Everything you need is in the pod, not on the HUD:
+- **The sight:** a reflector sight in front of the window. Its glowing ring is always in the middle
+  of your view, and the four barrels' fire converges on whatever is under it. Hold **RMB** to lean
+  in to the sight.
+- **Aiming:** the pod is heavy. It swings after the mouse at most about 140° a second, and its
+  motors whine while it turns.
+- **The screens** on top of the control panel: rounds left in the belt (with a belt gauge), barrel
+  heat (green, amber, red), the weapon systems' health, and lamps for ready, belt change, heat and
+  weapon systems. A stencil on the panel says which keys do what.
+- **The belt:** 240 rounds, about 15 a second. When it runs dry a new belt is loaded by itself,
+  which takes 4 s (the screen shows LOADING).
+- **Heat:** every round heats the guns and the heat bleeds off by itself. Holding the trigger from
+  cold takes about 8 s to reach full heat. The barrels glow and smoke as they get hot. Every round
+  fired at full heat damages the **weapon systems** (0.5% each, with sparks in the pod and a warning
+  buzzer). The engineers repair them at the repair panels as usual; at 0% every gun and mining
+  laser goes offline until they are repaired to 50%. Fire in bursts.
+- Everyone else sees you sitting in the pod, and the pod turning and firing.
 
 ### Interiors
 Each ship has a layout of its own, so a new ship feels fresh. Every one ends at the cargo door.
@@ -79,8 +100,9 @@ Each ship has a layout of its own, so a new ship feels fresh. Every one ends at 
 - **Hull** takes damage once the shield is down. The crew can't repair it in flight, only with
   hull repair kits from a waystation shop. At 0 the ship is destroyed and the crew returns to
   homebase.
-- Hull damage also spills into the **engine** and **weapons** systems. Either one goes offline at
-  0% and comes back online once it is repaired to 50%. The crew can also repair before that.
+- Hull damage also spills into the **engine** and **weapons** systems, and firing a gun pod at
+  full heat damages the weapon systems too. Either one goes offline at 0% and comes back online
+  once it is repaired to 50%. The crew can also repair before that.
 - **Fuel** burns while flying (faster at high throttle). With an empty tank the ship flies at low
   power, the shield cannot recharge and the ship takes extra damage. The scouts use no fuel.
 
@@ -150,17 +172,15 @@ shows the next one.
   approach tunnels, including critters on the hull. No ambushes are sent while docked, and landing
   resets the **hostility**.
 - **Shop:** five items on pedestals, paid for with the credits mined this dive (prices rise at
-  every station further down). One is always a **hull repair kit** (restores 30% hull), one is
-  always a **gun** (one of the guns unlocked at homebase; while only the Pulse Cannon is unlocked,
-  that is a spare Pulse Cannon), and three are random upgrades and **hand weapons**: armour
-  plating, shield cells and coils, turret coolant, targeting modules, fuel tanks and injectors,
-  thrusters, mining lens, laser overcharge, tractor booster, repair nanobots, surge dampers, scout
-  plating, blasters, cargo pods and thrusters, blaster overcharge, power tools, crew armour, the
-  four hand weapons, and **auto turrets** (more likely while the ship has an empty turret slot).
+  every station further down). One is always a **hull repair kit** (restores 30% hull), and four
+  are random upgrades and **hand weapons**: armour plating, shield cells and coils, turret coolant
+  (faster fire and cooling), targeting modules, fuel tanks and injectors, thrusters, mining lens,
+  laser overcharge, tractor booster, repair nanobots, surge dampers, scout plating, blasters, cargo
+  pods and thrusters, blaster overcharge, power tools, crew armour, the four hand weapons, and
+  **auto turrets** (more likely while the ship has an empty turret slot).
 - **Buying and carrying:** look at an item and press **E** to buy it, then **E** again to pick up
   the crate. You can't use tools while carrying. Press **G** to put it down. Walk it up the ramp
   and fit it:
-  - **Guns** go to a gun console, where they replace that gun's weapon.
   - **Hand weapons** aren't installed: look at the crate and press **F** to swap (see below).
   - **Everything else** (repair kits, auto turrets, upgrades) goes to the ship's **install hub**.
 - **Selling:** the **buyback** counter just inside the shop door, facing the middle of the shop,
@@ -191,7 +211,7 @@ Landing there is **optional** and there are no bulkheads: fly past if you like.
   back aboard.
 - **Inside:** four to seven rooms joined by corridors, generated from the cave's seed: storage,
   crew quarters, labs... and a vault (the room furthest from the door). Rooms hold **salvage
-  crates** (free: upgrades, hull repair kits, guns, hand weapons and auto turrets; the vault always
+  crates** (free: upgrades, hull repair kits, hand weapons and auto turrets; the vault always
   has two) and **aliens** (boarders, skitter packs, needlers; the first room is clear and the vault
   is always guarded). They notice crew who come close or within sight, call their pack mates and
   chase you through the station, but never into the ship. They go for whoever is closest, crew
@@ -220,10 +240,10 @@ Crew bots reload by themselves.
 | Rail Carbine | 90, every 1.0 s | 5, 2.0 s reload | Pin-point. The slug passes through up to five aliens in a line. |
 | Plasma Launcher | 60 splash (6 m), every 0.95 s | 6, 2.2 s reload | A slow orb that bursts on impact; good against skitter packs. |
 
-The ship's guns: the **Pulse Cannon** (rapid bolts, slight spread), the **Flak Cannon** (bursts of
-eight pellets about four times a second in a wide cone: devastating close to the ship, useless far
-off), the **Plasma Mortar** (slow orbs that burst in a 16 m blast) and the **Rail Lance** (a
-pin-point piercing slug).
+The ship's guns are the gun pods' heavy machine guns (see **Gun pods**): 7 damage a round, about
+15 rounds a second from the four barrels, tracer rounds that converge on the sight. The older ship
+guns (Pulse Cannon, Flak Cannon, Plasma Mortar, Rail Lance) are shelved for now: shops, salvage
+and the shipyard no longer offer them.
 
 ### Homebase
 Research points (**RP**) are earned at the end of every dive: 1 RP per 10 m of depth, 10 RP per
@@ -233,8 +253,8 @@ waystation landed at and 2 RP per nest destroyed. The shipyard spends them:
 - **Upgrades** (per ship): Hull Plating (+15% hull), Shield Capacitors (+15% shield), Engine
   Tuning (+8% speed and handling) and Turret Slots (+1 auto turret slot, up to the ship's
   hardpoints; slots launch empty).
-- **Armory:** unlock the Flak Cannon (60 RP), Plasma Mortar (100 RP) and Rail Lance (140 RP).
-  Unlocked guns turn up in waystation shops during dives.
+- **Armory:** hidden while the ship guns are shelved (every gun pod carries a heavy machine gun).
+  Guns unlocked before stay in the save.
 
 Saves from before the shipyard changed are converted automatically: lifetime credits become
 research points (1 RP per 45 credits), guns you had bought stay unlocked, and the old save is kept
@@ -256,8 +276,9 @@ With fewer than 4 players, the host can fill empty crew slots with bots: **+ Bot
 homebase crew panel. The choice is remembered for future sessions.
 - **Repairs come first.** A bot drops its gun when the engine or weapon systems fall below 70% (or
   go offline) and repairs them to full. Bots split up when both systems need work.
-- **Otherwise it mans a free gun.** It leads its shots at aliens and shoots egg sacs when no
-  aliens are in range.
+- **Otherwise it mans a free gun pod.** It leads its shots at aliens and shoots egg sacs when no
+  aliens are in range, in bursts: it stops at 85% heat and waits for the guns to cool, so it never
+  damages the weapon systems.
 - **Bots mine when it is quiet.** With no aliens near the ship for 6 seconds, a bot takes each
   free mining laser and breaks crystals in reach (never fuel crystals, and not next to a nest).
   When aliens show up it moves to a free gun. If every gun is taken, it turns the laser on the
@@ -281,7 +302,8 @@ homebase crew panel. The choice is remembered for future sessions.
 | Shop and crates | E buy (look at a shop item), E pick up (look at a crate), E install (at the install hub or a gun console), G drop, F swap hand weapons with a crate |
 | Any station | E leave, Esc menu, Tab crew status |
 | Pilot | W/S throttle, A/D turn, Space/Ctrl climb/dive, T autopilot, X full stop, B emergency blast, L land at / lift off from a waystation or abandoned station, mouse orbits the camera |
-| Guns / mining lasers | Mouse aim, LMB fire, RMB zoom |
+| Gun pods | Mouse aim (the pod swings after it), LMB fire, RMB lean in to the sight |
+| Mining lasers | Mouse aim, LMB fire, RMB zoom |
 | Scout | Mouse steer, WASD move, Space/Ctrl up/down, Shift boost, LMB fire, E dock when close, hold E to recall the scout (its cargo is lost) |
 | Anywhere | F11 fullscreen |
 
@@ -312,7 +334,7 @@ scripts/
   cave/                cave_gen.gd (signed-distance-field cave + surface nets, waystation halls, abandoned station hangars), cave_chunk.gd (threaded build, rock shader)
   station/             station_builder.gd (hall, bulkheads, pad, pier, shop), waystation.gd (bulkhead doors), supply_crate.gd, run_items.gd (shop catalogue, salvage),
 					   derelict_builder.gd (abandoned stations: room layout, building, waypoints), derelict.gd (their flickering lights)
-  ship/                ship_types.gd (the motherships' stats and layouts), ship_interiors.gd (each ship's rooms, consoles, panels, walking graph), mothership.gd (incl. docking, gates, shop, auto turrets, hostility), ship_builder.gd (hulls + interiors), turret.gd, scout.gd
+  ship/                ship_types.gd (the motherships' stats and layouts), ship_interiors.gd (each ship's rooms, consoles, panels, walking graph), mothership.gd (incl. gun pod simulation, docking, gates, shop, auto turrets, hostility), ship_builder.gd (hulls + interiors), turret.gd (mining lasers), gun_pod.gd (the manned gun pods), scout.gd
   crew/                crew_member.gd (first-person avatar, stations, hand weapon, toolkit), crew_weapons.gd (hand weapons), crew_bot.gd (bot AI)
   enemies/             alien.gd (spitter/critter/infiltrator), boarder.gd (aliens on foot: boarder, skitter, needler), nest.gd
   minerals/            deposit.gd, mineral_chunk.gd
@@ -328,8 +350,12 @@ Balance numbers to tweak:
   and the rooms themselves: `ShipBuilder._rooms_<ship>()`. Base stats, homebase
   ship upgrades, gun unlocks and research point rewards: `Game.ship_stats()`, `Game.SHIP_UPGRADES`,
   `Game.GUNS` and the `RP_*` constants in `game.gd`.
-- Turret weapons (fire rate, damage, pellets, spread): `Mothership.WEAPON_DEFS`, plus `AUTO_SPREAD` and
-  `SCOUT_SPREAD`; the Plasma Mortar's blast radius: `Projectiles.KINDS["plasma"]["splash"]`.
+- Gun pods: the constants at the top of `GunPod` (`scripts/ship/gun_pod.gd`): the heavy machine
+  gun's rate of fire, damage, round speed and spread, the belt and how long a new one takes, heat
+  per round, cooling and the damage of firing hot, how fast the pod turns. Where each ship's pods
+  sit and how far they swing: the gun stations in `ShipTypes.TYPES` (the `gunpod_check` autotest
+  checks the barrels clear the hull). Auto turrets and scout guns: `AUTO_SPREAD` and `SCOUT_SPREAD`
+  in `mothership.gd`.
 - Hostility: `HOSTILITY_TIME` in `mothership.gd` (how long it takes to fill), and the ambushes per
   stage (`AMBUSH_INTERVAL`, `AMBUSH_PACK` in `mission.gd`).
 - Emergency blast: the `BLAST_*` constants at the top of `mothership.gd` (radius, damage, hull and
@@ -400,6 +426,7 @@ godot --path . -- --autotest=interiors # every ship's interior: inside the hull,
 godot --path . -- --autotest=interior_bots  # crew bots repairing and manning the guns in every ship's interior
 godot --path . -- --autotest=backlog   # guns and spread, plasma blast, laser-tip mining, hostility, shop door, buyback, flashlight, skitters (backlog_check: no shots)
 godot --path . -- --autotest=backlog2  # engine hum, reloading, buyback facing, gate beacons, landing with aliens about, outpost aliens vs bots (backlog2_check: no shots)
+godot --path . -- --autotest=gunpod    # gun pods: barrels clear of every hull, the gunner's view, firing, heat and overheating, belt change, sight, bot gunner (gunpod_check: no shots)
 ```
 
 ## Known limitations

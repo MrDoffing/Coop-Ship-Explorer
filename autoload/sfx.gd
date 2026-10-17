@@ -89,6 +89,16 @@ func _build_sounds() -> void:
 	_add("reload_done", 0.12, {"wave": "square", "f0": 1400.0, "f1": 650.0, "tone": 0.3, "noise": 0.55, "lp0": 0.8, "lp1": 0.4, "decay": 3.0})
 	_add("dry_fire", 0.06, {"wave": "square", "f0": 2300.0, "f1": 1800.0, "tone": 0.2, "noise": 0.4, "lp0": 0.9, "lp1": 0.6, "decay": 3.5})
 	_add("alarm", 0.9, {"wave": "square", "f0": 660.0, "f1": 660.0, "tone": 0.3, "two_tone": 520.0, "decay": 0.0})
+	# Gun pods: the heavy machine gun's bark (a crack falling into a thump), the old belt rattling
+	# out and the bolt slamming home on a new one, the overheat buzzer, a hiss of the hot gun
+	# hurting the weapon systems, and the pod's traversing motors.
+	_add("hmg", 0.2, {"wave": "square", "f0": 150.0, "f1": 46.0, "tone": 0.45, "noise": 1.0, "lp0": 0.85, "lp1": 0.05, "decay": 3.4, "gain": 1.0})
+	_add("belt_out", 1.1, {"wave": "square", "f0": 210.0, "f1": 140.0, "tone": 0.18, "noise": 0.75, "lp0": 0.5, "lp1": 0.3, "gate_f": 15.0, "decay": 0.6})
+	_add("belt_in", 0.32, {"wave": "square", "f0": 700.0, "f1": 120.0, "tone": 0.35, "noise": 0.9, "lp0": 0.9, "lp1": 0.1, "decay": 4.0, "gain": 1.0})
+	_add("overheat", 0.16, {"wave": "saw", "f0": 380.0, "f1": 380.0, "tone": 0.5, "noise": 0.1, "lp0": 0.6, "lp1": 0.6, "decay": 0.3})
+	_add("sizzle", 0.6, {"noise": 0.75, "lp0": 0.95, "lp1": 0.85, "trem_f": 30.0, "trem_a": 0.5, "decay": 1.2})
+	_add("pod_servo", 1.0, {"wave": "saw", "f0": 96.0, "f1": 96.0, "tone": 0.22, "harm": 0.35, "noise": 0.3, "lp0": 0.12, "lp1": 0.12,
+		"vib_f": 7.0, "vib_a": 0.015, "decay": 0.0, "gain": 0.7}, true)
 	# A soft, warm hum with a slow shimmer (frequencies are whole cycles per loop, so it loops seamlessly).
 	_add("mine_loop", 1.0, {"wave": "sine", "f0": 180.0, "f1": 180.0, "tone": 0.3, "harm": 0.12, "noise": 0.06, "lp0": 0.08, "lp1": 0.08,
 		"vib_f": 3.0, "vib_a": 0.006, "trem_f": 5.0, "trem_a": 0.18, "decay": 0.0, "gain": 0.55}, true)

@@ -50,6 +50,19 @@ static func side_x(sections: Array, z: float) -> float:
 	return section_at(sections, z).x
 
 
+## Half width of the hull at depth z and height y (on its octagonal cross-section; 0 above or
+## below it).
+static func hull_x_at(sections: Array, chamfer: float, z: float, y: float) -> float:
+	var s := section_at(sections, z)
+	var dy := absf(y - s.z)
+	var c := 1.0 - chamfer
+	if dy >= s.y:
+		return 0.0
+	if dy <= s.y * c:
+		return s.x
+	return lerpf(s.x, s.x * c, (dy - s.y * c) / (s.y * chamfer))
+
+
 static func _mats(t: Dictionary) -> Dictionary:
 	var paint: Color = t["paint"]
 	var accent: Color = t["accent"]
@@ -104,11 +117,18 @@ static func build_exterior(root: Node3D, type_id: String) -> Dictionary:
 			_dress_prospector(root, b, t, m, glow_mat)
 	_common_fittings(root, b, t, m)
 	b.commit(root)
-	# Turrets and mining lasers.
+	# Gun pods and mining lasers.
 	var turrets := {}
 	for id: String in t["aimables"]:
 		var def: Dictionary = t["by_id"][id]
-		var tur := Turret.new()
+		var tur: Turret
+		if str(def["kind"]) == "gun":
+			var pod := GunPod.new()
+			pod.paint = t["paint"]
+			pod.accent = t["accent"]
+			tur = pod
+		else:
+			tur = Turret.new()
 		tur.name = "Turret_" + id
 		tur.position = def["pos"]
 		tur.rotation = Vector3(0, deg_to_rad(float(def["yaw"])), 0)
@@ -170,14 +190,6 @@ static func _common_fittings(root: Node3D, b: Models.Batch, t: Dictionary, m: Di
 	var cy := bottom_y(sections, col.z)
 	b.cyl(Vector3(col.x, cy - 0.06, col.z), 1.1, 0.12, m["dark"], Vector3.ZERO, -1.0, 20)
 	b.cyl(Vector3(col.x, cy - 0.12, col.z), 0.75, 0.04, m["cyan"], Vector3.ZERO, -1.0, 20)
-
-
-## Hull seam: a thin band around the hull at depth z.
-static func _seam(b: Models.Batch, t: Dictionary, z: float, mat: Material, width := 0.1, grow := 1.012) -> void:
-	var s := section_at(t["sections"], z)
-	var band := [[z - width * 0.5, s.x * grow, s.y * grow, s.z], [z + width * 0.5, s.x * grow, s.y * grow, s.z]]
-	b.add(Models.loft(band, float(t["chamfer"]), true), Transform3D.IDENTITY, mat)
-
 
 ## Small attitude thruster block with nozzles pointing along `dirs`.
 static func _rcs(b: Models.Batch, pos: Vector3, dirs: Array, m: Dictionary) -> void:
@@ -246,6 +258,51 @@ static func _portholes(b: Models.Batch, x: float, y: float, z0: float, z1: float
 		b.box(Vector3(x + signf(x) * 0.01, y, z), Vector3(0.04, 0.22, 0.3), m["window"])
 
 
+## The mount under a gun pod (GunPod), up to the ring the ball sits in: a barbette from the roof
+## or deck (the station's "base" height), or for a pod out beside the hull ("mount": "tower") a
+## column on an outrigger arm GunPod.TOWER_DROP below the ball, where the barrels never reach.
+static func _pod_mount(b: Models.Batch, t: Dictionary, id: String, m: Dictionary, metal: Material, trim: Material) -> void:
+	var def: Dictionary = t["by_id"][id]
+	var p: Vector3 = def["pos"]
+	var top := p.y - GunPod.MOUNT_TOP
+	var heavy := str(def.get("style", "")) == "heavy"
+	if str(def.get("mount", "")) == "tower":
+		var sections: Array = t["sections"]
+		var chamfer := float(t["chamfer"])
+		var sx := signf(p.x)
+		var arm_y := p.y - GunPod.TOWER_DROP
+		var root := Vector3(sx * (hull_x_at(sections, chamfer, p.z, arm_y) - 0.5), arm_y, p.z)
+		var end := Vector3(p.x, arm_y, p.z)
+		# The arm: a box girder out of the hull, with a trim plate on top, a cable run and ribs.
+		b.beam(root, end + Vector3(sx * 0.3, 0, 0), 0.5, 0.52, metal)
+		b.beam(root + Vector3(0, 0.265, 0), end + Vector3(sx * 0.2, 0.265, 0), 0.38, 0.03, trim)
+		b.beam(root + Vector3(0, -0.12, 0.27), end + Vector3(0, -0.12, 0.27), 0.06, 0.08, m["black"])
+		for k in 3:
+			b.box(Vector3(lerpf(root.x, end.x, 0.35 + k * 0.22), arm_y, p.z), Vector3(0.08, 0.54, 0.54), m["dark"])
+		# A brace under the arm back to the hull.
+		var brace_y := arm_y - 0.8
+		b.strut(Vector3(sx * (hull_x_at(sections, chamfer, p.z, brace_y) - 0.15), brace_y, p.z), end + Vector3(-sx * 0.3, -0.22, 0), 0.09, m["dark"])
+		# The column up to the pod, flanged at both ends, with hazard bands and hydraulic lines.
+		b.cyl(Vector3(p.x, (arm_y + top) * 0.5, p.z), 0.36, top - arm_y, metal, Vector3.ZERO, -1.0, 16)
+		b.cyl(Vector3(p.x, arm_y + 0.3, p.z), 0.46, 0.1, m["dark"], Vector3.ZERO, -1.0, 16)
+		b.cyl(Vector3(p.x, top - 0.05, p.z), 0.5, 0.1, m["dark"], Vector3.ZERO, -1.0, 20)
+		for k in 2:
+			b.cyl(Vector3(p.x, arm_y + 0.75 + k * 0.5, p.z), 0.37, 0.12, m["hazard"], Vector3.ZERO, -1.0, 16)
+			b.cyl(Vector3(p.x, arm_y + 0.87 + k * 0.5, p.z), 0.37, 0.12, m["black"], Vector3.ZERO, -1.0, 16)
+		for k in 2:
+			var dz := (k - 0.5) * 0.3
+			b.strut(Vector3(p.x - sx * 0.38, arm_y + 0.3, p.z + dz), Vector3(p.x - sx * 0.38, top - 0.1, p.z + dz), 0.03, m["black"])
+	else:
+		var base := float(def.get("base", top - 0.6))
+		var r := 1.15 if heavy else 0.95
+		b.cyl(Vector3(p.x, (base + top) * 0.5, p.z), r, top - base, metal, Vector3.ZERO, r - 0.08, 24)
+		b.cyl(Vector3(p.x, top - 0.02, p.z), r - 0.06, 0.05, trim, Vector3.ZERO, -1.0, 24)
+		b.cyl(Vector3(p.x, base + 0.06, p.z), r + 0.12, 0.12, m["dark"], Vector3.ZERO, -1.0, 24)
+		for k in 12:
+			var a := TAU * k / 12.0
+			b.cyl(Vector3(p.x + cos(a) * (r + 0.06), base + 0.13, p.z + sin(a) * (r + 0.06)), 0.03, 0.03, m["steel"], Vector3.ZERO, -1.0, 6)
+
+
 static func _name_labels(root: Node3D, t: Dictionary) -> void:
 	var sections: Array = t["sections"]
 	var id := str(t["id"])
@@ -287,8 +344,6 @@ static func _name_labels(root: Node3D, t: Dictionary) -> void:
 # --- Ship dressing -----------------------------------------------------------------------------
 
 static func _dress_prospector(root: Node3D, b: Models.Batch, t: Dictionary, m: Dictionary, glow: Material) -> void:
-	for z: float in [-9.2, -6.6, -3.0, 1.0, 5.0, 8.6]:
-		_seam(b, t, z, m["dark"])
 	# Accent stripes and panel bands along the sides.
 	for side: float in [-1.0, 1.0]:
 		b.box(Vector3(side * 7.42, 3.15, 0.5), Vector3(0.08, 0.32, 12.0), m["accent"])
@@ -320,15 +375,9 @@ static func _dress_prospector(root: Node3D, b: Models.Batch, t: Dictionary, m: D
 			b.box(Vector3(side * 7.42, 1.8, -2.5 + dz), Vector3(0.06, 1.6, 0.1), m["dark"])
 		for dy: float in [-0.75, 0.75]:
 			b.box(Vector3(side * 7.42, 1.8 + dy, -2.5), Vector3(0.06, 0.1, 3.2), m["dark"])
-	# Side gun sponsons, set behind the turrets so the barrels can swing forward past the bow.
+	# The side gun pods stand out on towers, far enough from the hull to swing past the bow.
 	for id: String in ["gun_l", "gun_r"]:
-		var p: Vector3 = t["by_id"][id]["pos"]
-		var sx := signf(p.x)
-		b.box(Vector3(sx * 7.85, p.y, p.z + 0.8), Vector3(1.5, 1.9, 2.4), m["mid"])
-		b.box(Vector3(sx * 7.85, p.y + 0.96, p.z + 0.8), Vector3(1.3, 0.04, 2.0), m["accent"])
-		b.box(Vector3(sx * 8.1, p.y - 0.7, p.z + 1.4), Vector3(0.9, 0.4, 1.0), m["dark"])
-		for i in 3:
-			b.box(Vector3(sx * 8.61, p.y - 0.3 + i * 0.3, p.z + 0.8), Vector3(0.02, 0.08, 1.9), m["dark"])
+		_pod_mount(b, t, id, m, m["mid"], m["accent"])
 	# Mining laser housing and the sensor dome under the nose.
 	b.box(Vector3(0, 1.45, -13.9), Vector3(1.1, 0.9, 0.5), m["mid"])
 	b.box(Vector3(0, 1.95, -13.6), Vector3(0.7, 0.14, 0.9), m["accent"])
@@ -373,15 +422,13 @@ static func _dress_prospector(root: Node3D, b: Models.Batch, t: Dictionary, m: D
 static func _dress_vanguard(root: Node3D, b: Models.Batch, t: Dictionary, m: Dictionary, glow: Material) -> void:
 	var deck_mat := Models.panel_mat(Color(0.24, 0.26, 0.3), 0.4, 0.6, 0.35)
 	var white := Models.mat(Color(0.9, 0.92, 0.95), 0.1, 0.6)
-	for z: float in [-10.2, -6.6, -2.0, 2.5, 7.0]:
-		_seam(b, t, z, m["dark"])
 	# Flight deck: overhangs the sides and runs out past the bow.
 	var deck := PackedVector2Array([Vector2(-8.4, 11.2), Vector2(-8.4, -11.5), Vector2(-5.2, -19.4),
 		Vector2(5.2, -19.4), Vector2(8.4, -11.5), Vector2(8.4, 11.2)])
 	b.add(Models.prism(deck, 4.6, 5.05), Transform3D.IDENTITY, deck_mat)
-	# Forecastle under the bow overhang.
+	# Forecastle under the bow overhang (its underside clear of the mining laser's sweep).
 	var fore := PackedVector2Array([Vector2(-5.6, -10.0), Vector2(-4.6, -18.9), Vector2(4.6, -18.9), Vector2(5.6, -10.0)])
-	b.add(Models.prism(fore, 2.9, 4.6), Transform3D.IDENTITY, m["hull"])
+	b.add(Models.prism(fore, 3.0, 4.6), Transform3D.IDENTITY, m["hull"])
 	b.box(Vector3(0, 3.6, -18.95), Vector3(9.0, 1.2, 0.1), m["dark"])
 	for x: float in [-3.0, -1.0, 1.0, 3.0]:
 		b.box(Vector3(x, 3.6, -19.0), Vector3(1.4, 0.5, 0.06), m["window"])
@@ -412,10 +459,8 @@ static func _dress_vanguard(root: Node3D, b: Models.Batch, t: Dictionary, m: Dic
 	_antenna(root, b, Vector3(7.1, 8.55, 5.6), 0.35, m)
 	_dish(b, Vector3(7.0, 8.95, 6.5), 0.45, Vector3(-30, -40, 0), m)
 	b.box(Vector3(7.1, 8.62, 2.6), Vector3(0.8, 0.08, 0.8), m["dark"])
-	# Bow gun barbette at the front edge of the deck.
-	var gun: Vector3 = t["by_id"]["gun_f"]["pos"]
-	b.cyl(Vector3(gun.x, 5.45, gun.z), 1.05, 0.8, m["mid"], Vector3.ZERO, 0.95, 20)
-	b.cyl(Vector3(gun.x, 5.86, gun.z), 0.98, 0.05, m["accent"], Vector3.ZERO, -1.0, 20)
+	# Bow gun pod on a barbette at the front edge of the deck.
+	_pod_mount(b, t, "gun_f", m, m["mid"], m["accent"])
 	# Mining laser housing under the bow.
 	b.box(Vector3(0, 1.2, -15.6), Vector3(1.2, 1.0, 0.7), m["mid"])
 	# Hull details below the deck.
@@ -458,8 +503,6 @@ static func _dress_vanguard(root: Node3D, b: Models.Batch, t: Dictionary, m: Dic
 
 static func _dress_excavator(root: Node3D, b: Models.Batch, t: Dictionary, m: Dictionary, glow: Material) -> void:
 	var sec: Array = t["sections"]
-	for z: float in [-9.2, -6.6, -2.4, 2.0, 6.0, 9.4]:
-		_seam(b, t, z, m["dark"], 0.12)
 	# Hazard stripes across the brow of the nose.
 	for i in 11:
 		var x := -4.0 + i * 0.8
@@ -502,10 +545,8 @@ static func _dress_excavator(root: Node3D, b: Models.Batch, t: Dictionary, m: Di
 	for i in 6:
 		var a := TAU * i / 6.0
 		b.box(Vector3(col.x + cos(a) * 1.25, by - 0.5, col.z + sin(a) * 1.25), Vector3(0.12, 1.0, 0.3), m["hazard"], Vector3(0, -rad_to_deg(a), 22))
-	# Forward gun barbette on the front-starboard corner.
-	var gun: Vector3 = t["by_id"]["gun_f"]["pos"]
-	b.cyl(Vector3(gun.x, 5.05, gun.z), 0.95, 0.5, m["dark"], Vector3.ZERO, 0.85, 20)
-	b.cyl(Vector3(gun.x, 5.3, gun.z), 0.86, 0.05, m["hazard"], Vector3.ZERO, -1.0, 20)
+	# Forward gun pod on a barbette on the front-starboard corner.
+	_pod_mount(b, t, "gun_f", m, m["dark"], m["hazard"])
 	# Crane at the stern, exhaust stacks and floodlight bars.
 	b.cyl(Vector3(-4.3, 5.9, 8.4), 0.3, 2.1, m["dark"])
 	b.beam(Vector3(-4.3, 6.9, 8.4), Vector3(-1.4, 7.3, 4.8), 0.35, 0.35, m["hazard"])
@@ -543,8 +584,6 @@ static func _dress_dreadnought(root: Node3D, b: Models.Batch, t: Dictionary, m: 
 	var sec: Array = t["sections"]
 	var armor := Models.panel_mat(Color(0.2, 0.21, 0.24), 0.65, 0.42, 0.5)
 	var gold := Models.mat(Color(0.95, 0.68, 0.2), 0.7, 0.35)
-	for z: float in [-11.4, -8.0, -4.0, 0.0, 4.0, 8.0]:
-		_seam(b, t, z, m["black"], 0.14)
 	# Armour belts along the sides (with gaps for the gun sponsons) and bolt rows.
 	for side: float in [-1.0, 1.0]:
 		for seg: Vector2 in [Vector2(-6.6, -4.2), Vector2(-0.8, 4.4), Vector2(4.8, 7.4)]:
@@ -556,15 +595,9 @@ static func _dress_dreadnought(root: Node3D, b: Models.Batch, t: Dictionary, m: 
 				b.cyl(Vector3(side * 9.21, -0.5, seg.x + 0.4 + i * 0.8), 0.07, 0.06, m["steel"], Vector3(0, 0, 90), -1.0, 6)
 		b.box(Vector3(side * 8.92, -1.2, 0.5), Vector3(0.1, 0.18, 14.0), gold)
 		_vents(b, Vector3(side * 8.55, 2.0, 9.6), Vector3(side, 0, 0), Vector3(0, 0, 1), 6, 1.2, m)
-	# Heavy sponsons for the side guns.
+	# Towers for the side gun pods.
 	for id: String in ["gun_l", "gun_r"]:
-		var p: Vector3 = t["by_id"][id]["pos"]
-		var sx := signf(p.x)
-		b.box(Vector3(sx * 9.6, p.y, p.z + 1.0), Vector3(2.0, 2.8, 3.4), armor)
-		b.box(Vector3(sx * 9.6, p.y + 1.42, p.z + 1.0), Vector3(1.8, 0.05, 3.0), gold)
-		b.box(Vector3(sx * 9.6, p.y - 1.1, p.z + 1.0), Vector3(2.1, 0.5, 3.5), m["black"])
-		for i in 4:
-			b.box(Vector3(sx * 10.61, p.y - 0.9 + i * 0.6, p.z + 1.0), Vector3(0.04, 0.12, 3.0), m["dark"])
+		_pod_mount(b, t, id, m, armor, gold)
 	# Gunnery window frames.
 	for side: float in [-1.0, 1.0]:
 		for dz: float in [-1.55, 1.55]:
@@ -585,14 +618,16 @@ static func _dress_dreadnought(root: Node3D, b: Models.Batch, t: Dictionary, m: 
 	b.box(Vector3(-3.4, 6.95, -9.6), Vector3(3.0, 0.12, 3.4), m["paint"])
 	_antenna(root, b, Vector3(-3.4, 7.0, -8.8), 1.2, m)
 	_dish(b, Vector3(-2.6, 7.5, -10.3), 0.45, Vector3(-25, 20, 0), m)
-	# Forward gun barbette on the front-starboard corner.
-	var gun: Vector3 = t["by_id"]["gun_f"]["pos"]
-	b.cyl(Vector3(gun.x, 4.6, gun.z), 1.45, 2.4, armor, Vector3.ZERO, 1.3, 20)
-	b.cyl(Vector3(gun.x, 5.82, gun.z), 1.32, 0.06, gold, Vector3.ZERO, -1.0, 20)
-	# The bow: a ram under the nose and two horn antennas.
+	# Forward gun pod on a tall barbette on the front-starboard corner.
+	_pod_mount(b, t, "gun_f", m, armor, gold)
+	# The bow: a ram under the nose, low enough that the nose laser never swings into it, and two
+	# horn antennas. The headlight sits inside the ram, right under its gold ridge, so the ram is a
+	# mesh of its own that casts no shadow.
 	var ram := PackedVector2Array([Vector2(-2.2, -13.6), Vector2(0, -19.2), Vector2(2.2, -13.6)])
-	b.add(Models.prism(ram, -0.6, 1.3), Transform3D.IDENTITY, armor)
-	b.add(Models.prism(PackedVector2Array([Vector2(-1.0, -16.2), Vector2(0, -19.1), Vector2(1.0, -16.2)]), 1.3, 1.36), Transform3D.IDENTITY, gold)
+	var rb := Models.Batch.new()
+	rb.add(Models.prism(ram, -0.9, -0.15), Transform3D.IDENTITY, armor)
+	rb.add(Models.prism(PackedVector2Array([Vector2(-1.0, -16.2), Vector2(0, -19.1), Vector2(1.0, -16.2)]), -0.15, -0.09), Transform3D.IDENTITY, gold)
+	rb.commit(root, "Ram", false)
 	for side: float in [-1.0, 1.0]:
 		b.strut(Vector3(side * 1.4, top_y(sec, -14.0) - 0.1, -14.0), Vector3(side * 2.4, top_y(sec, -14.0) + 1.3, -15.6), 0.07, m["steel"])
 		b.sphere(Vector3(side * 2.4, top_y(sec, -14.0) + 1.34, -15.6), 0.09, m["red"])

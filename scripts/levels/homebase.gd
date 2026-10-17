@@ -351,12 +351,8 @@ func _rebuild_shop() -> void:
 	ups.add_child(UiTheme.label("Upgrades for the %s (each ship keeps its own)" % ShipTypes.display_name(ship_id), 17, UiTheme.ACCENT))
 	for up: String in Game.SHIP_UPGRADE_ORDER:
 		ups.add_child(_upgrade_row(ship_id, up))
-	var armory := _new_tab("Armory")
-	var hint := UiTheme.label("Every gun launches with a Pulse Cannon. Unlocked guns turn up in waystation shops, where the crew can buy them and mount them at a gun console.", 15, UiTheme.MUTED)
-	hint.autowrap_mode = TextServer.AUTOWRAP_WORD
-	armory.add_child(hint)
-	for id: String in Game.GUN_ORDER:
-		armory.add_child(_gun_row(id))
+	# No Armory tab while the ship guns are shelved: every gun pod carries a heavy machine gun, so
+	# there are no guns to unlock for the shops (_gun_row is kept for when they come back).
 	if current >= 0 and current < _tabs.get_tab_count():
 		_tabs.current_tab = current
 

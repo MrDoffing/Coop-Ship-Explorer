@@ -328,7 +328,19 @@ class Batch extends RefCounted:
 		return _tools[m]
 
 	func add(mesh: Mesh, xform: Transform3D, m: Material) -> void:
-		_tool(m).append_from(mesh, 0, xform)
+		_tool(m).append_from(_indexed(mesh), 0, xform)
+
+	## SurfaceTool.append_from() only carries over index lists: once a batch holds an indexed mesh
+	## (every primitive mesh is), the triangles of meshes built without one (loft(), prism(), any
+	## SurfaceTool mesh) would be dropped without a word. Such meshes are indexed first.
+	static func _indexed(mesh: Mesh) -> Mesh:
+		var am := mesh as ArrayMesh
+		if am == null or am.surface_get_array_index_len(0) > 0:
+			return mesh
+		var st := SurfaceTool.new()
+		st.create_from(am, 0)
+		st.index()
+		return st.commit()
 
 	func box(pos: Vector3, size: Vector3, m: Material, rot_deg := Vector3.ZERO) -> void:
 		var bm := BoxMesh.new()
