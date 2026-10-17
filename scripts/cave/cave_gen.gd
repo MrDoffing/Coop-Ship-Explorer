@@ -7,8 +7,10 @@ extends RefCounted
 ## branch off and end in chambers holding fuel crystals. Every few hundred metres the tunnel runs
 ## through a waystation: it straightens onto the station's axis, narrows and smooths out, and
 ## opens into a hall carved around the landing pad, sealed by bulkheads at both ends (see
-## StationBuilder for its layout). Rock is a signed distance field (negative = open space,
-## positive = rock) that build_chunk() polygonises with surface nets.
+## StationBuilder for its layout). Between two waystations there may be an abandoned station: a
+## hangar cut into the tunnel wall with rooms behind it (see DerelictBuilder). Rock is a signed
+## distance field (negative = open space, positive = rock) that build_chunk() polygonises with
+## surface nets.
 ##
 ## Every peer builds identical geometry from the seed, so only chunk indices are replicated.
 ## Instances cache per-segment data and are not thread-safe: use one instance per thread.
@@ -23,21 +25,36 @@ const MAIN_BAND := 9.5
 const SIDE_BAND := 3.0
 const SIDE_BLEND := 3.0
 const BIG := 99.0
+## Main tunnel radius: the average and how much it varies along the tunnel (before caverns and wall
+## noise). The ships are up to 22 m wide, so this leaves room to manoeuvre.
+const TUNNEL_RADIUS := 28.0
+const TUNNEL_RADIUS_VAR := 7.0
 ## The tunnel is closed off behind the start position.
 const START_CAP := -14.0
 ## Waystations: the first one around STATION_FIRST metres deep, then every STATION_SPACING.
-const STATION_FIRST := 290.0
-const STATION_SPACING := 440.0
+const STATION_FIRST := 320.0
+const STATION_SPACING := 650.0
 ## Near a waystation the tunnel runs straight along the station's axis with this radius and only a
 ## little of its wall noise: fully within STATION_HOLD metres of the hall's ends, blending back into
-## the wild cave over the next STATION_RAMP metres.
-const STATION_RADIUS := 15.0
+## the wild cave over the next STATION_RAMP metres. The radius (plus the remaining noise) must stay
+## inside the bulkheads (StationBuilder.WALL_*), which seal the tunnel at both ends of the hall.
+const STATION_RADIUS := 16.5
 const STATION_NOISE := 0.15
 const STATION_HOLD := 10.0
-const STATION_RAMP := 70.0
+const STATION_RAMP := 90.0
 const STATION_BLEND := 2.0
 ## No scout tunnels this close (in depth) to a waystation.
 const STATION_CLEAR := 130.0
+## Abandoned stations: the chance that the stretch of tunnel after waystation k has one, how far it
+## stays from the waystations at either end and from the bulge of a cavern, and where its hangar
+## sits: the landing pad is DERELICT_INSET metres beyond the tunnel wall and DERELICT_DROP below
+## the centre line. No scout tunnels within DERELICT_SIDE_CLEAR (in depth) of one.
+const DERELICT_CHANCE := 0.6
+const DERELICT_CLEAR := 120.0
+const DERELICT_CAVERN_CLEAR := 25.0
+const DERELICT_INSET := 15.0
+const DERELICT_DROP := 6.0
+const DERELICT_SIDE_CLEAR := 90.0
 
 const ROCK_A := Color(0.52, 0.46, 0.4)
 const ROCK_B := Color(0.36, 0.38, 0.44)
@@ -55,6 +72,7 @@ var _tint: FastNoiseLite
 var _side_cache: Dictionary = {}
 var _cavern_cache: Dictionary = {}
 var _station_cache: Dictionary = {}
+var _derelict_cache: Dictionary = {}
 
 
 func _init(p_seed: int) -> void:
@@ -111,7 +129,7 @@ func tangent(s: float) -> Vector3:
 
 ## Main tunnel radius at depth s, before wall noise.
 func radius(s: float) -> float:
-	var r := 21.0 + _rad.get_noise_1d(s) * 6.0 + cavern_extra(s)
+	var r := TUNNEL_RADIUS + _rad.get_noise_1d(s) * TUNNEL_RADIUS_VAR + cavern_extra(s)
 	r *= smoothstep(START_CAP - 22.0, START_CAP, s)
 	var st := _station_near(s)
 	if not st.is_empty():
@@ -200,8 +218,8 @@ func side_tunnels(k: int) -> Array:
 		for i in count:
 			var s0 := k * SIDE_SEGMENT + 40.0 + rng.randf_range(10.0, SIDE_SEGMENT - 10.0) * (float(i) + 1.0) / float(count)
 			var tunnel := _make_side_tunnel(rng, s0)
-			# Keep the rock around waystation hangars intact.
-			if not near_station(s0, STATION_CLEAR):
+			# Keep the rock around waystations and abandoned stations intact.
+			if not near_station(s0, STATION_CLEAR) and not near_derelict(s0, DERELICT_SIDE_CLEAR):
 				out.append(tunnel)
 	_side_cache[k] = out
 	return out
@@ -321,6 +339,108 @@ func station_raw(p: Vector3, st: Dictionary) -> float:
 	return _round_box(l - (st["hc"] as Vector3), st["hh"], StationBuilder.HALL_ROUND)
 
 
+## The abandoned station in the stretch of tunnel after waystation k, or {} when there is none.
+## Station-local frame: x along the tunnel, y up, z into the wall, origin on top of the landing
+## pad (see DerelictBuilder). "layout" holds its rooms and corridors, "walk" the ship-local box the
+## crew may walk in while the ship is landed there.
+func derelict(k: int) -> Dictionary:
+	if _derelict_cache.has(k):
+		return _derelict_cache[k]
+	var out := {}
+	if k >= 0:
+		var rng := RandomNumberGenerator.new()
+		rng.seed = hash([seed_value, k, "derelict"])
+		if rng.randf() < DERELICT_CHANCE:
+			var lo := float(station(k)["s_exit"]) + DERELICT_CLEAR
+			var hi := float(station(k + 1)["s_entry"]) - DERELICT_CLEAR
+			for i in 8:
+				if hi <= lo:
+					break
+				var s := rng.randf_range(lo, hi)
+				if _clear_of_caverns(s, DERELICT_CAVERN_CLEAR):
+					out = _make_derelict(k, s, rng)
+					break
+	_derelict_cache[k] = out
+	return out
+
+
+## True when depth s is at least `margin` metres beyond the bulge of every cavern.
+func _clear_of_caverns(s: float, margin: float) -> bool:
+	for kk in range(int(floor(s / CAVERN_SEGMENT)) - 1, int(floor(s / CAVERN_SEGMENT)) + 2):
+		if kk < 1:
+			continue
+		var cv := cavern(kk)
+		if absf(s - float(cv["s"])) < float(cv["half"]) + margin:
+			return false
+	return true
+
+
+func _make_derelict(k: int, s: float, rng: RandomNumberGenerator) -> Dictionary:
+	var side := 1.0 if rng.randf() < 0.5 else -1.0
+	var t := tangent(s)
+	var zf := Vector3(-t.z, 0.0, t.x).normalized() * side
+	var basis := Basis(Vector3.UP.cross(zf), Vector3.UP, zf)
+	var depth := radius(s) + DERELICT_INSET
+	var xform := Transform3D(basis, center3(s) + zf * depth + Vector3(0, -DERELICT_DROP, 0))
+	var layout := DerelictBuilder.generate(rng)
+	var hmin := Vector3(-DerelictBuilder.HANGAR_HALF_X, DerelictBuilder.HANGAR_FLOOR, -depth)
+	var hmax := Vector3(DerelictBuilder.HANGAR_HALF_X, DerelictBuilder.HANGAR_ROOF, DerelictBuilder.HANGAR_BACK)
+	var bmin: Vector3 = layout["carve_min"]
+	var bmax: Vector3 = layout["carve_max"]
+	var aabb := AABB(xform * hmin, Vector3.ZERO)
+	for box: Array in [[hmin, hmax], [bmin, bmax]]:
+		var lo: Vector3 = box[0]
+		var hi: Vector3 = box[1]
+		for i in 8:
+			aabb = aabb.expand(xform * Vector3(hi.x if (i & 1) != 0 else lo.x, hi.y if (i & 2) != 0 else lo.y, hi.z if (i & 4) != 0 else lo.z))
+	# Where the crew may walk (ship-local with the ship landed, which only shifts y): the box around
+	# the ship, its ramp, the pier and the rooms.
+	var walk := AABB(Vector3(-7.0, -3.0, -11.0), Vector3(14.0, 11.0, 24.0))
+	walk = walk.merge(AABB(Vector3(bmin.x, -3.0, bmin.z), Vector3(bmax.x - bmin.x, 11.0, bmax.z - bmin.z)))
+	return {
+		"k": k, "s": s, "side": side, "depth": depth, "xform": xform, "inv": xform.affine_inverse(),
+		"aabb": aabb.grow(SIDE_BAND + STATION_BLEND),
+		"hc": (hmin + hmax) * 0.5, "hh": (hmax - hmin) * 0.5, "bc": (bmin + bmax) * 0.5, "bh": (bmax - bmin) * 0.5,
+		"layout": layout, "walk": walk, "name": layout["name"], "seed": hash([seed_value, k, "derelict_dressing"]),
+	}
+
+
+## Abandoned stations whose carved rock touches the depth range [s_lo, s_hi].
+func derelicts_in(s_lo: float, s_hi: float) -> Array:
+	var out := []
+	var k0 := int(floor((s_lo - STATION_FIRST) / STATION_SPACING)) - 1
+	var k1 := int(floor((s_hi - STATION_FIRST) / STATION_SPACING)) + 1
+	for k in range(maxi(k0, 0), k1 + 1):
+		var d := derelict(k)
+		if d.is_empty():
+			continue
+		var bb: AABB = d["aabb"]
+		if bb.end.z < -s_hi or bb.position.z > -s_lo:
+			continue
+		out.append(d)
+	return out
+
+
+## True if an abandoned station lies within `dist` metres of depth s.
+func near_derelict(s: float, dist: float) -> bool:
+	var k := int(floor((s - STATION_FIRST) / STATION_SPACING))
+	for kk in range(k - 1, k + 2):
+		if kk < 0:
+			continue
+		var d := derelict(kk)
+		if not d.is_empty() and absf(float(d["s"]) - s) < dist:
+			return true
+	return false
+
+
+## Signed distance to the rock carved away for an abandoned station (hangar plus the cavity its
+## rooms are built in).
+func derelict_raw(p: Vector3, d: Dictionary) -> float:
+	var l: Vector3 = (d["inv"] as Transform3D) * p
+	var dh := _round_box(l - (d["hc"] as Vector3), d["hh"], DerelictBuilder.HANGAR_ROUND)
+	return minf(dh, _round_box(l - (d["bc"] as Vector3), d["bh"], 1.5))
+
+
 static func _round_box(p: Vector3, half: Vector3, r: float) -> float:
 	var q := p.abs() - half + Vector3(r, r, r)
 	return Vector3(maxf(q.x, 0.0), maxf(q.y, 0.0), maxf(q.z, 0.0)).length() + minf(maxf(q.x, maxf(q.y, q.z)), 0.0) - r
@@ -375,6 +495,13 @@ func sdf(p: Vector3) -> float:
 			if absf(dw) < SIDE_BAND:
 				dw += side_noise(p.x, p.y, p.z) * 0.6
 			d = smin(d, dw, STATION_BLEND)
+	for dr in derelicts_in(s - 1.0, s + 1.0):
+		var bb: AABB = dr["aabb"]
+		if bb.has_point(p):
+			var dd := derelict_raw(p, dr)
+			if absf(dd) < SIDE_BAND:
+				dd += side_noise(p.x, p.y, p.z) * 0.6
+			d = smin(d, dd, STATION_BLEND)
 	return d
 
 
@@ -421,7 +548,8 @@ func build_chunk(n: int) -> Dictionary:
 		ymax = maxf(ymax, c.y + ext)
 	var tunnels := side_tunnels_in(s_lo, s_hi)
 	var stations := stations_in(s_lo, s_hi)
-	for t in tunnels + stations:
+	var derelicts := derelicts_in(s_lo, s_hi)
+	for t in tunnels + stations + derelicts:
 		var bb: AABB = t["aabb"]
 		xmin = minf(xmin, bb.position.x)
 		xmax = maxf(xmax, bb.end.x)
@@ -504,6 +632,27 @@ func build_chunk(n: int) -> Dictionary:
 					if dw < SIDE_BAND and dw > -SIDE_BAND:
 						dw += side_noise(x, y, z) * 0.6
 					vals[row + ii] = smin(vals[row + ii], dw, STATION_BLEND)
+
+	# Abandoned stations: the hangar and the cavity around their rooms.
+	for dr in derelicts:
+		var bb: AABB = dr["aabb"]
+		var ia := maxi(0, int(floor(bb.position.x / CELL)) - i0)
+		var ib := mini(nx - 1, int(ceil(bb.end.x / CELL)) - i0)
+		var ja := maxi(0, int(floor(bb.position.y / CELL)) - j0)
+		var jb := mini(ny - 1, int(ceil(bb.end.y / CELL)) - j0)
+		var ka := maxi(0, int(floor(-bb.end.z / CELL)) - kmin)
+		var kb := mini(nz - 1, int(ceil(-bb.position.z / CELL)) - kmin)
+		for kk in range(ka, kb + 1):
+			var z := -(kmin + kk) * CELL
+			for jj in range(ja, jb + 1):
+				var y := (j0 + jj) * CELL
+				var row := (kk * ny + jj) * nx
+				for ii in range(ia, ib + 1):
+					var x := (i0 + ii) * CELL
+					var dd := derelict_raw(Vector3(x, y, z), dr)
+					if dd < SIDE_BAND and dd > -SIDE_BAND:
+						dd += side_noise(x, y, z) * 0.6
+					vals[row + ii] = smin(vals[row + ii], dd, STATION_BLEND)
 
 	return _surface_nets(vals, nx, ny, nz, i0, j0, kmin)
 

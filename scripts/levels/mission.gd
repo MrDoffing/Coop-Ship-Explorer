@@ -6,14 +6,18 @@ extends Node3D
 ## fuel crystals (in the scout-only side tunnels), alien nests and free-roaming aliens, keeps a
 ## director spawning ambushes that get nastier with depth, and ends the mission when the
 ## mothership is destroyed (or the host aborts). Clients rebuild the cave locally from the seed,
-## including the waystations, whose defences shoot down any alien that comes near. The dive pays
-## out research points (depth, waystations reached, nests); the credits mined are only good for
-## waystation shops during the dive.
+## including the waystations, whose defences shoot down any alien that comes near, and the
+## abandoned stations between them. The dive pays out research points (depth, waystations
+## reached, nests); the credits mined are only good for waystation shops during the dive.
 
 const AHEAD := 230.0
 const BEHIND := 90.0
 const DESPAWN_BEHIND := 160.0
 const MAX_ALIENS := 34
+## Ambushes by hostility stage (Mothership.hostility_stage()): seconds between them (none while the
+## aliens are docile) and the size of a pack before the depth and crew bonus.
+const AMBUSH_INTERVAL := [0.0, 42.0, 28.0, 16.0]
+const AMBUSH_PACK := [0, 1, 2, 3]
 
 var mission_seed := 0
 var stats: Dictionary = {}
@@ -45,11 +49,15 @@ var kills := 0
 var nests_destroyed := 0
 var warned_critters := false
 var warned_infiltrators := false
+## The abandoned station the crew was last told about.
+var _derelict_hinted := -1
 
 var _chunks: Dictionary = {}
 var _populated: Dictionary = {}
 var _seq := 0
 var _director_t := 45.0
+## The hostility stage the crew was last told about.
+var _hostility_stage := 0
 var _defense_t := 0.0
 var _shake := 0.0
 var _env: Environment
@@ -177,8 +185,8 @@ func _process(_delta: float) -> void:
 	if cam and _dust:
 		_dust.global_position = cam.global_position
 		# No drifting cave dust inside the pressurised ship.
-		_dust.visible = not (local_player and local_player.alive and local_player.station == ""
-				and Mothership.is_aboard(local_player.position))
+		_dust.visible = not (local_player and local_player.alive and local_player.station == "" and ship
+				and ship.is_aboard(local_player.position))
 
 
 func set_local_player(p: CrewMember) -> void:
@@ -211,12 +219,16 @@ func _spawn_chunk(data: Variant) -> Node:
 	c.setup(mission_seed, n)
 	if multiplayer.is_server():
 		c.built.connect(_on_chunk_built)
-	# Waystation structures are built locally with the chunk that holds the station.
+	# Waystations and abandoned stations are built locally with the chunk that holds their middle.
 	var s0 := n * CaveGen.CHUNK_LEN
 	for st in cave.stations_in(s0, s0 + CaveGen.CHUNK_LEN):
 		var s := float(st["s"])
 		if s >= s0 and s < s0 + CaveGen.CHUNK_LEN:
 			StationBuilder.build(c, st)
+	for d in cave.derelicts_in(s0, s0 + CaveGen.CHUNK_LEN):
+		var s := float(d["s"])
+		if s >= s0 and s < s0 + CaveGen.CHUNK_LEN:
+			DerelictBuilder.build(c, d)
 	return c
 
 
@@ -323,9 +335,10 @@ func _server_start() -> void:
 func _spawn_crew_member(id: int, slot: int) -> void:
 	if ship == null or ship.crew_root.has_node(str(id)):
 		return
+	var spawns := ship.spawn_points()
 	ship.crew_spawner.spawn({
 		"id": id, "name": Net.player_name(id), "color": int(Net.roster.get(id, {}).get("color", 0)),
-		"hp": float(stats["crew_hp"]), "pos": ShipBuilder.SPAWN_POINTS[slot % ShipBuilder.SPAWN_POINTS.size()],
+		"hp": float(stats["crew_hp"]), "pos": spawns[slot % spawns.size()],
 		"bot": Net.is_bot(id),
 	})
 
@@ -374,6 +387,18 @@ func _physics_process(delta: float) -> void:
 		_director(delta)
 	_station_defense(delta)
 	_despawn_far()
+	_derelict_hint()
+
+
+## Tell the crew once about each abandoned station ahead.
+func _derelict_hint() -> void:
+	if ship.landing != Mothership.Dock.FLYING:
+		return
+	var d := ship.nearest_derelict(260.0)
+	if d.is_empty() or int(d["k"]) == _derelict_hinted:
+		return
+	_derelict_hinted = int(d["k"])
+	ship.notify.rpc("Abandoned station ahead - an optional stop with salvage (and hostiles)", 0)
 
 
 func _chunks_ready_near(s: float) -> bool:
@@ -440,13 +465,13 @@ func _populate(chunk: CaveChunk) -> void:
 	var placed: Array[Vector3] = []
 
 	# Minerals on the main tunnel walls.
-	var want := rng.randi_range(4, 7) if n > 0 else 3
+	var want := rng.randi_range(3, 5) if n > 0 else 2
 	var tries := 0
 	while placed.size() < want and tries < 120:
 		tries += 1
 		var i := rng.randi() % verts.size()
 		var p := verts[i]
-		if not _on_main_wall(p) or _too_close(p, placed, 9.0) or _in_station(p, 3.0):
+		if not _on_main_wall(p) or _too_close(p, placed, 9.0) or _in_station(p, 3.0) or _in_derelict(p, 3.0):
 			continue
 		placed.append(p)
 		var kind := _roll_mineral(rng, -p.z)
@@ -491,7 +516,7 @@ func _populate(chunk: CaveChunk) -> void:
 			nest_here = true
 	if not nest_here and n >= 4 and rng.randf() < clampf((s0 - 200.0) / 1400.0, 0.0, 0.3):
 		nest_here = true
-	if nest_here and cave.near_station(depth_mid, 140.0):
+	if nest_here and (cave.near_station(depth_mid, 140.0) or cave.near_derelict(depth_mid, 110.0)):
 		nest_here = false
 	if nest_here:
 		_place_nest(verts, norms, rng, depth_mid)
@@ -501,13 +526,13 @@ func _populate(chunk: CaveChunk) -> void:
 		var count := rng.randi_range(0, 1) + int(depth_mid / 350.0)
 		for k in mini(count, 4):
 			var s := rng.randf_range(s0, s1)
-			if cave.near_station(s, 140.0):
+			if cave.near_station(s, 140.0) or cave.near_derelict(s, 90.0):
 				continue
 			var c := cave.center3(s)
 			var r := cave.radius(s) * 0.5
 			var p := c + Vector3(rng.randf_range(-r, r), rng.randf_range(-r, r) * 0.6, 0)
 			var kind := Alien.Kind.SPITTER if rng.randf() < 0.65 else Alien.Kind.CRITTER
-			spawn_alien(kind, p, _hp_mult(depth_mid), _dmg_mult(depth_mid))
+			spawn_alien(kind, p, hp_mult(depth_mid), dmg_mult(depth_mid))
 
 
 func _place_nest(verts: PackedVector3Array, norms: PackedVector3Array, rng: RandomNumberGenerator, depth_mid: float) -> void:
@@ -543,7 +568,7 @@ func _place_nest(verts: PackedVector3Array, norms: PackedVector3Array, rng: Rand
 	if sacs.size() < 2:
 		return
 	enemy_spawner.spawn({"t": "nest", "name": _next_name("N"), "pos": c, "nrm": norms[center_i], "sacs": sacs,
-		"sac_nrm": sac_nrm, "hp_mult": _hp_mult(depth_mid), "dmg_mult": _dmg_mult(depth_mid),
+		"sac_nrm": sac_nrm, "hp_mult": hp_mult(depth_mid), "dmg_mult": dmg_mult(depth_mid),
 		"infiltrators": clampf(depth_mid / 3000.0, 0.0, 0.15)})
 
 
@@ -555,6 +580,14 @@ func _spawn_deposit(kind: String, p: Vector3, nrm: Vector3, size: float, crystal
 func _in_station(p: Vector3, margin: float) -> bool:
 	for st in cave.stations_in(-p.z - 1.0, -p.z + 1.0):
 		if cave.station_raw(p, st) < margin:
+			return true
+	return false
+
+
+## True inside (or within `margin` of) the rock carved out for an abandoned station.
+func _in_derelict(p: Vector3, margin: float) -> bool:
+	for d in cave.derelicts_in(-p.z - 1.0, -p.z + 1.0):
+		if cave.derelict_raw(p, d) < margin:
 			return true
 	return false
 
@@ -590,25 +623,39 @@ func _roll_mineral(rng: RandomNumberGenerator, d: float) -> String:
 	return "ferrite"
 
 
-func _hp_mult(d: float) -> float:
+## Alien health and damage multipliers at depth d.
+func hp_mult(d: float) -> float:
 	return 1.0 + d / 700.0
 
 
-func _dmg_mult(d: float) -> float:
+func dmg_mult(d: float) -> float:
 	return 1.0 + d / 900.0
 
 
-## Ambient threats: packs of aliens ambush the ship from ahead or behind.
+## Ambient threats: packs of aliens ambush the ship from ahead or behind, more often and in bigger
+## packs the higher the hostility (none while the aliens are docile).
 func _director(delta: float) -> void:
+	var stage := ship.hostility_stage()
+	if stage != _hostility_stage:
+		if stage > _hostility_stage:
+			ship.notify.rpc("Hostility rising: %s - %s" % [Mothership.HOSTILITY_STAGES[stage],
+				["", "ambushes are coming", "bigger ambushes, more often", "the aliens are swarming - keep moving!"][stage]], 1 if stage < 3 else 2)
+			# The next ambush comes sooner at a higher stage.
+			_director_t = minf(_director_t, randf_range(6.0, 14.0) if _hostility_stage == 0 else float(AMBUSH_INTERVAL[stage]) * 0.5)
+		else:
+			ship.notify.rpc("Hostility reset - the aliens have lost the trail", 0)
+		_hostility_stage = stage
 	if ship.landing != Mothership.Dock.FLYING:
 		# Docked: a breather, and some quiet after leaving the station.
-		_director_t = maxf(_director_t, 20.0)
+		_director_t = maxf(_director_t, 12.0)
+		return
+	if stage <= 0:
 		return
 	_director_t -= delta
 	if _director_t > 0.0 or not ship.alive:
 		return
 	var diff := difficulty()
-	_director_t = randf_range(26.0, 40.0) / diff
+	_director_t = float(AMBUSH_INTERVAL[stage]) * randf_range(0.85, 1.2) / sqrt(maxf(diff, 0.5))
 	var s := -ship.global_position.z
 	var ahead := randf() < 0.7
 	var sp := s + (randf_range(90.0, 130.0) if ahead else -randf_range(60.0, 80.0))
@@ -618,8 +665,8 @@ func _director(delta: float) -> void:
 		_director_t = 8.0
 		return
 	var c := cave.center3(sp)
-	var pack := (1 if s < 120.0 else 2) + int(randf() * diff * 1.5)
-	for k in mini(pack, 6):
+	var pack := int(AMBUSH_PACK[stage]) + int(randf() * diff * (0.5 + 0.5 * stage))
+	for k in mini(pack, 8):
 		var r := randf()
 		var kind := Alien.Kind.SPITTER
 		if r < 0.4:
@@ -627,7 +674,7 @@ func _director(delta: float) -> void:
 		elif r < 0.55 and s > 120.0:
 			kind = Alien.Kind.INFILTRATOR
 		var p := c + Vector3(randf_range(-8, 8), randf_range(-5, 5), randf_range(-8, 8))
-		spawn_alien(kind, p, _hp_mult(s), _dmg_mult(s))
+		spawn_alien(kind, p, hp_mult(s), dmg_mult(s))
 
 
 ## Waystation defences: one shot every quarter second at the alien nearest to a station's pad
@@ -737,7 +784,7 @@ func _tutorial() -> void:
 		return
 	var tips := [
 		["Walk to the PILOT seat at the front and press E. W raises the throttle.", 0],
-		["The mining laser breaks crystals; the tractor field collects the chunks.", 0],
+		["The mining laser breaks crystals; the chunks fly back to the laser's tip.", 0],
 		["Fuel crystals grow in narrow side tunnels - only the scout fits.", 0],
 		["Mined credits buy supplies in the waystation shops. Land (L) at each waystation to pass its bulkheads.", 0],
 	]
@@ -755,8 +802,12 @@ func fx_event(kind: String, pos: Vector3, arg: Variant) -> void:
 			Fx.explosion(pos, 1.2 if k == Alien.Kind.CRITTER else 2.4, Color(0.55, 1.0, 0.25))
 			Sfx.play("screech", pos, -4.0, 1.4 if k == Alien.Kind.CRITTER else 1.0)
 		"boarder_die":
-			Fx.explosion(pos, 1.6, Color(0.4, 1.0, 0.9))
-			Sfx.play("screech", pos, -2.0, 0.8)
+			var size := float(arg) if (arg is float and float(arg) > 0.0) else 1.0
+			Fx.explosion(pos, 1.6 * size, Color(0.4, 1.0, 0.9))
+			Sfx.play("screech", pos, -2.0, 0.8 / sqrt(size))
+		"needle":
+			Fx.flash(pos, Color(1.0, 0.35, 0.85), 2.0, 4.0, 0.08)
+			Sfx.play("spit", pos, -6.0, 1.8)
 		"crystal_break":
 			var col: Color = arg if arg is Color else Color.WHITE
 			Fx.sparks(pos, col, 26, 10.0, 0.08, 0.7)

@@ -83,6 +83,11 @@ func _build_sounds() -> void:
 	_add("blast", 1.6, {"wave": "saw", "f0": 1800.0, "f1": 35.0, "tone": 0.5, "noise": 1.0, "lp0": 0.6, "lp1": 0.02, "vib_f": 45.0, "vib_a": 0.15, "decay": 1.4, "gain": 1.0})
 	_add("servo", 1.4, {"wave": "saw", "f0": 120.0, "f1": 170.0, "tone": 0.3, "noise": 0.35, "lp0": 0.1, "lp1": 0.16, "vib_f": 9.0, "vib_a": 0.05, "attack": 0.15, "decay": 0.7})
 	_add("install", 0.7, {"wave": "tri", "f0": 520.0, "f1": 1040.0, "tone": 0.6, "noise": 0.15, "lp0": 0.6, "lp1": 0.4, "decay": 1.4})
+	# Hand weapon reloads: the magazine coming out and going in (a ratchet), the slide snapping
+	# home, and the click of a trigger on an empty magazine.
+	_add("reload", 0.5, {"wave": "square", "f0": 240.0, "f1": 480.0, "tone": 0.16, "noise": 0.6, "lp0": 0.6, "lp1": 0.25, "gate_f": 8.0, "decay": 1.0})
+	_add("reload_done", 0.12, {"wave": "square", "f0": 1400.0, "f1": 650.0, "tone": 0.3, "noise": 0.55, "lp0": 0.8, "lp1": 0.4, "decay": 3.0})
+	_add("dry_fire", 0.06, {"wave": "square", "f0": 2300.0, "f1": 1800.0, "tone": 0.2, "noise": 0.4, "lp0": 0.9, "lp1": 0.6, "decay": 3.5})
 	_add("alarm", 0.9, {"wave": "square", "f0": 660.0, "f1": 660.0, "tone": 0.3, "two_tone": 520.0, "decay": 0.0})
 	# A soft, warm hum with a slow shimmer (frequencies are whole cycles per loop, so it loops seamlessly).
 	_add("mine_loop", 1.0, {"wave": "sine", "f0": 180.0, "f1": 180.0, "tone": 0.3, "harm": 0.12, "noise": 0.06, "lp0": 0.08, "lp1": 0.08,

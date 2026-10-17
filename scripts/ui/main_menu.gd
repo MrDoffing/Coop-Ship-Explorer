@@ -157,7 +157,7 @@ func _build() -> void:
 	_settings.visibility_changed.connect(func(): settings_panel.visible = _settings.visible)
 
 	var help := UiTheme.label(
-		"Walk: WASD + mouse   Interact / leave station: E   Blaster / Toolkit: 1 / 2 (or Q)   Fire / repair: Left mouse   Drop crate: G\n"
+		"Walk: WASD + mouse   Interact / leave station: E   Blaster / Toolkit: 1 / 2 (or Q)   Fire / repair: Left mouse   Reload: R   Drop crate: G\n"
 		+ "Pilot: W/S throttle, A/D turn, Space/Ctrl up/down, T autopilot, X full stop, B emergency blast, L land / lift off   Crew status: Tab   Menu: Esc",
 		14, UiTheme.MUTED)
 	help.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER

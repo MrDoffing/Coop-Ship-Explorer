@@ -4,9 +4,10 @@ extends CharacterBody3D
 ## the state through the synchronizer and drive stations by sending input to the server.
 ##
 ## The ship type (see ShipTypes) decides its stations: one pilot seat plus any number of guns,
-## mining lasers and scout bays, and its auto turret slots. Crew members and boarding aliens live
-## inside it (Interior/Crew, Interior/Boarders) in ship-local space, so they ride along with its
-## movement. Damage hits the energy shield first; once the shield breaks, the hull takes damage and
+## mining lasers and scout bays, and its auto turret slots, and its interior (see ShipInteriors):
+## where the rooms, consoles, repair panels and install hub are. Crew members and boarding aliens
+## live inside it (Interior/Crew, Interior/Boarders) in ship-local space, so they ride along with
+## its movement. Damage hits the energy shield first; once the shield breaks, the hull takes damage and
 ## part of it spills over into the engine and weapon systems, which go offline at zero until the
 ## crew repairs them. The hull cannot be repaired in flight, only with repair kits from a shop.
 ##
@@ -15,17 +16,31 @@ extends CharacterBody3D
 ## behind it. While docked it is safe, refuels, and the cargo ramp opens so the crew can buy supplies
 ## in the shop and carry them aboard. On liftoff the exit gate opens, and it seals again once the
 ## ship is through, so there is no way back. Supplies only last for the current dive.
+##
+## Abandoned stations are hangars in the tunnel wall between waystations. Landing there is
+## optional: the ship flies in side-on, turns round over the pad and settles nose out. There are no
+## station defences, but the cave's aliens leave a ship that is down there alone (it can't land
+## with any of them close by, and those latched onto the hull let go and roam the tunnel). The
+## crew explores the rooms behind the pier for salvage crates, guarded by aliens that live there
+## (spawned on landing, put away again on liftoff, in ship-local space like everything else while
+## the ship is parked).
 
 signal destroyed
 
 enum Dock { FLYING, APPROACH, LANDED, LIFTOFF }
 
+## Manned gun weapons. "spread" is the random cone (degrees) every bolt or pellet scatters into:
+## tight for the long-range guns, wide for the Flak Cannon, which makes up for it with a very high
+## rate of fire up close.
 const WEAPON_DEFS := {
-	"pulse": {"cooldown": 0.15, "speed": 150.0, "damage": 11.0, "pellets": 1, "spread": 0.6, "kind": "pulse"},
-	"flak": {"cooldown": 0.75, "speed": 120.0, "damage": 6.0, "pellets": 8, "spread": 4.5, "kind": "flak"},
-	"plasma": {"cooldown": 0.95, "speed": 60.0, "damage": 34.0, "pellets": 1, "spread": 0.3, "kind": "plasma"},
-	"rail": {"cooldown": 1.35, "speed": 0.0, "damage": 75.0, "pellets": 1, "spread": 0.0, "kind": "rail"},
+	"pulse": {"cooldown": 0.15, "speed": 150.0, "damage": 11.0, "pellets": 1, "spread": 1.1, "kind": "pulse"},
+	"flak": {"cooldown": 0.26, "speed": 120.0, "damage": 6.0, "pellets": 8, "spread": 5.5, "kind": "flak"},
+	"plasma": {"cooldown": 0.95, "speed": 60.0, "damage": 34.0, "pellets": 1, "spread": 1.6, "kind": "plasma"},
+	"rail": {"cooldown": 1.35, "speed": 0.0, "damage": 75.0, "pellets": 1, "spread": 0.25, "kind": "rail"},
 }
+## Auto turrets and scout guns scatter their bolts this much (degrees).
+const AUTO_SPREAD := 1.8
+const SCOUT_SPREAD := 1.2
 ## Systems come back online once repaired to this level.
 const REBOOT_HP := 50.0
 ## Emergency blast: a shockwave from the shield emitters that hits everything nearby (damage falls
@@ -51,12 +66,37 @@ const DOCK_SHIELD := 25.0
 const GATE_RATE := 0.22
 ## Braking (m/s²) the flight computer allows for when it stops the ship short of a sealed bulkhead.
 const BRAKE_DECEL := 2.0
+## Abandoned stations: landing is possible within DERELICT_LAND_RANGE of a hangar's mouth, but not
+## while a free-flying alien is within DERELICT_CLEAR_RANGE of the ship (aliens latched onto the
+## hull don't count: they let go once the ship starts landing, see at_derelict()). Each room holds
+## salvage with SALVAGE_CHANCE (the vault always holds two crates) and aliens with HOSTILE_CHANCE
+## (never the first room; the vault is always guarded).
+const DERELICT_LAND_RANGE := 90.0
+const DERELICT_CLEAR_RANGE := 60.0
+const SALVAGE_CHANCE := 0.65
+const HOSTILE_CHANCE := 0.55
 ## Auto turrets: reach, turn rate, rate of fire and damage per bolt.
 const AUTO_RANGE := 75.0
 const AUTO_TURN := 3.0
 const AUTO_COOLDOWN := 0.32
 const AUTO_DAMAGE := 7.0
 const AUTO_SPEED := 150.0
+## Engine hum (dB): idle and full throttle. It is just as loud anywhere inside the engine room
+## (ShipInteriors "engine_room"), with no hot spot by the reactor, and fades with the listener's
+## distance d from the room by a factor of 1 / (1 + d / ENGINE_HUM_FADE): -6 dB ENGINE_HUM_FADE
+## metres out, -12 dB three times as far.
+const ENGINE_HUM_IDLE_DB := -17.0
+const ENGINE_HUM_FULL_DB := -11.0
+const ENGINE_HUM_FADE := 5.0
+## Share of the mining power a mining laser deals to aliens and egg sacs (mining speed and laser
+## combat damage are tuned separately).
+const LASER_ALIEN_SHARE := 0.6
+## Hostility: how hard the aliens hunt the ship (MissionLevel._director sends the ambushes). It
+## rises while the ship flies, filling up over HOSTILITY_TIME seconds, holds while the ship is down
+## at an abandoned station and resets at every waystation. Its four stages (HOSTILITY_STAGES) send
+## more and bigger ambushes; there are none while the aliens are docile.
+const HOSTILITY_TIME := 320.0
+const HOSTILITY_STAGES := ["DOCILE", "MILD", "MODERATE", "HIGH"]
 
 const SHIELD_SHADER := """
 shader_type spatial;
@@ -121,6 +161,13 @@ var gate_entry := 1.0
 var gate_exit := 0.0
 ## Waystations landed at this dive.
 var stations_docked := 0
+## Hostility (0..1, see HOSTILITY_TIME).
+var hostility := 0.0
+## The abandoned station the ship is docking at or landed at (-1: none), how many different ones
+## it has landed at this dive, and how many aliens are still alive in the one it is landed at.
+var derelict_k := -1
+var derelicts_docked := 0
+var hostiles := 0
 ## Supplies installed this dive (item id -> count), auto turrets installed in the turret slots, and
 ## the aim of every turret hardpoint.
 var run_mods: Dictionary = {}
@@ -150,7 +197,10 @@ var cargo_spawner: MultiplayerSpawner
 ## Station id -> Turret for every gun and mining laser.
 var turrets: Dictionary = {}
 var panels: Array = []
+## Waypoint graph for walking aboard (server): the interior, or the interior plus the abandoned
+## station while landed at one. `derelict_nav` covers only the station (for the aliens there).
 var nav: AStar3D
+var derelict_nav: AStar3D
 var _ext: Dictionary = {}
 var _int: Dictionary = {}
 var _shield_mat: ShaderMaterial
@@ -195,6 +245,10 @@ var _brake_warned := -1
 var _liftoff_confirm := -100.0
 ## Crates still at each waystation (index -> [{item, price, pos (station-local), yaw}]).
 var _station_cargo: Dictionary = {}
+## What is left in each abandoned station (index -> {"crates", "enemies"}, station-local).
+var _derelict_state: Dictionary = {}
+## Every crew member's hand weapon (peer id -> CrewWeapons id; the Blaster when missing).
+var _crew_weapons: Dictionary = {}
 var _crate_seq := 0
 var _auto_cd: Array[float] = []
 var _auto_target: Array[int] = []
@@ -207,8 +261,8 @@ func _init() -> void:
 		["hull", "shield", "shield_down", "shield_reboot", "engine_hp", "weapons_hp", "engine_online",
 		"weapons_online", "fuel", "throttle", "autopilot", "occupants", "beams", "gun_weapons", "credits", "ore",
 		"depth", "alive", "boarders", "frozen", "blast_cd", "landing", "station_k", "gate_k", "gate_entry",
-		"gate_exit", "stations_docked", "stats", "max_hull", "max_shield", "max_fuel", "run_mods", "autocannons",
-		"auto_aim"], 1.0 / 30.0)
+		"gate_exit", "stations_docked", "hostility", "derelict_k", "derelicts_docked", "hostiles", "stats", "max_hull", "max_shield",
+		"max_fuel", "run_mods", "autocannons", "auto_aim"], 1.0 / 30.0)
 
 
 func setup(data: Dictionary) -> void:
@@ -277,7 +331,7 @@ func _ready() -> void:
 	crew_spawner = NetUtil.add_spawner(self, "CrewSpawner", crew_root, _spawn_crew)
 	boarder_spawner = NetUtil.add_spawner(self, "BoarderSpawner", boarder_root, _spawn_boarder)
 	cargo_spawner = NetUtil.add_spawner(self, "CargoSpawner", cargo_root, _spawn_crate)
-	nav = ShipBuilder.build_nav()
+	nav = ShipInteriors.build_nav(interior_layout())
 	_build_shield()
 	_build_beams()
 	_build_audio()
@@ -348,14 +402,38 @@ func _build_beams() -> void:
 		_beams[id] = {"mesh": mi, "light": light, "audio": audio}
 
 
+## The engine hum. Its loudness doesn't come from Godot's distance attenuation (which peaks right
+## at the source) but from the listener's distance to the engine room (see engine_hum_db()); the
+## player is moved each frame to the point of the room nearest to the listener, so the hum comes
+## from the engine room's direction (and from all round inside it).
 func _build_audio() -> void:
 	_engine_audio = AudioStreamPlayer3D.new()
 	_engine_audio.stream = Sfx.stream("engine_loop")
-	_engine_audio.position = Vector3(0, 1.5, 9.0)
-	_engine_audio.volume_db = -8.0
-	_engine_audio.unit_size = 20.0
+	var room: Array = interior_layout()["engine_room"]
+	_engine_audio.position = ((room[0] as Vector3) + (room[1] as Vector3)) * 0.5
+	_engine_audio.attenuation_model = AudioStreamPlayer3D.ATTENUATION_DISABLED
+	_engine_audio.volume_db = ENGINE_HUM_IDLE_DB
+	_engine_audio.max_db = 0.0
 	_engine_audio.autoplay = true
 	add_child(_engine_audio)
+
+
+## Engine hum level (dB) for a listener at ship-local point `ear`, given the engine room's box
+## (min, max) and the engine power (0..1).
+static func engine_hum_db(room: Array, ear: Vector3, power: float) -> float:
+	var d := ear.distance_to(ear.clamp(room[0], room[1]))
+	return lerpf(ENGINE_HUM_IDLE_DB, ENGINE_HUM_FULL_DB, power) + linear_to_db(1.0 / (1.0 + d / ENGINE_HUM_FADE))
+
+
+func _update_engine_hum(power: float) -> void:
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return
+	var room: Array = interior_layout()["engine_room"]
+	var ear := to_local(cam.global_position)
+	# Nearest point of the room (or a little above the listener inside it, so it sounds all round).
+	_engine_audio.position = ear.clamp(room[0], room[1]) + Vector3(0, 0.5, 0)
+	_engine_audio.volume_db = engine_hum_db(room, ear, power)
 
 
 func _spawn_crew(data: Variant) -> Node:
@@ -455,6 +533,35 @@ func shield_radii() -> Vector3:
 	return layout["shield_radii"]
 
 
+## The ship's interior layout (ShipInteriors).
+func interior_layout() -> Dictionary:
+	return layout["interior"]
+
+
+## Repair panels {system, pos, yaw} (ship-local).
+func repair_panels() -> Array:
+	return interior_layout()["panels"]
+
+
+## Where crew members appear aboard.
+func spawn_points() -> Array:
+	return interior_layout()["spawns"]
+
+
+## Where crew bots wait when they have nothing to do.
+func idle_spots() -> Array:
+	return interior_layout()["idle"]
+
+
+## Where the install hub stands (ship-local floor point) and which room it is in.
+func install_hub() -> Vector3:
+	return interior_layout()["hub"]
+
+
+func install_hub_room() -> String:
+	return str(interior_layout().get("hub_room", "engine room"))
+
+
 ## [position, outward normal] of hull point i (where critters latch on).
 func hull_point(i: int) -> Array:
 	return layout["hull_points"][i]
@@ -515,8 +622,9 @@ func _server_systems(delta: float) -> void:
 	if not frozen and landing == Dock.FLYING:
 		var burn := (0.12 + absf(throttle) * 0.55 + (0.12 * _laser_count() if beams != 0 else 0.0)) * float(stats["fuel_burn"])
 		fuel = maxf(0.0, fuel - burn * delta)
-	if landing == Dock.LANDED:
-		# Station services: refuel and recharge the shield.
+		hostility = minf(1.0, hostility + delta / HOSTILITY_TIME)
+	if landing == Dock.LANDED and derelict_k < 0:
+		# Waystation services: refuel and recharge the shield.
 		fuel = minf(max_fuel, fuel + DOCK_REFUEL * delta)
 		shield_down = false
 		shield_reboot = 0.0
@@ -551,7 +659,23 @@ func _server_systems(delta: float) -> void:
 	elif fuel > 0.0:
 		_no_fuel_warned = false
 	depth = maxf(depth, -global_position.z)
-	boarders = boarder_root.get_child_count()
+	var aboard := 0
+	var outside := 0
+	for c in boarder_root.get_children():
+		var b := c as Boarder
+		if b == null or b.is_queued_for_deletion():
+			continue
+		if b.outside:
+			outside += 1
+		else:
+			aboard += 1
+	boarders = aboard
+	hostiles = outside
+
+
+## Hostility stage: 0 docile, 1 mild, 2 moderate, 3 high.
+func hostility_stage() -> int:
+	return clampi(int(hostility * 4.0), 0, 3)
 
 
 func _laser_count() -> int:
@@ -680,15 +804,26 @@ func _fire_turret(id: String, weapon: String) -> float:
 	if style_of(id) == "heavy":
 		dmg *= 1.25
 	var proj: Projectiles = Game.mission.projectiles
+	var spread := deg_to_rad(float(def["spread"]))
 	if weapon == "rail":
-		proj.fire_rail(muzzle, -b.z, dmg)
+		proj.fire_rail(muzzle, scatter(-b.z, spread), dmg)
 	else:
-		var spread := deg_to_rad(float(def["spread"]))
 		for i in int(def["pellets"]):
-			var dir := (b * Vector3(randf_range(-spread, spread), randf_range(-spread, spread), -1.0)).normalized()
-			proj.fire(def["kind"], muzzle, dir * float(def["speed"]) + velocity, dmg)
+			proj.fire(def["kind"], muzzle, scatter(-b.z, spread) * float(def["speed"]) + velocity, dmg)
 	_fx_shot.rpc(id, weapon)
 	return float(def["cooldown"]) / float(stats["turret_rate"])
+
+
+## A random direction within `cone` radians of `dir` (spread evenly over the cone's disc).
+static func scatter(dir: Vector3, cone: float) -> Vector3:
+	if cone <= 0.0:
+		return dir.normalized()
+	var fwd := dir.normalized()
+	var side := fwd.cross(Vector3.UP if absf(fwd.y) < 0.95 else Vector3.RIGHT).normalized()
+	var up := side.cross(fwd)
+	var r := tan(cone) * sqrt(randf())
+	var a := randf() * TAU
+	return (fwd + side * cos(a) * r + up * sin(a) * r).normalized()
 
 
 func _server_mining(delta: float) -> void:
@@ -721,6 +856,8 @@ func _server_mining(delta: float) -> void:
 				var power := float(stats["mining_power"]) * delta
 				# Laser Overcharge: extra damage to aliens and egg sacs.
 				var vs_alien := float(stats.get("mining_vs_alien", 1.0))
+				if not target is Deposit:
+					power *= LASER_ALIEN_SHARE
 				if target is Alien:
 					power *= vs_alien
 				target.take_damage(power, {"source": "mining", "pos": beam_ends[i], "sac": col.get_meta("sac", -1), "vs_alien": vs_alien})
@@ -733,8 +870,8 @@ func _server_mining(delta: float) -> void:
 func apply_damage(amount: float, at: Vector3, kind := "") -> void:
 	if not multiplayer.is_server() or not alive or amount <= 0.0:
 		return
-	# Waystations are safe havens: their defences cover a docking ship.
-	if landing != Dock.FLYING:
+	# Waystations are safe havens: their defences cover a docking ship. Abandoned stations are not.
+	if landing != Dock.FLYING and derelict_k < 0:
 		return
 	if OS.has_feature("debug") and debug_damage:
 		print("[damage] %.1f from %s (shield %.0f hull %.0f)" % [amount, kind, shield, hull])
@@ -787,18 +924,31 @@ func system_online(sys: String) -> bool:
 	return engine_online if sys == "engine" else weapons_online
 
 
-func collector_global() -> Vector3:
-	return to_global(layout["collector"])
+## Where the tractor field pulls mineral chunks in: the tip of the mining laser nearest to `near`
+## (global; any finite point), following the laser as it swings.
+func collector_global(near := Vector3(INF, INF, INF)) -> Vector3:
+	var best := to_global(layout["collector"])
+	var best_d := INF
+	for id: String in layout["lasers"]:
+		var t: Turret = turrets.get(id)
+		if t == null:
+			continue
+		var tip := to_global(t.muzzle_local(t.aim))
+		var d := tip.distance_squared_to(near) if near.is_finite() else 0.0
+		if d < best_d:
+			best_d = d
+			best = tip
+	return best
 
 
-func collect_mineral(kind: String, value: int) -> void:
+func collect_mineral(kind: String, value: int, at := Vector3(INF, INF, INF)) -> void:
 	if not multiplayer.is_server():
 		return
 	credits += value
 	var o := ore.duplicate()
 	o[kind] = int(o.get(kind, 0)) + 1
 	ore = o
-	_fx_collect.rpc(kind, value)
+	_fx_collect.rpc(kind, value, to_local(at if at.is_finite() else collector_global()))
 
 
 func add_fuel(amount: float) -> void:
@@ -999,10 +1149,42 @@ func nearest_station(max_dist: float) -> Dictionary:
 	return st
 
 
+## Where crew members may be (ship-local): inside the ship, plus the ramp, the pier and the
+## station's building while landed.
+func walk_bounds() -> AABB:
+	var w: Array = interior_layout()["walk"]
+	var ship_box := AABB(w[0], (w[1] as Vector3) - (w[0] as Vector3))
+	if landing == Dock.LANDED:
+		if derelict_k >= 0 and Game.mission:
+			return ((Game.mission.cave as CaveGen).derelict(derelict_k)["walk"] as AABB).merge(ship_box)
+		return AABB(Vector3(-12.0, -2.6, -11.0), Vector3(24.0, 10.6, StationBuilder.ROOM_END + 12.0)).merge(ship_box)
+	return ship_box
+
+
+## The waypoint of `graph` nearest to ship-local point p that is in sight of p, so nobody heads
+## for a waypoint on the far side of a wall.
+func nav_closest(graph: AStar3D, p: Vector3) -> int:
+	var ids := graph.get_point_ids()
+	var order: Array = []
+	for id in ids:
+		order.append([graph.get_point_position(id).distance_squared_to(p), id])
+	order.sort_custom(func(a, b): return a[0] < b[0])
+	var space := get_world_3d().direct_space_state
+	var from := to_global(p + Vector3(0, 0.9, 0))
+	for i in mini(order.size(), 6):
+		var id: int = order[i][1]
+		var q := PhysicsRayQueryParameters3D.create(from, to_global(graph.get_point_position(id) + Vector3(0, 0.9, 0)),
+			Game.LAYER_STATION | Game.LAYER_INTERIOR)
+		if space.intersect_ray(q).is_empty():
+			return id
+	return int(order[0][1]) if not order.is_empty() else graph.get_closest_point(p)
+
+
 ## True for a ship-local point inside the ship (the ramp and the station outside are not).
-static func is_aboard(p: Vector3) -> bool:
-	var lo := ShipBuilder.ABOARD_MIN
-	var hi := ShipBuilder.ABOARD_MAX
+func is_aboard(p: Vector3) -> bool:
+	var box: Array = interior_layout()["aboard"]
+	var lo: Vector3 = box[0]
+	var hi: Vector3 = box[1]
 	return p.x > lo.x and p.x < hi.x and p.y > lo.y and p.y < hi.y and p.z > lo.z and p.z < hi.z
 
 
@@ -1026,15 +1208,27 @@ func request_land() -> void:
 	match landing:
 		Dock.FLYING:
 			var st := nearest_station(LAND_RANGE)
-			if st.is_empty():
-				notify_peer(pid, "No waystation in range", 1)
+			var dr := nearest_derelict(DERELICT_LAND_RANGE)
+			if not st.is_empty() and not dr.is_empty():
+				if derelict_distance(dr) < station_distance(st):
+					st = {}
+				else:
+					dr = {}
+			if st.is_empty() and dr.is_empty():
+				notify_peer(pid, "No station in range", 1)
 			elif not engine_online:
 				notify_peer(pid, "Engine offline - repair it before docking", 1)
+			elif not dr.is_empty() and aliens_near(DERELICT_CLEAR_RANGE) > 0:
+				var n := aliens_near(DERELICT_CLEAR_RANGE)
+				notify_peer(pid, "Can't land: %d alien%s within %d m - clear them first" % [n, "s" if n > 1 else "",
+					int(DERELICT_CLEAR_RANGE)], 1)
+			elif not dr.is_empty():
+				_begin_derelict_landing(dr)
 			else:
 				_begin_landing(st)
 		Dock.LANDED:
 			var missing := crew_outside()
-			var left := bought_crates_outside()
+			var left := bought_crates_outside() if derelict_k < 0 else 0
 			if missing != "":
 				notify_peer(pid, "Waiting for %s to come aboard" % missing, 1)
 			elif left > 0 and _time > _liftoff_confirm:
@@ -1091,8 +1285,26 @@ func _begin_landing(st: Dictionary) -> void:
 
 
 ## Server: close the ramp, rise to the gate height, wait for the exit gate and fly out through it.
+## From an abandoned station: rise, turn to face down the tunnel and leave the hangar.
 func _begin_liftoff() -> void:
 	var cave: CaveGen = Game.mission.cave
+	if derelict_k >= 0:
+		var d := cave.derelict(derelict_k)
+		var dxf: Transform3D = d["xform"]
+		var t := cave.tangent(float(d["s"]))
+		var out_yaw := atan2(-t.x, -t.z)
+		var hover := dxf * Vector3(0, StationBuilder.LAND_HEIGHT + DerelictBuilder.HOVER, 0)
+		_dock_keys = [
+			{"pos": hover, "yaw": rotation.y, "time": 2.0},
+			{"pos": hover, "yaw": out_yaw, "time": maxf(1.5, absf(angle_difference(rotation.y, out_yaw)) / DOCK_TURN_RATE)},
+			{"pos": derelict_entrance(d), "yaw": out_yaw, "time": maxf(2.0, hover.distance_to(derelict_entrance(d)) / DOCK_SPEED_SLOW)},
+		]
+		_start_dock_path()
+		_dock_wait = 0.4
+		landing = Dock.LIFTOFF
+		_stow_derelict(d)
+		notify.rpc("Lifting off - ramp closing", 0)
+		return
 	var st := cave.station(station_k)
 	var xf: Transform3D = st["xform"]
 	var yaw := atan2(xf.basis.z.x, xf.basis.z.z)
@@ -1174,13 +1386,27 @@ func _dock_done() -> void:
 		_on_landed()
 	elif landing == Dock.LIFTOFF:
 		landing = Dock.FLYING
-		station_k = -1
 		autopilot = true
+		if derelict_k >= 0:
+			derelict_k = -1
+			notify.rpc("Clear of the abandoned station - the helm is yours", 0)
+			return
+		station_k = -1
 		_exit_state = 2
 		notify.rpc("Clear of the waystation - the helm is yours", 0)
 
 
 func _on_landed() -> void:
+	if derelict_k >= 0:
+		var d: Dictionary = Game.mission.cave.derelict(derelict_k)
+		if not _derelict_state.has(derelict_k):
+			derelicts_docked += 1
+		nav = DerelictBuilder.build_nav(d, interior_layout())
+		derelict_nav = DerelictBuilder.build_nav(d, {})
+		_unload_derelict(d)
+		_fx_touchdown.rpc()
+		notify.rpc("Landed at %s - no defences here, expect hostiles" % d["name"], 1)
+		return
 	var st: Dictionary = Game.mission.cave.station(station_k)
 	# The entrance seals behind the ship: the previous stretch of tunnel is closed for good.
 	gate_k = station_k
@@ -1188,6 +1414,8 @@ func _on_landed() -> void:
 	gate_exit = 0.0
 	_exit_state = 0
 	stations_docked += 1
+	# A safe haven: the aliens lose the ship's trail.
+	hostility = 0.0
 	_unload_station(st)
 	_fx_touchdown.rpc()
 	notify.rpc("Docked at %s - entrance bulkhead sealing. Refuelling; the shop is open." % st["name"], 0)
@@ -1222,6 +1450,208 @@ func _clear_of_exit() -> bool:
 		if sc.state == Scout.State.FLYING and (inv * sc.global_position).z > StationBuilder.EXIT_FACE - 4.0:
 			return false
 	return true
+
+
+# --- Abandoned stations ------------------------------------------------------------------------
+
+## The point in the tunnel in front of an abandoned station's hangar, where docking starts and
+## liftoff ends.
+static func derelict_entrance(d: Dictionary) -> Vector3:
+	return (d["xform"] as Transform3D) * Vector3(0, StationBuilder.LAND_HEIGHT + DerelictBuilder.HOVER, -float(d["depth"]) + 3.0)
+
+
+## The abandoned station in the stretch of tunnel the ship is in (after the waystation it last
+## landed at), or {}.
+func next_derelict() -> Dictionary:
+	if Game.mission == null or gate_k < 0:
+		return {}
+	return (Game.mission.cave as CaveGen).derelict(gate_k)
+
+
+func derelict_distance(d: Dictionary) -> float:
+	return global_position.distance_to(derelict_entrance(d))
+
+
+## The abandoned station in this stretch if it is within `max_dist` of landing, or {}.
+func nearest_derelict(max_dist: float) -> Dictionary:
+	var d := next_derelict()
+	if d.is_empty() or derelict_distance(d) > max_dist:
+		return {}
+	return d
+
+
+## True from the moment the ship starts landing at an abandoned station until it is back out in
+## the tunnel: the cave's aliens leave it alone meanwhile (latched ones let go and roam the tunnel).
+func at_derelict() -> bool:
+	return derelict_k >= 0 and landing != Dock.FLYING
+
+
+## Free-flying aliens (not latched onto the hull) within `reach` metres of the ship.
+func aliens_near(reach: float) -> int:
+	var n := 0
+	for a in get_tree().get_nodes_in_group("aliens"):
+		var alien := a as Alien
+		if alien and alien.attached < 0 and alien.hp > 0.0 and not alien.is_queued_for_deletion() \
+				and alien.global_position.distance_to(global_position) < reach:
+			n += 1
+	return n
+
+
+## Server: fly along the tunnel to the hangar's mouth side-on, into the hangar, turn round over the
+## pad (nose out) and settle on the landing legs.
+func _begin_derelict_landing(d: Dictionary) -> void:
+	var xf: Transform3D = d["xform"]
+	var h := StationBuilder.LAND_HEIGHT
+	var final_yaw := atan2(xf.basis.z.x, xf.basis.z.z)
+	var yaw_a := wrapf(final_yaw + PI / 2.0, -PI, PI)
+	var yaw_b := wrapf(final_yaw - PI / 2.0, -PI, PI)
+	var along := yaw_a if absf(angle_difference(rotation.y, yaw_a)) < absf(angle_difference(rotation.y, yaw_b)) else yaw_b
+	var front := derelict_entrance(d)
+	var hover := xf * Vector3(0, h + DerelictBuilder.HOVER, 0)
+	# Follow the tunnel's centre line to the hangar's mouth so the ship never cuts through rock.
+	var cave: CaveGen = Game.mission.cave
+	var route := PackedVector3Array([global_position])
+	var s0 := -global_position.z
+	var s1 := float(d["s"])
+	var steps := int(absf(s1 - s0) / 15.0)
+	for i in range(1, steps):
+		route.append(cave.center3(lerpf(s0, s1, float(i) / float(steps))) + Vector3(0, -1.4, 0))
+	route.append(front)
+	var length := 0.0
+	for i in route.size() - 1:
+		length += route[i].distance_to(route[i + 1])
+	_dock_keys = [
+		{"pos": front, "route": route, "yaw": along, "time": clampf(length / DOCK_SPEED, 2.0, 16.0)},
+		{"pos": hover, "yaw": along, "time": maxf(2.0, front.distance_to(hover) / DOCK_SPEED_SLOW)},
+		{"pos": hover, "yaw": final_yaw, "time": maxf(1.5, absf(angle_difference(along, final_yaw)) / DOCK_TURN_RATE)},
+		{"pos": xf * Vector3(0, h, 0), "yaw": final_yaw, "time": maxf(2.2, DerelictBuilder.HOVER / DOCK_DESCENT * 2.0)},
+	]
+	_start_dock_path()
+	landing = Dock.APPROACH
+	derelict_k = int(d["k"])
+	station_k = -1
+	throttle = 0.0
+	for sc: Scout in Game.mission.scouts:
+		sc.recall_for_docking()
+	notify.rpc("Docking at %s - approach on autopilot" % d["name"], 0)
+	# The aliens on the hull lose interest in a ship that settles in a hangar (see Alien._think).
+	var latched := get_tree().get_nodes_in_group("aliens").filter(func(a): return (a as Alien).attached >= 0).size()
+	if latched > 0:
+		notify.rpc("%d alien%s let go of the hull" % [latched, "s" if latched > 1 else ""], 0)
+
+
+## Server: set out what is left in an abandoned station: salvage crates and the aliens guarding
+## them (both in ship-local space; the ship is parked).
+func _unload_derelict(d: Dictionary) -> void:
+	var k := int(d["k"])
+	if not _derelict_state.has(k):
+		_derelict_state[k] = _derelict_contents(d)
+	var state: Dictionary = _derelict_state[k]
+	var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	for rec: Dictionary in state["crates"]:
+		_crate_seq += 1
+		cargo_spawner.spawn({"name": "C%d" % _crate_seq, "item": rec["item"], "price": 0,
+			"pos": (rec["pos"] as Vector3) - lift, "yaw": rec["yaw"]})
+	for rec: Dictionary in state["enemies"]:
+		_boarder_seq += 1
+		boarder_spawner.spawn({"name": "H%d" % _boarder_seq, "kind": rec["kind"], "pos": (rec["pos"] as Vector3) - lift,
+			"hp": rec["hp"], "max_hp": rec["max_hp"], "dmg": rec["dmg"], "outside": true})
+	state["crates"] = []
+	state["enemies"] = []
+
+
+## What an abandoned station holds when the crew first lands there: salvage crates by the walls
+## (see RunItems.roll_salvage) and packs of aliens in the rooms, tougher deeper down.
+func _derelict_contents(d: Dictionary) -> Dictionary:
+	var mission: MissionLevel = Game.mission
+	var k := int(d["k"])
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash([int(mission.mission_seed), k, "salvage"])
+	var s := float(d["s"])
+	var hp_mult := mission.hp_mult(s)
+	# Their bites hurt more deeper down, but less steeply than the aliens in the tunnels.
+	var dmg_mult := 1.0 + (mission.dmg_mult(s) - 1.0) * 0.5
+	var guns: Array = Game.profile.get("guns", ["pulse"])
+	var free := turret_slots() - autocannons - _crates_of("autocannon")
+	var layout: Dictionary = d["layout"]
+	var rooms: Array = layout["rooms"]
+	var crates: Array = []
+	var enemies: Array = []
+	for i in rooms.size():
+		var room: Dictionary = rooms[i]
+		var vault := i == int(layout["vault"])
+		var spots: Array = (room["spots"] as Array).duplicate()
+		for j in range(spots.size() - 1, 0, -1):
+			var r := rng.randi() % (j + 1)
+			var t: Variant = spots[j]
+			spots[j] = spots[r]
+			spots[r] = t
+		var loot := 2 if vault else (1 if rng.randf() < SALVAGE_CHANCE else 0)
+		if loot == 1 and rng.randf() < 0.2:
+			loot = 2
+		for j in mini(loot, spots.size()):
+			var item := RunItems.roll_salvage(rng, guns, free)
+			if item == "autocannon":
+				free -= 1
+			var spot: Dictionary = spots[j]
+			crates.append({"item": item, "pos": (spot["pos"] as Vector3) + Vector3(0, SupplyCrate.SIZE.y * 0.5, 0), "yaw": spot["yaw"]})
+		if i == 0 or not (vault or rng.randf() < HOSTILE_CHANCE):
+			continue
+		var c: Vector2 = room["c"]
+		var size: Vector2 = room["size"]
+		for kind: String in _roll_pack(rng, s, vault):
+			var p := Vector3(c.x + rng.randf_range(-0.5, 0.5) * (size.x - 3.2), StationBuilder.DECK_Y,
+				c.y + rng.randf_range(-0.5, 0.5) * (size.y - 3.2))
+			var hp := float(Boarder.KIND_STATS[kind]["hp"]) * hp_mult
+			enemies.append({"kind": kind, "pos": p, "hp": hp, "max_hp": hp, "dmg": dmg_mult})
+	return {"crates": crates, "enemies": enemies}
+
+
+## The aliens in one room: a pack of skitters, a needler or two, a boarder or two, or (guarding
+## the vault) a mix of them all.
+static func _roll_pack(rng: RandomNumberGenerator, depth: float, vault: bool) -> Array[String]:
+	var out: Array[String] = []
+	var extra := 1 if depth > 900.0 else 0
+	if vault:
+		out.append_array(["boarder", "needler"])
+		for i in 3 + extra:
+			out.append("skitter")
+		return out
+	var r := rng.randf()
+	if r < 0.4:
+		for i in rng.randi_range(2, 4) + extra:
+			out.append("skitter")
+	elif r < 0.72:
+		for i in 1 + (1 if rng.randf() < 0.4 else 0) + extra:
+			out.append("needler")
+	else:
+		for i in 1 + (1 if rng.randf() < 0.35 else 0) + extra:
+			out.append("boarder")
+	return out
+
+
+## Server: on liftoff, put away the crates left outside the ship and the aliens still alive in the
+## abandoned station (the crew may come back for them), and the station's waypoints.
+func _stow_derelict(d: Dictionary) -> void:
+	var k := int(d["k"])
+	var state: Dictionary = _derelict_state.get(k, {"crates": [], "enemies": []})
+	var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	for c in cargo_root.get_children():
+		var crate := c as SupplyCrate
+		if crate == null or crate.carrier != 0 or is_aboard(crate.net_pos):
+			continue
+		(state["crates"] as Array).append({"item": crate.item, "pos": crate.net_pos + lift, "yaw": crate.net_yaw})
+		crate.queue_free()
+	for c in boarder_root.get_children():
+		var b := c as Boarder
+		if b == null or not b.outside or b.is_queued_for_deletion():
+			continue
+		if b.hp > 0.0:
+			(state["enemies"] as Array).append({"kind": b.kind, "pos": b.home + lift, "hp": b.hp, "max_hp": b.max_hp, "dmg": b.dmg_mult})
+		b.queue_free()
+	_derelict_state[k] = state
+	nav = ShipInteriors.build_nav(interior_layout())
+	derelict_nav = null
 
 
 # --- Shop and supply crates --------------------------------------------------------------------
@@ -1379,7 +1809,7 @@ func request_install(crate_name: String, target: String) -> void:
 	var who := crew_root.get_node_or_null(str(pid)) as CrewMember
 	if crate == null or who == null or crate.carrier != pid or not (target == "hub" or target in gun_stations()):
 		return
-	var spot := ShipBuilder.INSTALL_HUB
+	var spot := install_hub()
 	if target != "hub":
 		spot = console(target)["console"]
 	if Vector2(who.net_pos.x - spot.x, who.net_pos.z - spot.z).length() > 4.0:
@@ -1397,9 +1827,12 @@ func request_install(crate_name: String, target: String) -> void:
 		_fire_cd[target] = 0.6
 		msg = "%s mounted a %s on the %s (was %s)" % [who.display_name, RunItems.display_name(item),
 			station_name(target).to_lower(), Game.GUNS[old]["name"]]
+	elif RunItems.is_crew_weapon(item):
+		notify_peer(pid, "Hand weapons aren't installed - put the crate down and press F to equip it", 1)
+		return
 	else:
 		if target != "hub":
-			notify_peer(pid, "Fit this at the install hub in the engine room", 1)
+			notify_peer(pid, "Fit this at the install hub in the %s" % install_hub_room(), 1)
 			return
 		if item == "autocannon" and autocannons >= turret_slots():
 			notify_peer(pid, "Every turret slot is taken", 1)
@@ -1412,6 +1845,72 @@ func request_install(crate_name: String, target: String) -> void:
 	crate.queue_free()
 	notify.rpc(msg, 0)
 	_fx_install.rpc(spot)
+
+
+## Sell a carried crate at the buyback counter of the waystation's shop, for a share of its price
+## here (RunItems.sell_price).
+@rpc("any_peer", "call_local", "reliable")
+func request_sell(crate_name: String) -> void:
+	if not multiplayer.is_server() or not alive or landing != Dock.LANDED or derelict_k >= 0 or station_k < 0:
+		return
+	var pid := Game.sender_id()
+	var crate := cargo_root.get_node_or_null(crate_name) as SupplyCrate
+	var who := crew_root.get_node_or_null(str(pid)) as CrewMember
+	if crate == null or who == null or not who.alive or crate.carrier != pid:
+		return
+	var spot := StationBuilder.SELL_SPOT - Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	if Vector2(who.net_pos.x - spot.x, who.net_pos.z - spot.z).length() > 3.5:
+		return
+	var value := RunItems.sell_price(crate.item, station_k)
+	credits += value
+	notify.rpc("%s sold %s for %d CR" % [who.display_name, RunItems.display_name(crate.item), value], 0)
+	crate.queue_free()
+	_fx_buy.rpc(spot + Vector3(0, 1.1, 0))
+
+
+## Swap hand weapons with a crate: the crew member takes the crate's weapon and leaves their own
+## in the crate.
+@rpc("any_peer", "call_local", "reliable")
+func request_weapon_swap(crate_name: String) -> void:
+	if not multiplayer.is_server():
+		return
+	var pid := Game.sender_id()
+	var crate := cargo_root.get_node_or_null(crate_name) as SupplyCrate
+	var who := crew_root.get_node_or_null(str(pid)) as CrewMember
+	if crate == null or who == null or not who.alive or crate.carrier != 0 or crate.price > 0 or not RunItems.is_crew_weapon(crate.item):
+		return
+	if crate_carried_by(pid) != null or who.net_pos.distance_to(crate.net_pos) > 4.0:
+		return
+	var new_w := RunItems.crew_weapon_of(crate.item)
+	var old_w := str(_crew_weapons.get(pid, CrewWeapons.DEFAULT))
+	if new_w == old_w or not CrewWeapons.exists(new_w):
+		return
+	_crew_weapons[pid] = new_w
+	crate.item = RunItems.crew_weapon_item(old_w)
+	who.set_weapon.rpc_id(pid, new_w)
+	notify_peer(pid, "Equipped the %s - your %s is in the crate" % [CrewWeapons.display_name(new_w), CrewWeapons.display_name(old_w)], 0)
+	_fx_crate.rpc(crate.net_pos)
+
+
+## The hand weapon a crew member carries (server's record).
+func crew_weapon(pid: int) -> String:
+	return str(_crew_weapons.get(pid, CrewWeapons.DEFAULT))
+
+
+## Splash damage from a crew member's plasma orb bursting at a ship-local point.
+@rpc("any_peer", "call_local", "reliable")
+func crew_splash(center: Vector3, radius: float, dmg: float) -> void:
+	if not multiplayer.is_server():
+		return
+	radius = clampf(radius, 0.0, 8.0)
+	var by := Game.sender_id()
+	for c in boarder_root.get_children():
+		var b := c as Boarder
+		if b == null or b.hp <= 0.0:
+			continue
+		var dist := to_local(b.center_global()).distance_to(center)
+		if dist < radius:
+			b.take_damage(dmg * lerpf(1.0, 0.5, dist / radius), {"source": "player", "by": by})
 
 
 ## Server: apply a shop upgrade or repair.
@@ -1551,7 +2050,7 @@ func _server_autocannons(delta: float) -> void:
 			_auto_cd[i] = AUTO_COOLDOWN / float(stats["turret_rate"])
 			var frame := _auto_frame(i, a)
 			var muzzle := to_global(frame * ShipBuilder.AUTOCANNON_MUZZLE)
-			var dir := (global_basis * (frame.basis * Vector3.FORWARD)).normalized()
+			var dir := scatter(global_basis * (frame.basis * Vector3.FORWARD), deg_to_rad(AUTO_SPREAD))
 			Game.mission.projectiles.fire("pulse", muzzle, dir * AUTO_SPEED + velocity, AUTO_DAMAGE * float(stats["turret_damage"]))
 			_fx_auto.rpc(i)
 	auto_aim = aims_now
@@ -1597,6 +2096,8 @@ func release_station(id: String) -> void:
 
 ## Server: free every station held by a peer (on disconnect or death).
 func release_peer(pid: int) -> void:
+	if not Net.roster.has(pid):
+		_crew_weapons.erase(pid)
 	for k in occupants.keys():
 		if int(occupants[k]) == pid:
 			_release(k)
@@ -1675,7 +2176,7 @@ func hit_boarder(boarder_name: String, amount: float) -> void:
 		return
 	var b := boarder_root.get_node_or_null(boarder_name)
 	if b:
-		b.take_damage(amount, {"source": "player"})
+		b.take_damage(amount, {"source": "player", "by": Game.sender_id()})
 
 
 @rpc("authority", "call_local", "reliable")
@@ -1741,8 +2242,10 @@ func _fx_shot(id: String, weapon: String) -> void:
 
 
 @rpc("authority", "call_local", "unreliable")
-func _fx_collect(_kind: String, value: int) -> void:
-	Sfx.play("pickup", collector_global(), -10.0, 1.0 + minf(value, 60) / 120.0)
+func _fx_collect(kind: String, value: int, local_pos: Vector3) -> void:
+	var pos := to_global(local_pos)
+	Sfx.play("pickup", pos, -10.0, 1.0 + minf(value, 10) / 20.0)
+	Fx.flash(pos, Deposit.TYPES.get(kind, Deposit.TYPES["ferrite"])["color"], 2.0, 4.0, 0.12)
 	if Game.mission and Game.mission.hud:
 		Game.mission.hud.credit_popup(value)
 
@@ -1816,7 +2319,22 @@ func fx_repair(local_pos: Vector3) -> void:
 	Sfx.play("repair", pos, -8.0)
 
 
-## Relay a crew member's blaster shot (ship-local coordinates) to the other peers.
+## Relay a crew member's hand weapon shot (ship-local coordinates) to the other peers.
+@rpc("any_peer", "call_remote", "unreliable")
+func fx_weapon(weapon: String, from_local: Vector3, ends_local: PackedVector3Array, normals_local: PackedVector3Array, hit_mask: int, flesh_mask: int) -> void:
+	if not CrewWeapons.exists(weapon) or ends_local.size() > 16:
+		return
+	var ends := PackedVector3Array()
+	var normals := PackedVector3Array()
+	for i in ends_local.size():
+		ends.append(to_global(ends_local[i]))
+		normals.append(global_basis * (normals_local[i] if i < normals_local.size() else Vector3.UP))
+	if weapon == "plasma" and ends_local.size() > 0:
+		CrewWeapons.launch_orb(self, from_local, ends_local[0])
+	CrewWeapons.shot_fx(weapon, to_global(from_local), ends, normals, hit_mask, flesh_mask)
+
+
+## Relay a crew bot's blaster shot (ship-local coordinates) to the other peers.
 @rpc("any_peer", "call_remote", "unreliable")
 func fx_blaster(from_local: Vector3, to_local_pos: Vector3, normal_local: Vector3, flesh: bool, did_hit: bool) -> void:
 	var a := to_global(from_local)
@@ -1898,6 +2416,7 @@ func _update_visuals(delta: float) -> void:
 			else:
 				audio.stop()
 	_engine_audio.pitch_scale = 0.75 + clampf(velocity.length() / 14.0, 0.0, 1.0) * 0.6
+	_update_engine_hum(power)
 	# Alarm lights inside the ship.
 	var alarm := alive and (boarders > 0 or hull < max_hull * 0.3 or not engine_online or not weapons_online or shield_down)
 	_alarm_t += delta

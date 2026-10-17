@@ -2,31 +2,17 @@ class_name ShipTypes
 extends RefCounted
 ## The motherships the crew can fly: base stats, stations and the exterior layout of each.
 ##
-## Every ship shares the same walkable interior (see ShipBuilder). What differs is which consoles
-## are fitted in it, where the guns, mining lasers, scout docks and auto turret hardpoints sit on
-## the hull, the hull's size and shape (collision, shield, landing legs, the points aliens latch
-## onto) and its looks. Ship-local space: +Y up, -Z forward, the deck floor at y = 0. Every hull
-## ends at z = 11.8 (the cargo ramp hinge) and every ship stands with its feet 4.2 m below the deck.
+## Each ship has its own walkable interior (see ShipInteriors; the Prospector has the original
+## layout), the consoles of its stations fitted into it, where the guns, mining lasers, scout docks
+## and auto turret hardpoints sit on the hull, the hull's size and shape (collision, shield, landing
+## legs, the points aliens latch onto) and its looks. Ship-local space: +Y up, -Z forward, the deck
+## floor at y = 0. Every hull ends at z = 11.8 (the cargo ramp hinge) and every ship stands with its
+## feet 4.2 m below the deck.
 
 const ORDER := ["prospector", "vanguard", "excavator", "dreadnought"]
 
-## Interior console spots stations can be fitted to: seat, facing yaw, console and console size.
-const SPOTS := {
-	"cockpit": {"seat": Vector3(0, 0, -8.5), "yaw": 0.0, "console": Vector3(0, 0, -9.55), "size": Vector3(3.4, 0.9, 0.8)},
-	"port_window": {"seat": Vector3(-4.75, 0, -2.5), "yaw": PI / 2.0, "console": Vector3(-5.55, 0, -2.5), "size": Vector3(0.8, 1.0, 1.8)},
-	"stbd_window": {"seat": Vector3(4.75, 0, -2.5), "yaw": -PI / 2.0, "console": Vector3(5.55, 0, -2.5), "size": Vector3(0.8, 1.0, 1.8)},
-	"front_port": {"seat": Vector3(-3.6, 0, -4.75), "yaw": 0.0, "console": Vector3(-3.6, 0, -5.55), "size": Vector3(1.8, 1.0, 0.8)},
-	"front_stbd": {"seat": Vector3(3.6, 0, -4.75), "yaw": 0.0, "console": Vector3(3.6, 0, -5.55), "size": Vector3(1.8, 1.0, 0.8)},
-	"bay": {"seat": Vector3(4.75, 0, 3.0), "yaw": -PI / 2.0, "console": Vector3(5.55, 0, 3.0), "size": Vector3(0.8, 1.0, 1.6)},
-	"bay_a": {"seat": Vector3(4.75, 0, 2.05), "yaw": -PI / 2.0, "console": Vector3(5.55, 0, 2.05), "size": Vector3(0.8, 1.0, 1.15)},
-	"bay_b": {"seat": Vector3(4.75, 0, 3.95), "yaw": -PI / 2.0, "console": Vector3(5.55, 0, 3.95), "size": Vector3(0.8, 1.0, 1.15)},
-}
-
-## Inside ends of the roof hatches infiltrators cut through (shared interior).
-const HATCH_INSIDE := [Vector3(0, 0, -2.0), Vector3(-4.2, 0, 3.0), Vector3(0, 0, 6.6)]
-
-## Ship catalogue. Station entries: "kind" is "pilot", "gun", "laser" or "scout"; guns and lasers
-## have a hull mount ("pos", rest "yaw" in degrees, "limits" = [yaw min, yaw max, pitch min,
+## Ship catalogue. Station entries: "kind" is "pilot", "gun", "laser" or "scout", "spot" the
+## console spot in the ship's interior (ShipInteriors); guns and lasers have a hull mount ("pos", rest "yaw" in degrees, "limits" = [yaw min, yaw max, pitch min,
 ## pitch max] in degrees relative to the rest direction, "style"), scouts a dock ("dock") and the
 ## direction they are launched in ("launch", ship-local velocity).
 const TYPES := {
@@ -88,14 +74,14 @@ const TYPES := {
 		],
 		"chamfer": 0.3,
 		"stations": [
-			{"id": "pilot", "kind": "pilot", "spot": "cockpit", "name": "Pilot Seat", "label": "PILOT"},
-			{"id": "gun_f", "kind": "gun", "spot": "front_stbd", "name": "Bow Gun", "label": "BOW GUN",
+			{"id": "pilot", "kind": "pilot", "spot": "bridge_pilot", "name": "Pilot Seat", "label": "PILOT"},
+			{"id": "gun_f", "kind": "gun", "spot": "bridge_port", "name": "Bow Gun", "label": "BOW GUN",
 				"pos": Vector3(0, 5.95, -17.4), "yaw": 0.0, "limits": [-150.0, 150.0, -35.0, 80.0], "style": "gun"},
-			{"id": "mining", "kind": "laser", "spot": "front_port", "name": "Mining Laser", "label": "MINING LASER",
+			{"id": "mining", "kind": "laser", "spot": "bridge_stbd", "name": "Mining Laser", "label": "MINING LASER",
 				"pos": Vector3(0, 1.2, -16.15), "yaw": 0.0, "limits": [-82.0, 82.0, -80.0, 55.0], "style": "laser"},
-			{"id": "scout", "kind": "scout", "spot": "bay_a", "name": "Scout Bay A", "label": "SCOUT A",
+			{"id": "scout", "kind": "scout", "spot": "flight_a", "name": "Scout Bay A", "label": "SCOUT A",
 				"dock": Vector3(-3.4, 5.62, -6.2), "launch": Vector3(0, 6.0, -4.0)},
-			{"id": "scout2", "kind": "scout", "spot": "bay_b", "name": "Scout Bay B", "label": "SCOUT B",
+			{"id": "scout2", "kind": "scout", "spot": "flight_b", "name": "Scout Bay B", "label": "SCOUT B",
 				"dock": Vector3(3.2, 5.62, -6.2), "launch": Vector3(0, 6.0, -4.0)},
 		],
 		"boxes": [[Vector3(0, 1.4, -1.9), Vector3(17.0, 6.6, 27.4)], [Vector3(0, 4.85, -4.1), Vector3(16.8, 0.5, 30.6)],
@@ -104,7 +90,7 @@ const TYPES := {
 		"collector": Vector3(0, -1.9, -2.0),
 		"legs": [Vector3(-3.4, -1.6, -7.0), Vector3(3.4, -1.6, -7.0), Vector3(-4.6, -1.6, 8.6), Vector3(4.6, -1.6, 8.6)],
 		"roof": 5.06,
-		"hatches": [Vector3(0, 5.06, -1.5), Vector3(-4.2, 5.06, 3.0), Vector3(0, 5.06, 7.2)],
+		"hatches": [Vector3(0, 5.06, -4.8), Vector3(0, 5.06, 1.0), Vector3(0, 5.06, 7.0)],
 		"hull_points": [
 			[Vector3(-6.2, 5.06, -10.5), Vector3.UP], [Vector3(6.2, 5.06, -10.5), Vector3.UP],
 			[Vector3(-6.4, 5.06, 6.0), Vector3.UP], [Vector3(0.0, 5.06, 10.2), Vector3.UP],
@@ -134,14 +120,14 @@ const TYPES := {
 		],
 		"chamfer": 0.2,
 		"stations": [
-			{"id": "pilot", "kind": "pilot", "spot": "cockpit", "name": "Pilot Seat", "label": "PILOT"},
-			{"id": "gun_f", "kind": "gun", "spot": "stbd_window", "name": "Forward Gun", "label": "FORWARD GUN",
+			{"id": "pilot", "kind": "pilot", "spot": "ctl_pilot", "name": "Pilot Seat", "label": "PILOT"},
+			{"id": "gun_f", "kind": "gun", "spot": "gunnery", "name": "Forward Gun", "label": "FORWARD GUN",
 				"pos": Vector3(5.6, 5.55, -5.6), "yaw": -45.0, "limits": [-150.0, 150.0, -35.0, 80.0], "style": "gun"},
-			{"id": "mining", "kind": "laser", "spot": "front_port", "name": "Port Mining Laser", "label": "PORT LASER",
+			{"id": "mining", "kind": "laser", "spot": "ctl_port", "name": "Port Mining Laser", "label": "PORT LASER",
 				"pos": Vector3(-3.8, 0.15, -16.7), "yaw": 0.0, "limits": [-78.0, 62.0, -75.0, 70.0], "style": "drill"},
-			{"id": "mining2", "kind": "laser", "spot": "front_stbd", "name": "Starboard Mining Laser", "label": "STARBOARD LASER",
+			{"id": "mining2", "kind": "laser", "spot": "ctl_stbd", "name": "Starboard Mining Laser", "label": "STARBOARD LASER",
 				"pos": Vector3(3.8, 0.15, -16.7), "yaw": 0.0, "limits": [-62.0, 78.0, -75.0, 70.0], "style": "drill"},
-			{"id": "scout", "kind": "scout", "spot": "bay", "name": "Scout Bay", "label": "SCOUT BAY",
+			{"id": "scout", "kind": "scout", "spot": "lift_bay", "name": "Scout Lift", "label": "SCOUT LIFT",
 				"dock": Vector3(0, 5.42, 3.8), "launch": Vector3(0, 7.0, 0)},
 		],
 		"boxes": [[Vector3(0, 1.4, -0.9), Vector3(18.0, 7.0, 25.4)], [Vector3(0, 0.2, -12.4), Vector3(10.4, 2.2, 9.2)],
@@ -150,7 +136,7 @@ const TYPES := {
 		"collector": Vector3(0, -3.0, -2.0),
 		"legs": [Vector3(-3.6, -1.85, -6.8), Vector3(3.6, -1.85, -6.8), Vector3(-4.8, -1.85, 8.6), Vector3(4.8, -1.85, 8.6)],
 		"roof": 4.87,
-		"hatches": [Vector3(0, 4.87, -2.0), Vector3(-4.2, 4.87, 3.0), Vector3(0, 4.87, 7.4)],
+		"hatches": [Vector3(-4.0, 4.87, -2.6), Vector3(3.6, 4.87, 1.8), Vector3(-3.4, 4.87, 7.0)],
 		"hull_points": [
 			[Vector3(-3.2, 4.87, -4.5), Vector3.UP], [Vector3(3.2, 4.87, -4.5), Vector3.UP],
 			[Vector3(-4.4, 4.87, 6.5), Vector3.UP], [Vector3(4.4, 4.87, 6.5), Vector3.UP],
@@ -180,16 +166,16 @@ const TYPES := {
 		],
 		"chamfer": 0.3,
 		"stations": [
-			{"id": "pilot", "kind": "pilot", "spot": "cockpit", "name": "Pilot Seat", "label": "PILOT"},
-			{"id": "gun_l", "kind": "gun", "spot": "port_window", "name": "Port Gun", "label": "PORT GUN",
+			{"id": "pilot", "kind": "pilot", "spot": "helm", "name": "Pilot Seat", "label": "HELM"},
+			{"id": "gun_l", "kind": "gun", "spot": "battery_port", "name": "Port Gun", "label": "PORT BATTERY",
 				"pos": Vector3(-10.5, 2.4, -6.4), "yaw": 90.0, "limits": [-124.0, 88.0, -60.0, 72.0], "style": "heavy"},
-			{"id": "gun_r", "kind": "gun", "spot": "stbd_window", "name": "Starboard Gun", "label": "STARBOARD GUN",
+			{"id": "gun_r", "kind": "gun", "spot": "battery_stbd", "name": "Starboard Gun", "label": "STARBOARD BATTERY",
 				"pos": Vector3(10.5, 2.4, -6.4), "yaw": -90.0, "limits": [-88.0, 124.0, -60.0, 72.0], "style": "heavy"},
-			{"id": "gun_f", "kind": "gun", "spot": "front_stbd", "name": "Forward Gun", "label": "FORWARD GUN",
+			{"id": "gun_f", "kind": "gun", "spot": "bridge_stbd", "name": "Forward Gun", "label": "FORWARD GUN",
 				"pos": Vector3(5.9, 6.25, -10.2), "yaw": -45.0, "limits": [-150.0, 150.0, -35.0, 80.0], "style": "heavy"},
-			{"id": "mining", "kind": "laser", "spot": "front_port", "name": "Mining Laser", "label": "MINING LASER",
+			{"id": "mining", "kind": "laser", "spot": "bridge_port", "name": "Mining Laser", "label": "MINING LASER",
 				"pos": Vector3(0, 2.3, -17.45), "yaw": 0.0, "limits": [-82.0, 82.0, -80.0, 78.0], "style": "laser"},
-			{"id": "scout", "kind": "scout", "spot": "bay", "name": "Scout Bay", "label": "SCOUT BAY",
+			{"id": "scout", "kind": "scout", "spot": "scout_bay", "name": "Scout Bay", "label": "SCOUT BAY",
 				"dock": Vector3(0, -3.3, 4.0), "launch": Vector3(0, -7.0, 0)},
 		],
 		"boxes": [[Vector3(0, 1.4, -2.6), Vector3(21.6, 8.0, 28.8)], [Vector3(0, -3.0, 4.0), Vector3(5.5, 1.4, 6.0)]],
@@ -197,7 +183,7 @@ const TYPES := {
 		"collector": Vector3(0, -2.8, -2.5),
 		"legs": [Vector3(-4.2, -2.4, -8.0), Vector3(4.2, -2.4, -8.0), Vector3(-5.6, -2.4, 8.4), Vector3(5.6, -2.4, 8.4)],
 		"roof": 5.42,
-		"hatches": [Vector3(0, 5.42, -2.0), Vector3(-4.2, 5.42, 3.0), Vector3(0, 5.42, 7.2)],
+		"hatches": [Vector3(0, 5.42, -5.4), Vector3(0, 5.42, 0.2), Vector3(0, 5.42, 6.0)],
 		"hull_points": [
 			[Vector3(-3.2, 5.42, -4.5), Vector3.UP], [Vector3(3.2, 5.42, -4.5), Vector3.UP],
 			[Vector3(-3.4, 5.42, 5.0), Vector3.UP], [Vector3(3.4, 5.42, 5.0), Vector3.UP],
@@ -225,7 +211,8 @@ static func exists(id: String) -> bool:
 
 
 ## The full layout of a ship type, with lookup tables added: "by_id" (station id -> entry),
-## "guns", "lasers", "scouts" and "aimables" (guns then lasers: every station with a turret).
+## "guns", "lasers", "scouts" and "aimables" (guns then lasers: every station with a turret), and
+## "interior" (its ShipInteriors layout).
 static func get_type(id: String) -> Dictionary:
 	if not TYPES.has(id):
 		id = "prospector"
@@ -233,6 +220,8 @@ static func get_type(id: String) -> Dictionary:
 		return _cache[id]
 	var t: Dictionary = (TYPES[id] as Dictionary).duplicate(true)
 	t["id"] = id
+	var inner := ShipInteriors.get_layout(id)
+	t["interior"] = inner
 	var by_id := {}
 	var guns: Array[String] = []
 	var lasers: Array[String] = []
@@ -240,7 +229,7 @@ static func get_type(id: String) -> Dictionary:
 	var order: Array[String] = []
 	for st: Dictionary in t["stations"]:
 		var sid := str(st["id"])
-		var spot: Dictionary = SPOTS[st["spot"]]
+		var spot: Dictionary = inner["spots"][st["spot"]]
 		st["seat"] = spot["seat"]
 		st["seat_yaw"] = spot["yaw"]
 		st["console"] = spot["console"]
@@ -265,7 +254,7 @@ static func get_type(id: String) -> Dictionary:
 	t["aimables"] = aimables
 	var hatches: Array = []
 	for i in (t["hatches"] as Array).size():
-		hatches.append({"outside": t["hatches"][i], "inside": HATCH_INSIDE[i]})
+		hatches.append({"outside": t["hatches"][i], "inside": inner["hatches"][i]})
 	t["hatch_list"] = hatches
 	t["leg_length"] = 4.2 + float((t["legs"] as Array)[0].y)
 	t["max_slots"] = (t["hardpoints"] as Array).size()

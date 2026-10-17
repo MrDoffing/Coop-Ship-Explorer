@@ -34,6 +34,13 @@ const GATE_HALF_W := 15.0
 const GATE_Y0 := 8.0
 const GATE_Y1 := 24.5
 const DOOR_TRAVEL := 15.6
+## Revolving warning beacons over the gates' top corners: colour, lamp glow while still and while
+## turning, how far below level the lamps point (degrees) and how long their faint beams are.
+const BEACON_COLOR := Color(1.0, 0.74, 0.16)
+const BEACON_IDLE_GLOW := 0.35
+const BEACON_ACTIVE_GLOW := 9.0
+const BEACON_TILT := 18.0
+const BEAM_LEN := 9.0
 ## Bulkheads reach this far past the hall's walls into the rock.
 const WALL_X := 25.5
 const WALL_Y0 := -3.5
@@ -50,6 +57,10 @@ const ROOM_H := 4.0
 ## Shop pedestals: [x, z, yaw] of the item spots, and the height of the pedestals' tops.
 const SHOP_SLOTS := [[-6.0, 30.6, 0.35], [-3.0, 32.1, 0.15], [0.0, 32.6, 0.0], [3.0, 32.1, -0.15], [6.0, 30.6, -0.35]]
 const PEDESTAL_H := 0.75
+## The buyback counter (floor point, station-local): crew sell crates there (RunItems.SELL_SHARE).
+## SELL_YAW turns it a quarter turn from facing the door so it faces the middle of the shop (-x).
+const SELL_SPOT := Vector3(5.2, DECK_Y, 22.6)
+const SELL_YAW := PI / 2.0
 ## Defence turrets (station-local muzzle positions): under the roof inside both bulkheads, and above
 ## both gates outside.
 const GUARDS := [Vector3(-17.0, 28.0, 16.5), Vector3(17.0, 28.0, 16.5), Vector3(-17.0, 28.0, -22.5),
@@ -75,7 +86,28 @@ void fragment() {
 }
 """
 
+## A warning beacon's beam: a cone (CylinderMesh, narrow end up) that fades out towards its wide
+## end and towards its edges.
+const BEAM_SHADER := """
+shader_type spatial;
+render_mode unshaded, blend_add, cull_disabled, depth_draw_never, shadows_disabled;
+uniform vec4 tint : source_color = vec4(1.0, 0.74, 0.16, 1.0);
+uniform float beam_len = 9.0;
+uniform float strength = 0.22;
+varying float along;
+void vertex() {
+	along = clamp(0.5 - VERTEX.y / beam_len, 0.0, 1.0);
+}
+void fragment() {
+	float edge = abs(dot(NORMAL, VIEW));
+	float fade = (1.0 - along) * (1.0 - along);
+	ALBEDO = tint.rgb;
+	ALPHA = clamp(strength * fade * edge, 0.0, 1.0);
+}
+"""
+
 static var _holo_shader: Shader
+static var _beam_shader: Shader
 
 
 ## Build the station's visuals and collision under `parent`. The returned Waystation sits at the
@@ -121,12 +153,13 @@ static func _body(root: Node3D, layers: int) -> StaticBody3D:
 	return body
 
 
-static func _shape(body: StaticBody3D, pos: Vector3, size: Vector3) -> void:
+static func _shape(body: StaticBody3D, pos: Vector3, size: Vector3, yaw := 0.0) -> void:
 	var cs := CollisionShape3D.new()
 	var shape := BoxShape3D.new()
 	shape.size = size
 	cs.shape = shape
 	cs.position = pos
+	cs.rotation.y = yaw
 	body.add_child(cs)
 
 
@@ -217,9 +250,13 @@ static func _build_entry_block(root: Node3D, b: Models.Batch, st: Dictionary, m:
 	for side: float in [-1.0, 1.0]:
 		_solid(b, body, Vector3(side * (DOOR_HALF_W + side_w * 0.5), (DECK_Y - 0.3 + room_top) * 0.5, FACADE_Z), Vector3(side_w, room_top - DECK_Y + 0.3, FACADE_T), m["hull"])
 	_solid(b, body, Vector3(0, (DECK_Y + DOOR_H + room_top) * 0.5, FACADE_Z), Vector3(DOOR_HALF_W * 2.0, room_top - DECK_Y - DOOR_H, FACADE_T), m["hull"])
-	# Facade dressing: ribs, a walkway ledge, windows and the door frame.
+	# The threshold: a flat floor through the doorway, flush with the pier and the shop floor (the
+	# slab under the shop stops 0.3 m lower, which left a gap the crew could get stuck in).
+	_solid(b, body, Vector3(0, DECK_Y - 0.15, FACADE_Z), Vector3(DOOR_HALF_W * 2.0 + 0.02, 0.3, FACADE_T + 0.04), m["floor"])
+	# Facade dressing: ribs outside the gate (none in front of its opening), a walkway ledge,
+	# windows and the door frame.
 	var fz := z0 - 0.02
-	for x: float in [-21.0, -12.0, 12.0, 21.0]:
+	for x: float in [-21.0, 21.0]:
 		b.box(Vector3(x, (WALL_Y0 + GATE_Y1) * 0.5 + 2.0, fz - 0.2), Vector3(0.8, GATE_Y1 - WALL_Y0 + 4.0, 0.4), m["mid"])
 	for side: float in [-1.0, 1.0]:
 		b.box(Vector3(side * 19.5, 14.0, fz), Vector3(5.5, 2.4, 0.05), m["glass"])
@@ -231,13 +268,20 @@ static func _build_entry_block(root: Node3D, b: Models.Batch, st: Dictionary, m:
 		b.box(Vector3(side * (DOOR_HALF_W + 0.2), DECK_Y + DOOR_H * 0.5, fz - 0.06), Vector3(0.4, DOOR_H, 0.12), m["accent"])
 		for i in 4:
 			b.box(Vector3(side * (DOOR_HALF_W + 0.2), DECK_Y + 0.4 + i * 0.8, fz - 0.13), Vector3(0.42, 0.3, 0.02), m["dark"], Vector3(0, 0, 35))
-	b.box(Vector3(0, DECK_Y + DOOR_H + 0.65, fz - 0.1), Vector3(1.2, 0.25, 0.1), Models.emissive(Color(0.3, 1.0, 0.45), 3.0))
+	# The sign over the door stands out from the facade on brackets, clear of the gate frame's
+	# hazard band (it used to sit flush with it and clip into it).
+	var sign_y := DECK_Y + DOOR_H + 0.72
+	var sign_z := fz - 0.34
+	b.box(Vector3(0, sign_y, sign_z), Vector3(4.9, 0.44, 0.05), m["dark"])
+	for side: float in [-1.0, 1.0]:
+		b.box(Vector3(side * 2.1, sign_y, (fz + sign_z) * 0.5), Vector3(0.08, 0.08, fz - sign_z), m["mid"])
+		b.box(Vector3(side * 2.6, sign_y, sign_z), Vector3(0.18, 0.18, 0.06), Models.emissive(Color(0.3, 1.0, 0.45), 3.0))
 	_gate_frame(root, b, fz, m, -1.0)
 	_gate_frame(root, b, z1 + 0.02, m, 1.0)
 	# Name boards inside (over the gate) and outside (facing the incoming tunnel).
 	b.box(Vector3(0, 27.0, fz - 0.1), Vector3(17.0, 2.4, 0.2), m["dark"])
 	_label(root, str(st.get("name", "WAYSTATION")), Vector3(0, 27.0, fz - 0.25), 170, 0.011, Color(1.0, 0.72, 0.3))
-	_label(root, "SHOP  -  FUEL  -  SAFE HAVEN", Vector3(0, DECK_Y + DOOR_H + 1.15, fz - 0.15), 56, 0.006, Color(0.75, 0.9, 1.0))
+	_label(root, "SHOP  -  FUEL  -  SAFE HAVEN", Vector3(0, sign_y, sign_z - 0.04), 44, 0.006, Color(0.75, 0.9, 1.0))
 	b.box(Vector3(0, 27.0, z1 + 0.12), Vector3(17.0, 2.4, 0.2), m["dark"])
 	_label(root, str(st.get("name", "WAYSTATION")), Vector3(0, 27.0, z1 + 0.25), 170, 0.011, Color(1.0, 0.72, 0.3), 0.0)
 	_label(root, "SAFE HAVEN  -  LAND TO CONTINUE", Vector3(0, 25.3, z1 + 0.25), 60, 0.009, Color(0.75, 0.9, 1.0), 0.0)
@@ -275,7 +319,7 @@ static func _build_exit_wall(root: Node3D, b: Models.Batch, m: Dictionary) -> vo
 		_block(b, body, Vector3(minf(side * GATE_HALF_W, side * WALL_X), GATE_Y0, z0), Vector3(maxf(side * GATE_HALF_W, side * WALL_X), GATE_Y1, z1), m["wall"])
 	_block(b, body, Vector3(-WALL_X, GATE_Y1, z0), Vector3(WALL_X, WALL_Y1, z1), m["wall"])
 	var fz := z1 + 0.02
-	for x: float in [-21.0, -12.0, 12.0, 21.0]:
+	for x: float in [-21.0, 21.0]:
 		b.box(Vector3(x, (WALL_Y0 + GATE_Y1) * 0.5 + 2.0, fz + 0.2), Vector3(0.8, GATE_Y1 - WALL_Y0 + 4.0, 0.4), m["mid"])
 	for i in 9:
 		b.box(Vector3(-16.0 + i * 4.0, 4.0, fz + 0.05), Vector3(1.9, 4.0, 0.1), m["dark"] if i % 2 == 0 else m["mid"])
@@ -287,14 +331,13 @@ static func _build_exit_wall(root: Node3D, b: Models.Batch, m: Dictionary) -> vo
 
 
 ## Hazard stripes and lights around a gate aperture on a wall face at z (`facing` = the face's
-## normal along z).
+## normal along z). The warning beacons on its top corners belong to the door (_build_door).
 static func _gate_frame(root: Node3D, b: Models.Batch, z: float, m: Dictionary, facing: float) -> void:
 	var zz := z + facing * 0.08
 	for side: float in [-1.0, 1.0]:
 		b.box(Vector3(side * (GATE_HALF_W + 0.5), (GATE_Y0 + GATE_Y1) * 0.5, zz), Vector3(1.0, GATE_Y1 - GATE_Y0 + 1.0, 0.14), m["black"])
 		for i in 9:
 			b.box(Vector3(side * (GATE_HALF_W + 0.5), GATE_Y0 + 0.9 + i * 1.8, zz + facing * 0.02), Vector3(1.05, 0.55, 0.14), m["yellow"], Vector3(0, 0, 40.0 * side))
-		Models.sphere(root, Vector3(side * (GATE_HALF_W + 0.5), GATE_Y1 + 1.0, zz), 0.35, Models.blink(Color(1.0, 0.62, 0.12), 1.2, 0.5 if side > 0 else 0.0))
 	b.box(Vector3(0, GATE_Y1 + 0.5, zz), Vector3(GATE_HALF_W * 2.0 + 2.0, 1.0, 0.14), m["black"])
 	b.box(Vector3(0, GATE_Y0 - 0.5, zz), Vector3(GATE_HALF_W * 2.0 + 2.0, 1.0, 0.14), m["black"])
 	for i in 15:
@@ -309,8 +352,9 @@ static func _gate_frame(root: Node3D, b: Models.Batch, z: float, m: Dictionary, 
 	root.add_child(l)
 
 
-## One bulkhead door: two panels that slide apart sideways, each with collision, and status lights
-## on both faces of its bulkhead (at `faces`). Returns the handles the Waystation animates.
+## One bulkhead door: two panels that slide apart sideways, each with collision, status lights on
+## both faces of its bulkhead (at `faces`) and a revolving warning beacon over each top corner of
+## the gate on both faces. Returns the handles the Waystation animates.
 static func _build_door(root: Node3D, z: float, faces: Array, m: Dictionary, title: String) -> Dictionary:
 	var panels: Array[Node3D] = []
 	var plate := Models.panel_mat(Color(0.36, 0.38, 0.42), 0.6, 0.45, 0.25)
@@ -353,6 +397,16 @@ static func _build_door(root: Node3D, z: float, faces: Array, m: Dictionary, tit
 		for fz: float in faces:
 			Models.box(root, Vector3(side * (GATE_HALF_W + 2.2), GATE_Y0 + 3.0, fz), Vector3(1.0, 1.0, 0.2), mat)
 		lights.append(mat)
+	# Revolving warning beacons (they turn while the door moves; see Waystation).
+	var lamp := StandardMaterial3D.new()
+	lamp.albedo_color = Color(0.3, 0.22, 0.05)
+	lamp.emission_enabled = true
+	lamp.emission = BEACON_COLOR
+	lamp.emission_energy_multiplier = BEACON_IDLE_GLOW
+	var beacons: Array = []
+	for fz: float in faces:
+		for side: float in [-1.0, 1.0]:
+			beacons.append(_beacon(root, Vector3(side * (GATE_HALF_W + 0.5), GATE_Y1 + 1.0, fz), signf(fz - z), m, lamp))
 	var audio := AudioStreamPlayer3D.new()
 	audio.stream = Sfx.stream("gate_loop")
 	audio.position = Vector3(0, (GATE_Y0 + GATE_Y1) * 0.5, z)
@@ -360,7 +414,72 @@ static func _build_door(root: Node3D, z: float, faces: Array, m: Dictionary, tit
 	audio.max_distance = 220.0
 	audio.volume_db = -2.0
 	root.add_child(audio)
-	return {"panels": panels, "lights": lights, "audio": audio, "pos": audio.position}
+	return {"panels": panels, "lights": lights, "audio": audio, "pos": audio.position, "beacons": beacons, "lamp": lamp}
+
+
+## A revolving warning beacon on a wall face at `pos` (on the gate frame's top corner; `facing` is
+## the face's outward normal along z): a bracket, a housing and an amber glass dome over two lamps
+## back to back on a turntable, each throwing a spot light and a faint beam. Returns {"spin" (the
+## turntable), "beam" (the lights and beams, hidden until the door moves)}.
+static func _beacon(root: Node3D, pos: Vector3, facing: float, m: Dictionary, lamp: Material) -> Dictionary:
+	var c := pos + Vector3(0, 0.0, facing * 0.55)
+	Models.box(root, pos + Vector3(0, 0.12, facing * 0.3), Vector3(0.7, 0.24, 0.6), m["dark"])
+	Models.cylinder(root, c + Vector3(0, 0.3, 0), 0.5, 0.3, m["dark"])
+	Models.cylinder(root, c + Vector3(0, 1.35, 0), 0.36, 0.08, m["dark"])
+	var dome := Models.cylinder(root, c + Vector3(0, 0.85, 0), 0.44, 0.92, Models.glass(Color(1.0, 0.7, 0.12, 0.38)), Vector3.ZERO, 0.38)
+	dome.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var spin := Node3D.new()
+	spin.position = c + Vector3(0, 0.85, 0)
+	spin.rotation.y = randf() * TAU
+	root.add_child(spin)
+	Models.cylinder(spin, Vector3.ZERO, 0.08, 0.8, m["steel"])
+	var beam := Node3D.new()
+	beam.visible = false
+	spin.add_child(beam)
+	if _beam_shader == null:
+		_beam_shader = Shader.new()
+		_beam_shader.code = BEAM_SHADER
+	var beam_mat := ShaderMaterial.new()
+	beam_mat.shader = _beam_shader
+	beam_mat.set_shader_parameter("tint", BEACON_COLOR)
+	beam_mat.set_shader_parameter("beam_len", BEAM_LEN)
+	for yaw: float in [0.0, PI]:
+		var arm := Node3D.new()
+		arm.rotation = Vector3(deg_to_rad(-BEACON_TILT), yaw, 0.0)
+		spin.add_child(arm)
+		# The lamp: a glowing dish facing out of the dome, with its reflector behind it.
+		var dish := Models.cylinder(arm, Vector3(0, 0, -0.2), 0.24, 0.06, lamp, Vector3(90, 0, 0))
+		dish.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		Models.cylinder(arm, Vector3(0, 0, -0.14), 0.28, 0.05, m["steel"], Vector3(90, 0, 0))
+		var holder := Node3D.new()
+		holder.rotation = arm.rotation
+		beam.add_child(holder)
+		var light := SpotLight3D.new()
+		light.position = Vector3(0, 0, -0.25)
+		light.light_color = BEACON_COLOR
+		light.light_energy = 9.0
+		light.spot_range = 34.0
+		light.spot_angle = 13.0
+		light.spot_attenuation = 0.6
+		light.shadow_enabled = false
+		holder.add_child(light)
+		var cone := MeshInstance3D.new()
+		var cm := CylinderMesh.new()
+		cm.top_radius = 0.2
+		cm.bottom_radius = 1.9
+		cm.height = BEAM_LEN
+		cm.radial_segments = 12
+		cm.rings = 1
+		cm.cap_top = false
+		cm.cap_bottom = false
+		cone.mesh = cm
+		cone.material_override = beam_mat
+		cone.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		# Narrow end at the lamp, widening along the light's -Z.
+		cone.position = Vector3(0, 0, -0.25 - BEAM_LEN * 0.5)
+		cone.rotation_degrees = Vector3(90, 0, 0)
+		holder.add_child(cone)
+	return {"spin": spin, "beam": beam}
 
 
 static func _build_pier(root: Node3D, b: Models.Batch, m: Dictionary) -> void:
@@ -456,6 +575,7 @@ static func _build_room(root: Node3D, b: Models.Batch, m: Dictionary) -> void:
 		l.light_energy = 0.7
 		l.light_color = Color(0.6, 0.85, 1.0)
 		root.add_child(l)
+	_build_buyback(root, b, body, m)
 	b.box(Vector3(0, DECK_Y + 3.1, z1 - 0.06), Vector3(4.2, 1.2, 0.06), Models.emissive(Color(0.25, 0.7, 0.95), 0.9, Color(0.02, 0.03, 0.04)))
 	_label(root, "WAYSTATION SHOP\nPay with the credits you mined. Look at an item and press E to buy.", Vector3(0, DECK_Y + 3.1, z1 - 0.1), 34, 0.0052, Color(0.8, 0.95, 1.0))
 	_label(root, "SHOP", Vector3(0, DECK_Y + DOOR_H + 0.4, z0 + 0.08), 64, 0.008, Color(1.0, 0.75, 0.35), 0.0)
@@ -477,6 +597,50 @@ static func _build_room(root: Node3D, b: Models.Batch, m: Dictionary) -> void:
 	holo_light.light_energy = 0.5
 	holo_light.light_color = Color(0.4, 0.8, 1.0)
 	root.add_child(holo_light)
+
+
+## The buyback counter by the shop door: a recycling hopper with a sign, its front (local -z)
+## turned by SELL_YAW to face the middle of the shop. Crew carrying a crate look at it and press E
+## to sell the crate.
+static func _build_buyback(root: Node3D, b: Models.Batch, body: StaticBody3D, m: Dictionary) -> void:
+	var sp := SELL_SPOT
+	var turn := Basis(Vector3.UP, SELL_YAW)
+	var deg := Vector3(0, rad_to_deg(SELL_YAW), 0)
+	var gold := Color(1.0, 0.78, 0.3)
+	b.box(sp + turn * Vector3(0, 0.5, 0), Vector3(1.8, 1.0, 1.2), m["dark"], deg)
+	_shape(body, sp + turn * Vector3(0, 0.5, 0), Vector3(1.8, 1.0, 1.2), SELL_YAW)
+	b.box(sp + turn * Vector3(0, 1.02, 0), Vector3(1.4, 0.04, 0.8), Models.emissive(gold, 1.3), deg)
+	for i in 6:
+		b.box(sp + turn * Vector3(-0.6 + i * 0.24, 1.05, 0), Vector3(0.05, 0.04, 0.84), m["black"], deg)
+	for side: float in [-1.0, 1.0]:
+		b.box(sp + turn * Vector3(side * 0.88, 0.5, -0.61), Vector3(0.04, 1.0, 0.02), m["yellow"], deg)
+	b.box(sp + turn * Vector3(0, 0.25, -0.61), Vector3(1.8, 0.12, 0.02), m["yellow"], deg)
+	# A sign on a post behind the hopper, facing the same way.
+	b.box(sp + turn * Vector3(0, 1.6, 0.55), Vector3(0.12, 1.2, 0.12), m["mid"], deg)
+	b.box(sp + turn * Vector3(0, 2.45, 0.55), Vector3(1.9, 0.75, 0.08), m["dark"], deg)
+	b.box(sp + turn * Vector3(0, 2.45, 0.5), Vector3(1.75, 0.62, 0.02), Models.emissive(Color(0.3, 0.22, 0.05), 0.6, Color(0.03, 0.02, 0.01)), deg)
+	_label(root, "BUYBACK", sp + turn * Vector3(0, 2.6, 0.48), 44, 0.0055, gold, PI + SELL_YAW)
+	_label(root, "Carry a crate here and press E\nto sell it for %d%% of its price" % int(RunItems.SELL_SHARE * 100.0),
+		sp + turn * Vector3(0, 2.33, 0.48), 22, 0.0045, Color(1.0, 0.92, 0.75), PI + SELL_YAW)
+	var l := OmniLight3D.new()
+	l.position = sp + turn * Vector3(0, 1.8, -0.4)
+	l.omni_range = 3.5
+	l.light_energy = 0.7
+	l.light_color = gold
+	root.add_child(l)
+	var area := Area3D.new()
+	area.collision_layer = Game.LAYER_INTERACT
+	area.collision_mask = 0
+	area.monitoring = false
+	area.position = sp + Vector3(0, 1.0, 0)
+	area.rotation.y = SELL_YAW
+	area.set_meta("sell_pad", true)
+	var cs := CollisionShape3D.new()
+	var sh := BoxShape3D.new()
+	sh.size = Vector3(2.2, 1.8, 1.6)
+	cs.shape = sh
+	area.add_child(cs)
+	root.add_child(area)
 
 
 ## The hall around the pad: wall ribs, roof beams with lights, defence turrets and floor lights.

@@ -1,7 +1,7 @@
 class_name MineralChunk
 extends Node3D
-## A crystal fragment broken off a deposit. It drifts until the mothership's tractor field (or the
-## scout, for fuel) pulls it in. Motion is simulated identically on every peer from the spawn
+## A crystal fragment broken off a deposit. It drifts until the mothership's tractor field pulls it
+## in to the tip of the nearest mining laser (fuel is collected by the scout instead). Motion is simulated identically on every peer from the spawn
 ## data; only the server decides when it is collected.
 
 const LIFETIME := 90.0
@@ -62,7 +62,7 @@ func _physics_process(delta: float) -> void:
 	else:
 		var ship := mission.ship
 		if ship and ship.alive:
-			var c := ship.collector_global()
+			var c := ship.collector_global(global_position)
 			if c.distance_to(global_position) < float(ship.stats["tractor_range"]):
 				attracted = true
 				target = c
@@ -91,5 +91,5 @@ func _collect(mission: MissionLevel, catcher: Scout) -> void:
 		if taken > 0.0:
 			mission.fx_event.rpc("fuel_pickup", global_position, 0)
 	else:
-		mission.ship.collect_mineral(kind, value)
+		mission.ship.collect_mineral(kind, value, global_position)
 	queue_free()

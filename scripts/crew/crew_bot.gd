@@ -2,12 +2,18 @@ class_name CrewBot
 extends RefCounted
 ## Server-side brain for a crew bot (a CrewMember with `bot = true`).
 ##
-## Priorities: defend themselves against boarders in sight with their blasters, then repair the
-## engine or weapon systems when they are damaged (offline systems first). When no aliens have
+## Priorities: defend themselves against boarders in sight with their blasters (reloading when
+## the magazine runs dry, and topping it up between fights), then repair the engine or weapon
+## systems when they are damaged (offline systems first). When no aliens have
 ## been around for a while, bots mine crystals with the mining lasers (one bot per laser);
 ## otherwise bots man the free guns and shoot aliens (or nearby egg sacs), and a bot left without
 ## a gun turns a mining laser on the aliens. Bots walk the interior waypoint graph, take stations
 ## like crew do and give them up when a human wants them.
+##
+## When the ship has landed at an abandoned station and the host goes out exploring, bots drop
+## their jobs and follow the host around the station. They never pick up crates, but they shoot
+## any alien that comes close (a little further out than aboard), and go back to work once the
+## host is aboard again.
 
 const THINK_INTERVAL := 0.5
 ## Start repairing a system once it drops below this.
@@ -19,7 +25,6 @@ const TURN_RATE := 2.4
 const FIRE_TOLERANCE := 0.045
 ## Seconds a bot studies a new target before opening fire.
 const REACTION := 0.35
-const IDLE_SPOTS := [Vector3(0.6, 0, 1.6), Vector3(-0.6, 0, 2.6), Vector3(0.0, 0, 4.0)]
 ## Self-defence: boarders closer than this (and in line of sight) are shot on sight. Bots react
 ## and shoot a little slower and less accurately than a player would.
 const DEFEND_RANGE := 10.0
@@ -34,6 +39,10 @@ const BLASTER_INTERVAL := 0.36
 ## Blaster aim error in radians: a base amount plus more per metre of distance.
 const BLASTER_SPREAD := 0.035
 const BLASTER_SPREAD_PER_M := 0.016
+## Following the host: how close the first bot stays (the others keep a little further back), and
+## how far away they open fire on aliens.
+const FOLLOW_GAP := 2.6
+const FOLLOW_DEFEND_RANGE := 16.0
 
 var crew: CrewMember
 ## "", "repair", "gun" or "mine".
@@ -64,6 +73,9 @@ var _foe_cd := 0.0
 ## Free-flying aliens near the ship at the last decision, and seconds without any.
 var _threats := 0
 var _safe_t := 0.0
+## True while tagging along behind the host at an abandoned station.
+var following := false
+var _follow_goal := Vector3(INF, INF, INF)
 
 
 func _init(c: CrewMember) -> void:
@@ -82,6 +94,8 @@ func tick(delta: float) -> void:
 		return
 	# Self-defence comes before any job.
 	if _defend(delta):
+		return
+	if _follow_host(delta):
 		return
 	_safe_t = 0.0 if _threats > 0 else _safe_t + delta
 	_think -= delta
@@ -113,6 +127,7 @@ func on_died() -> void:
 func reset() -> void:
 	task = ""
 	seated = false
+	following = false
 	_foe_id = 0
 	_think = 0.0
 	_goal = Vector3(INF, INF, INF)
@@ -238,8 +253,9 @@ func _start_repair(sys: String) -> void:
 func _pick_panel(sys: String) -> int:
 	var best := -1
 	var best_d := INF
-	for i in ShipBuilder.REPAIR_PANELS.size():
-		if ShipBuilder.REPAIR_PANELS[i]["system"] != sys:
+	var panels := crew.ship.repair_panels()
+	for i in panels.size():
+		if panels[i]["system"] != sys:
 			continue
 		var d := crew.position.distance_to(_panel_spot(i))
 		var other := _bot_on("repair", sys)
@@ -311,7 +327,7 @@ func _do_repair(delta: float) -> void:
 		return
 	if not _walk_to(_panel_spot(panel), delta):
 		return
-	var p: Dictionary = ShipBuilder.REPAIR_PANELS[panel]
+	var p: Dictionary = ship.repair_panels()[panel]
 	var yaw: float = p["yaw"]
 	crew.look_yaw = wrapf(yaw + PI, -PI, PI)
 	crew.rotation.y = crew.look_yaw
@@ -495,8 +511,8 @@ func _deposit_taken(dep: Deposit) -> bool:
 
 
 func _do_idle(delta: float) -> void:
-	var idx := absi(crew.peer_id) % IDLE_SPOTS.size()
-	if _walk_to(IDLE_SPOTS[idx], delta):
+	var spots := crew.ship.idle_spots()
+	if _walk_to(spots[absi(crew.peer_id) % spots.size()], delta):
 		crew.tool = 0
 
 
@@ -520,6 +536,58 @@ func _unseat(release: bool) -> void:
 	_goal = Vector3(INF, INF, INF)
 
 
+# --- Following the host ------------------------------------------------------------------------
+
+## At an abandoned station, tag along behind the host while the host is out of the ship. Returns
+## true while following (the job waits).
+func _follow_host(delta: float) -> bool:
+	var ship := crew.ship
+	var host: CrewMember = null
+	if ship.landing == Mothership.Dock.LANDED and ship.derelict_k >= 0:
+		host = ship.crew_root.get_node_or_null("1") as CrewMember
+		if host and (not host.alive or ship.is_aboard(host.net_pos)):
+			host = null
+	if host == null:
+		if following:
+			# The host is back aboard: back to work.
+			following = false
+			_think = 0.0
+			_goal = Vector3(INF, INF, INF)
+		return false
+	if not following:
+		following = true
+		if seated:
+			_unseat(true)
+		task = ""
+		_goal = Vector3(INF, INF, INF)
+		_follow_goal = Vector3(INF, INF, INF)
+	crew.tool = 0
+	var gap := FOLLOW_GAP + _follow_slot() * 1.4
+	var to := host.net_pos - crew.position
+	to.y = 0.0
+	if to.length() <= gap:
+		crew.velocity = Vector3(0, crew.velocity.y, 0)
+		_fall(delta)
+		if to.length_squared() > 0.01:
+			crew.look_yaw = atan2(-to.x, -to.z)
+			crew.rotation.y = crew.look_yaw
+		return true
+	if _follow_goal.distance_to(host.net_pos) > 1.5:
+		_follow_goal = host.net_pos
+	_walk_to(_follow_goal, delta)
+	return true
+
+
+## This bot's place in the line behind the host (0 = right behind).
+func _follow_slot() -> int:
+	var n := 0
+	for c in crew.ship.crew_root.get_children():
+		var m := c as CrewMember
+		if m and m.bot and m != crew and m.peer_id > crew.peer_id:
+			n += 1
+	return n
+
+
 # --- Self-defence ------------------------------------------------------------------------------
 
 ## Fight the nearest boarder in sight. Returns true while fighting (the job waits).
@@ -537,6 +605,9 @@ func _defend(delta: float) -> bool:
 			_foe_id = id
 			_foe_react = DEFEND_REACTION
 	if _foe_id == 0:
+		# Between fights: top up the magazine.
+		if crew.ammo < CrewWeapons.mag(crew.weapon):
+			crew.start_reload()
 		return false
 	var foe := instance_from_id(_foe_id) as Boarder
 	if foe == null or not is_instance_valid(foe) or foe.hp <= 0.0:
@@ -557,20 +628,25 @@ func _defend(delta: float) -> bool:
 	_fall(delta)
 	_foe_react -= delta
 	_foe_cd -= delta
-	if _foe_react <= 0.0 and _foe_cd <= 0.0:
+	if crew.reloading:
+		pass
+	elif crew.ammo <= 0:
+		crew.start_reload()
+	elif _foe_react <= 0.0 and _foe_cd <= 0.0:
 		_foe_cd = BLASTER_INTERVAL
+		crew.ammo -= 1
 		_shoot(foe)
 	return true
 
 
-## Nearest boarder within DEFEND_RANGE that the bot can see.
+## Nearest alien on foot within DEFEND_RANGE (further while following the host) that the bot can see.
 func _find_boarder() -> Boarder:
 	var ship := crew.ship
 	var up := ship.global_basis.y
 	var eye := crew.global_position + up * CrewMember.EYE
 	var space := crew.get_world_3d().direct_space_state
 	var best: Boarder = null
-	var best_d := DEFEND_RANGE
+	var best_d := FOLLOW_DEFEND_RANGE if following else DEFEND_RANGE
 	for c in ship.boarder_root.get_children():
 		var b := c as Boarder
 		if b == null or b.hp <= 0.0:
@@ -578,7 +654,7 @@ func _find_boarder() -> Boarder:
 		var d := b.position.distance_to(crew.position)
 		if d >= best_d:
 			continue
-		var q := PhysicsRayQueryParameters3D.create(eye, b.global_position + up * 0.8, Game.LAYER_INTERIOR)
+		var q := PhysicsRayQueryParameters3D.create(eye, b.center_global(), Game.LAYER_INTERIOR | Game.LAYER_STATION)
 		if not space.intersect_ray(q).is_empty():
 			continue
 		best_d = d
@@ -591,11 +667,11 @@ func _shoot(foe: Boarder) -> void:
 	var ship := crew.ship
 	var up := ship.global_basis.y
 	var eye := crew.global_position + up * CrewMember.EYE
-	var target := foe.global_position + up * 0.8
+	var target := foe.center_global()
 	var spread := BLASTER_SPREAD + BLASTER_SPREAD_PER_M * eye.distance_to(target)
 	var jitter := Vector3(randf_range(-spread, spread), randf_range(-spread, spread), randf_range(-spread, spread))
 	var dir := ((target - eye).normalized() + jitter).normalized()
-	var q := PhysicsRayQueryParameters3D.create(eye, eye + dir * 40.0, Game.LAYER_INTERIOR | Game.LAYER_BOARDER)
+	var q := PhysicsRayQueryParameters3D.create(eye, eye + dir * 40.0, Game.LAYER_INTERIOR | Game.LAYER_BOARDER | Game.LAYER_STATION)
 	q.collide_with_areas = true
 	var hit := crew.get_world_3d().direct_space_state.intersect_ray(q)
 	var end := eye + dir * 40.0
@@ -609,7 +685,7 @@ func _shoot(foe: Boarder) -> void:
 			flesh = true
 			var b := ship.boarder_root.get_node_or_null(str(col.get_meta("boarder")))
 			if b:
-				b.take_damage(float(ship.stats["blaster_damage"]), {"source": "bot"})
+				b.take_damage(float(ship.stats["blaster_damage"]), {"source": "bot", "by": crew.peer_id})
 	# Effects: locally for the host, relayed to everyone else.
 	var muzzle := crew.global_transform * Vector3(0.3, 1.2, -0.8)
 	Fx.tracer(muzzle, end, Color(1.0, 0.5, 0.2), 0.035, 0.07)
@@ -748,8 +824,8 @@ func _fall(delta: float) -> void:
 
 func _plan(goal: Vector3) -> void:
 	var nav := crew.ship.nav
-	var from := nav.get_closest_point(crew.position)
-	var to := nav.get_closest_point(goal)
+	var from := crew.ship.nav_closest(nav, crew.position)
+	var to := crew.ship.nav_closest(nav, goal)
 	_path = nav.get_point_path(from, to)
 	_path.append(goal)
 	_path_i = 0
@@ -758,9 +834,5 @@ func _plan(goal: Vector3) -> void:
 		_path_i = 1
 
 
-static func _panel_spot(i: int) -> Vector3:
-	var p: Dictionary = ShipBuilder.REPAIR_PANELS[i]
-	var yaw: float = p["yaw"]
-	var spot: Vector3 = p["pos"] + Vector3(-sin(yaw), 0, -cos(yaw)) * 0.9
-	spot.y = 0.0
-	return spot
+func _panel_spot(i: int) -> Vector3:
+	return ShipInteriors.panel_spot(crew.ship.repair_panels()[i])

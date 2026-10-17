@@ -14,7 +14,8 @@ const AGITATED_CAP := 5
 const HATCH_GAP := 1.6
 ## How long a hit sac keeps the nest agitated.
 const HIT_AGITATION := 15.0
-const SAC_HP := 110.0
+## Egg sac health at the surface; deeper down it grows by half as much as other aliens' health.
+const SAC_HP := 55.0
 const ACTIVE_RANGE := 150.0
 const AGITATE_RANGE := 55.0
 
@@ -79,7 +80,7 @@ func setup(data: Dictionary) -> void:
 	infiltrator_bias = float(data.get("infiltrators", 0.0))
 	sac_hp = []
 	for i in sac_pos.size():
-		sac_hp.append(SAC_HP * hp_mult)
+		sac_hp.append(SAC_HP * (1.0 + (hp_mult - 1.0) * 0.5))
 
 
 func _ready() -> void:

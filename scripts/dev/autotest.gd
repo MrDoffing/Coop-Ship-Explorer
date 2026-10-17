@@ -66,6 +66,20 @@ func _ready() -> void:
 			await _run_meta()
 		"ships":
 			await _run_ships()
+		"interiors":
+			await _run_interiors(true)
+		"backlog":
+			await _run_backlog(true)
+		"backlog_check":
+			await _run_backlog(false)
+		"backlog2":
+			await _run_backlog2(true)
+		"backlog2_check":
+			await _run_backlog2(false)
+		"interiors_check":
+			await _run_interiors(false)
+		"interior_bots":
+			await _run_interior_bots()
 		"hud":
 			await _run_hud()
 		"sound":
@@ -76,6 +90,16 @@ func _ready() -> void:
 			await _run_cheats()
 		"join_station":
 			await _run_join_station()
+		"tunnels":
+			await _run_tunnels()
+		"derelict":
+			await _run_derelict()
+		"weapons":
+			await _run_weapons()
+		"host_derelict":
+			await _run_host_derelict()
+		"join_derelict":
+			await _run_join_derelict()
 		_:
 			print("[autotest] unknown scenario")
 	print("[autotest] done")
@@ -363,10 +387,10 @@ func _run_join_station() -> void:
 	await wait(0.6)
 	print("[autotest] client: picked up %s: %s" % [pick.item, await _pick_up(m, p, pick)])
 	await wait(4.0)
-	p.position = ShipBuilder.INSTALL_HUB + Vector3(1.7, 0.05, 0)
+	p.position = _hub_spot(p.ship, 1.7, 0.05)
 	p.reset_physics_interpolation()
 	await wait(0.4)
-	_face(p, ShipBuilder.INSTALL_HUB + Vector3(0.6, 0.9, 0))
+	_face(p, _hub_spot(p.ship, 0.6, 0.9))
 	await wait(0.3)
 	print("[autotest] client: hub prompt: ", p.prompt)
 	await _tap("interact")
@@ -708,7 +732,7 @@ func _run_blast() -> void:
 	p.exit_station(true)
 	# Wait out the cooldown, then use the physical button.
 	await wait(15.5)
-	p.position = ShipBuilder.EMERGENCY_BUTTON + Vector3(-0.9, 0.05, 0.0)
+	p.position = (ship.interior_layout()["button"] as Vector3) + Vector3(-0.9, 0.05, 0.0)
 	p.look_yaw = -PI / 2.0
 	p.look_pitch = -0.6
 	await wait(0.3)
@@ -955,7 +979,7 @@ func _run_combat() -> void:
 	ship.damage_system("engine", 80.0)
 	var eng_before := ship.engine_hp
 	p.tool = 1
-	var panel: Dictionary = ShipBuilder.REPAIR_PANELS[0]
+	var panel: Dictionary = ship.repair_panels()[0]
 	var panel_pos: Vector3 = panel["pos"]
 	p.position = Vector3(panel_pos.x, 0.05, panel_pos.z - 1.4)
 	p.look_yaw = PI
@@ -1346,12 +1370,18 @@ func _pick_up(m: MissionLevel, p: CrewMember, crate: SupplyCrate) -> bool:
 	return p.carrying == crate
 
 
+## A point in front of the ship's install hub: `out` metres out from it, `up` above the floor.
+func _hub_spot(ship: Mothership, out: float, up: float) -> Vector3:
+	var inner := ship.interior_layout()
+	return (inner["hub"] as Vector3) + Basis(Vector3.UP, float(inner.get("hub_yaw", 0.0))) * Vector3(out, up, 0)
+
+
 ## Carry the held crate to the install hub and fit it.
 func _install_at_hub(p: CrewMember) -> String:
-	p.position = ShipBuilder.INSTALL_HUB + Vector3(1.7, 0.05, 0)
+	p.position = _hub_spot(p.ship, 1.7, 0.05)
 	p.reset_physics_interpolation()
 	await wait(0.25)
-	_face(p, ShipBuilder.INSTALL_HUB + Vector3(0.6, 0.9, 0))
+	_face(p, _hub_spot(p.ship, 0.6, 0.9))
 	await wait(0.3)
 	var prompt := p.prompt
 	await _tap("interact")
@@ -1506,7 +1536,7 @@ func _run_station() -> void:
 	await wait(4.5)
 	Input.action_release("move_forward")
 	await wait(0.3)
-	print("[autotest] walked back aboard with the crate: pos %s aboard=%s carrying=%s" % [p.position, Mothership.is_aboard(p.position), p.carrying != null])
+	print("[autotest] walked back aboard with the crate: pos %s aboard=%s carrying=%s" % [p.position, p.ship.is_aboard(p.position), p.carrying != null])
 	var hull1 := ship.hull
 	print("[autotest] hub prompt: ", await _install_at_hub(p))
 	print("[autotest] hull kit installed: hull %.0f -> %.0f, mods %s, kit freed %s" % [hull1, ship.hull, ship.run_mods, not is_instance_valid(kit)])
@@ -1533,7 +1563,7 @@ func _run_station() -> void:
 	var left_behind: SupplyCrate = others[0] if others.size() > 0 else null
 	if left_behind:
 		print("[autotest] bought %s to leave behind: %s" % [left_behind.item, await _buy(p, left_behind)])
-	p.position = ShipBuilder.SPAWN_POINTS[0]
+	p.position = p.ship.spawn_points()[0]
 	p.reset_physics_interpolation()
 	await wait(0.3)
 	ship.request_station.rpc_id(1, "pilot")
@@ -1960,6 +1990,587 @@ func _run_ships() -> void:
 		await shot("ship_%s_homebase" % id)
 
 
+## Camera views (first person: stand at a floor point, look at a point) of each ship's interior.
+const INTERIOR_VIEWS := {
+	"prospector": [["cockpit", Vector3(0, 0, -6.6), Vector3(0, 1.2, -10.1)], ["plate", Vector3(0, 0, -3.0), Vector3(0, 2.8, -6.0)],
+		["hall", Vector3(0, 0, 4.2), Vector3(0, 1.5, -6.0)], ["door", Vector3(1.6, 0, 8.0), Vector3(0, 2.9, 10.0)]],
+	"vanguard": [["bridge", Vector3(0, 0, -7.6), Vector3(0, 1.2, -12.0)], ["plate", Vector3(0, 0, -4.4), Vector3(0, 2.8, -6.6)],
+		["corridor", Vector3(0, 0, 4.6), Vector3(0, 1.5, -7.0)], ["corridor_aft", Vector3(0, 0, -2.0), Vector3(0, 2.6, 5.4)],
+		["flight_a", Vector3(-2.2, 0, -1.6), Vector3(-5.5, 1.5, -4.5)], ["weapons", Vector3(-2.0, 0, 4.5), Vector3(-6.0, 1.3, 1.5)],
+		["quartermaster", Vector3(2.0, 0, 0.2), Vector3(6.0, 1.2, 3.5)], ["engine", Vector3(0, 0, 6.0), Vector3(0, 1.2, 10.0)],
+		["engine_side", Vector3(-4.9, 0, 6.0), Vector3(-6.0, 1.3, 8.5)], ["door", Vector3(1.6, 0, 8.0), Vector3(0, 2.9, 10.0)]],
+	"excavator": [["control", Vector3(0, 0, -6.4), Vector3(0, 1.2, -10.2)], ["plate", Vector3(-2.5, 0, -4.6), Vector3(0, 2.8, -5.7)],
+		["hall_front", Vector3(-4.3, 0, -5.2), Vector3(2.0, 1.2, 3.0)], ["crusher", Vector3(5.6, 0, -1.0), Vector3(0, 1.3, -1.6)],
+		["hall_rear", Vector3(0, 0, 4.8), Vector3(0, 1.6, -5.8)], ["gunnery", Vector3(3.8, 0, -3.0), Vector3(6.6, 1.5, -4.6)],
+		["hub", Vector3(-3.6, 0, 1.0), Vector3(-6.5, 1.2, 3.0)], ["engine", Vector3(0, 0, 5.9), Vector3(0, 1.2, 10.0)],
+		["engine_side", Vector3(-4.5, 0, 6.2), Vector3(-6.5, 1.3, 8.2)], ["door", Vector3(1.6, 0, 8.0), Vector3(0, 2.9, 10.0)]],
+	"dreadnought": [["bridge", Vector3(0, 0, -8.9), Vector3(0, 1.4, -13.4)], ["bridge_side", Vector3(1.0, 0, -10.0), Vector3(3.8, 1.5, -11.0)],
+		["plate", Vector3(0, 0, -4.8), Vector3(0, 3.1, -6.5)], ["cic", Vector3(0, 0, -1.2), Vector3(0, 1.5, -6.6)],
+		["battery", Vector3(-4.0, 0, -4.5), Vector3(-7.8, 1.6, -2.5)], ["corridor", Vector3(-3.25, 0, 4.6), Vector3(-3.25, 1.6, -0.6)],
+		["core", Vector3(2.5, 0, -0.2), Vector3(0, 1.8, 0.9)], ["magazine", Vector3(-5.4, 0, 1.0), Vector3(-7.6, 1.2, 3.6)],
+		["scout_bay", Vector3(5.4, 0, 0.5), Vector3(7.4, 1.2, 2.6)], ["engine", Vector3(0, 0, 5.6), Vector3(0, 1.4, 10.0)],
+		["engine_side", Vector3(-6.6, 0, 5.6), Vector3(-7.6, 1.3, 7.6)], ["door", Vector3(1.6, 0, 8.0), Vector3(0, 2.9, 10.0)]],
+}
+
+
+## Every mothership's interior: its walls inside the hull, the walking graph clear for a crew member,
+## every seat, panel, spawn point and hatch reachable, and (with shots) views from around the ship.
+func _run_interiors(shots: bool) -> void:
+	Game.main.start_solo()
+	await wait(0.5)
+	var ships := {}
+	for id: String in ShipTypes.ORDER:
+		ships[id] = {}
+	Game.profile["ships"] = ships
+	for id: String in ShipTypes.ORDER:
+		Game.profile["ship"] = id
+		Game.profile_changed.emit()
+		await wait(0.3)
+		Game.main.start_mission()
+		var m: MissionLevel = null
+		for i in 900:
+			await get_tree().process_frame
+			m = Game.mission as MissionLevel
+			if m and m.local_ready and m.local_player and m.started and m.ship and m.ship.ship_type == id:
+				break
+		if m == null or m.ship == null or m.ship.ship_type != id:
+			print("[autotest] FAIL: no mission for ", id)
+			return
+		var ship := m.ship
+		var p := m.local_player
+		p.max_hp = 99999.0
+		p.hp = 99999.0
+		await wait(0.5)
+		print("[autotest] === %s interior" % id)
+		_check_interior(ship)
+		if shots:
+			for v: Array in INTERIOR_VIEWS.get(id, []):
+				p.position = (v[1] as Vector3) + Vector3(0, 0.05, 0)
+				p.velocity = Vector3.ZERO
+				_face(p, v[2])
+				p.reset_physics_interpolation()
+				await wait(0.35)
+				await shot("int_%s_%s" % [id, v[0]])
+		m.abort_mission()
+		for i in 100:
+			await wait(0.1)
+			var lvl: Node = Game.main.current_level()
+			if lvl and lvl.name == "Homebase":
+				break
+		await wait(0.5)
+
+
+## Crew bots in every ship's interior: two bots repair both systems and then man the guns. Counts
+## the times a bot got stuck and hopped (the unstick teleport in CrewBot._walk_to).
+func _run_interior_bots() -> void:
+	Game.bot_count = 2
+	Game.main.start_solo()
+	await wait(0.5)
+	Game.bot_count = 0
+	var ships := {}
+	for id: String in ShipTypes.ORDER:
+		ships[id] = {}
+	Game.profile["ships"] = ships
+	for id: String in ShipTypes.ORDER:
+		Game.profile["ship"] = id
+		Game.profile_changed.emit()
+		await wait(0.3)
+		Game.main.start_mission()
+		var m: MissionLevel = null
+		for i in 900:
+			await get_tree().process_frame
+			m = Game.mission as MissionLevel
+			if m and m.local_ready and m.local_player and m.started and m.ship and m.ship.ship_type == id:
+				break
+		if m == null or m.ship == null or m.ship.ship_type != id:
+			print("[autotest] FAIL: no mission for ", id)
+			return
+		var ship := m.ship
+		ship.max_hull = 99999.0
+		ship.hull = 99999.0
+		await _put_ship(m, 60.0)
+		_clear_aliens()
+		var bots: Array[CrewMember] = []
+		for c in ship.crew_root.get_children():
+			var cm := c as CrewMember
+			if cm and cm.bot:
+				bots.append(cm)
+		ship.damage_system("engine", 60.0)
+		ship.damage_system("weapons", 60.0)
+		var hops := 0
+		var last := {}
+		var seated := {}
+		var t := 0.0
+		while t < 45.0 and (ship.engine_hp < 100.0 or ship.weapons_hp < 100.0):
+			await get_tree().physics_frame
+			t += 1.0 / 60.0
+			for b in bots:
+				var was: bool = seated.get(b.name, false)
+				if last.has(b.name) and not was and not b.brain.seated and b.position.distance_to(last[b.name]) > 0.5:
+					hops += 1
+				last[b.name] = b.position
+				seated[b.name] = b.brain.seated
+		print("[autotest] %s: %d bots repaired engine %.0f%% and weapons %.0f%% in %.1f s, %d stuck hops" % [id, bots.size(),
+			ship.engine_hp, ship.weapons_hp, t, hops])
+		# Aliens ahead: the bots go to the guns.
+		for i in 3:
+			var a := m.spawn_alien(Alien.Kind.SPITTER, ship.to_global(Vector3(-6.0 + i * 6.0, 6.0, -45.0)), 50.0, 0.0) as Alien
+			if a:
+				a.set_physics_process(false)
+		hops = 0
+		t = 0.0
+		var manned := 0
+		while t < 20.0:
+			await get_tree().physics_frame
+			t += 1.0 / 60.0
+			manned = 0
+			for b in bots:
+				var was: bool = seated.get(b.name, false)
+				if last.has(b.name) and not was and not b.brain.seated and b.position.distance_to(last[b.name]) > 0.5:
+					hops += 1
+				last[b.name] = b.position
+				seated[b.name] = b.brain.seated
+				if b.brain.seated and b.station in ship.gun_stations():
+					manned += 1
+			if manned >= mini(bots.size(), ship.gun_stations().size()):
+				break
+		var at := PackedStringArray()
+		for b in bots:
+			at.append("%s %s" % [b.display_name, b.station if b.station != "" else "walking"])
+		print("[autotest] %s: guns manned %d of %d after %.1f s (%s), %d stuck hops" % [id, manned, ship.gun_stations().size(), t,
+			", ".join(at), hops])
+		_clear_aliens()
+		m.abort_mission()
+		for i in 100:
+			await wait(0.1)
+			var lvl: Node = Game.main.current_level()
+			if lvl and lvl.name == "Homebase":
+				break
+		await wait(0.5)
+
+## How far ship-local point q is inside the hull (negative: outside), roughly in metres.
+static func _hull_margin(sections: Array, chamfer: float, q: Vector3) -> float:
+	if q.z < float((sections[0] as Array)[0]) - 0.001 or q.z > float((sections[sections.size() - 1] as Array)[0]) + 0.001:
+		return -1.0
+	var sec := ShipBuilder.section_at(sections, q.z)
+	var ax := absf(q.x)
+	var ay := absf(q.y - sec.z)
+	var diag := ((2.0 - chamfer) - ax / sec.x - ay / sec.y) * minf(sec.x, sec.y) * 0.7
+	return minf(minf(sec.x - ax, sec.y - ay), diag)
+
+
+## Interior checks for one ship (see _run_interiors).
+func _check_interior(ship: Mothership) -> void:
+	var t := ship.layout
+	var inner := ship.interior_layout()
+	var sections: Array = t["sections"]
+	var chamfer := float(t["chamfer"])
+	var outside := 0
+	var shapes := 0
+	for c in ship.interior_body.get_children():
+		var cs := c as CollisionShape3D
+		if cs == null:
+			continue
+		shapes += 1
+		var corners: Array[Vector3] = []
+		if cs.shape is BoxShape3D:
+			var half := (cs.shape as BoxShape3D).size * 0.5
+			for i in 8:
+				corners.append(cs.transform * Vector3(half.x * (1.0 if i & 1 else -1.0), half.y * (1.0 if i & 2 else -1.0), half.z * (1.0 if i & 4 else -1.0)))
+		elif cs.shape is CylinderShape3D:
+			var cyl := cs.shape as CylinderShape3D
+			for i in 8:
+				var a := TAU * i / 8.0
+				for y: float in [-cyl.height * 0.5, cyl.height * 0.5]:
+					corners.append(cs.position + Vector3(cos(a) * cyl.radius, y, sin(a) * cyl.radius))
+		var worst := INF
+		var worst_q := Vector3.ZERO
+		for q in corners:
+			var mg := _hull_margin(sections, chamfer, q)
+			if mg < worst:
+				worst = mg
+				worst_q = q
+		if worst < -0.01:
+			outside += 1
+			print("[autotest]   OUTSIDE HULL by %.2f m: shape at %s, corner %s" % [-worst, cs.position, worst_q])
+	print("[autotest]   hull fit: %d of %d interior shapes poke outside the hull" % [outside, shapes])
+	var space := ship.get_world_3d().direct_space_state
+	var cap := CapsuleShape3D.new()
+	cap.radius = 0.36
+	cap.height = 1.8
+	var wps: Dictionary = inner["waypoints"]
+	var blocked := 0
+	for link: Array in inner["links"]:
+		var frac := _sweep(space, ship, cap, wps[link[0]], wps[link[1]])
+		if frac < 1.0:
+			blocked += 1
+			print("[autotest]   BLOCKED link %s -> %s at %.0f%%" % [link[0], link[1], frac * 100.0])
+	for k: String in wps:
+		if not ship.is_aboard(wps[k]):
+			print("[autotest]   waypoint %s is not aboard" % k)
+	print("[autotest]   walking graph: %d of %d links blocked" % [blocked, (inner["links"] as Array).size()])
+	var spots: Array = []
+	for sid: String in t["order"]:
+		var st: Dictionary = t["by_id"][sid]
+		spots.append(["seat " + sid, st["seat"]])
+		spots.append(["seat exit " + sid, (st["seat"] as Vector3) + Basis(Vector3.UP, float(st["seat_yaw"])) * Vector3(0, 0, 0.9)])
+	var panels := ship.repair_panels()
+	for i in panels.size():
+		spots.append(["panel %d %s" % [i, panels[i]["system"]], ShipInteriors.panel_spot(panels[i])])
+	spots.append(["install hub", _hub_spot(ship, 1.25, 0.0)])
+	for q: Vector3 in ship.spawn_points():
+		spots.append(["spawn", Vector3(q.x, 0, q.z)])
+	for q: Vector3 in ship.idle_spots():
+		spots.append(["bot idle", q])
+	for q: Vector3 in inner["hatches"]:
+		spots.append(["hatch", q])
+	var bad := 0
+	for sp: Array in spots:
+		var pt: Vector3 = sp[1]
+		var q := PhysicsShapeQueryParameters3D.new()
+		q.shape = cap
+		q.collision_mask = Game.LAYER_INTERIOR
+		q.transform = Transform3D(ship.global_basis, ship.to_global(pt + Vector3(0, 0.95, 0)))
+		var hits := space.intersect_shape(q, 4)
+		var wp := ship.nav_closest(ship.nav, pt)
+		var frac := _sweep(space, ship, cap, ship.nav.get_point_position(wp), pt)
+		if not hits.is_empty() or frac < 1.0 or not ship.is_aboard(pt):
+			bad += 1
+			print("[autotest]   SPOT %s at %s: overlaps %d, reach from waypoint %s %.0f%%, aboard %s" % [sp[0], pt, hits.size(),
+				ship.nav.get_point_position(wp), frac * 100.0, ship.is_aboard(pt)])
+	print("[autotest]   spots: %d of %d unreachable or blocked" % [bad, spots.size()])
+
+
+## How far (0..1) a crew-sized capsule gets moving from ship-local floor point a to b.
+func _sweep(space: PhysicsDirectSpaceState3D, ship: Mothership, cap: Shape3D, a: Vector3, b: Vector3) -> float:
+	var q := PhysicsShapeQueryParameters3D.new()
+	q.shape = cap
+	q.collision_mask = Game.LAYER_INTERIOR
+	q.transform = Transform3D(ship.global_basis, ship.to_global(Vector3(a.x, 0.95, a.z)))
+	q.motion = ship.global_basis * Vector3(b.x - a.x, 0, b.z - a.z)
+	var r := space.cast_motion(q)
+	return r[0] if r.size() > 0 else 1.0
+
+
+## The 2026-10-16 backlog: gun names and tuning, spread on every weapon, the plasma blast, mining at
+## the laser tip, waystation spacing, hostility (stages, ambushes, reset at a waystation, holding at
+## an abandoned station), the shop door, the buyback counter, the flashlight, crawling skitters and
+## egg sac health. Screenshots with `shots`.
+func _run_backlog(shots: bool) -> void:
+	var m := await _start_solo_mission()
+	if m == null:
+		print("[autotest] FAIL: mission not ready")
+		return
+	var ship := m.ship
+	var p := m.local_player
+	var tough := ship.stats.duplicate()
+	tough["crew_hp"] = 99999.0
+	ship.stats = tough
+	ship.max_hull = 99999.0
+	ship.hull = 99999.0
+	# Waystation spacing, gun names, nests.
+	var ss := PackedStringArray()
+	for k in 4:
+		ss.append("%.0f" % float(m.cave.station(k)["s"]))
+	print("[autotest] waystations at %s m (spacing %.0f)" % [", ".join(ss), CaveGen.STATION_SPACING])
+	print("[autotest] guns: %s" % ", ".join(PackedStringArray(Game.GUN_ORDER.map(func(g): return Game.GUNS[g]["name"]))))
+	print("[autotest] egg sac health: %.0f at the surface, %.0f at 1000 m (other aliens x%.2f)" % [Nest.SAC_HP,
+		Nest.SAC_HP * (1.0 + (m.hp_mult(1000.0) - 1.0) * 0.5), m.hp_mult(1000.0)])
+	# Weapon tuning and spread (turrets measured from the bolts they fire).
+	await _put_ship(m, 560.0)
+	ship.gate_k = 0
+	ship.gate_entry = 0.0
+	ship._exit_state = 3
+	var g: String = ship.gun_stations()[0]
+	var t: Turret = ship.turrets[g]
+	for w: String in ["pulse", "flak", "plasma"]:
+		var def: Dictionary = Mothership.WEAPON_DEFS[w]
+		var before: int = m.projectiles._shots.size()
+		var cd := 0.0
+		for i in 10:
+			cd = ship._fire_turret(g, w)
+		var fwd := -(ship.global_basis * t.aim_basis_local(ship.aim_of(g))).z
+		var max_a := 0.0
+		var sum := 0.0
+		var n := 0
+		for i in range(before, m.projectiles._shots.size()):
+			var v: Vector3 = (m.projectiles._shots[i]["vel"] as Vector3) - ship.velocity
+			var a := rad_to_deg(v.angle_to(fwd))
+			max_a = maxf(max_a, a)
+			sum += a
+			n += 1
+		print("[autotest] %s: %d bolts, spread mean %.2f max %.2f deg (cone %.2f), every %.2f s, %.0f dmg x%d, dps %.0f" % [Game.GUNS[w]["name"], n,
+			sum / maxf(n, 1), max_a, float(def["spread"]), cd, float(def["damage"]), int(def["pellets"]),
+			float(def["damage"]) * int(def["pellets"]) / cd])
+	var rail_max := 0.0
+	for i in 300:
+		rail_max = maxf(rail_max, rad_to_deg(Mothership.scatter(Vector3.FORWARD, deg_to_rad(float(Mothership.WEAPON_DEFS["rail"]["spread"]))).angle_to(Vector3.FORWARD)))
+	print("[autotest] rail lance: spread max %.2f deg over 300 shots" % rail_max)
+	for id: String in CrewWeapons.ORDER:
+		var d := CrewWeapons.def(id)
+		print("[autotest] hand %s: spread %.3f rad, every %.2f s, %d x %.0f dmg = %.0f dps%s" % [d["name"], float(d["spread"]),
+			float(d["cooldown"]), int(d["pellets"]), float(d["damage"]), float(d["damage"]) * int(d["pellets"]) / float(d["cooldown"]),
+			", splash %.1f m" % float(d["splash"]) if d.has("splash") else ""])
+	# The plasma blast: aliens 0, 7, 12 and 18 m from the burst.
+	var burst := ship.to_global(Vector3(0, 3.0, -40.0))
+	var victims: Array[Alien] = []
+	for dist: float in [0.0, 7.0, 12.0, 18.0]:
+		var a := m.spawn_alien(Alien.Kind.SPITTER, burst + ship.global_basis.x * dist, 10.0, 1.0) as Alien
+		a.set_physics_process(false)
+		victims.append(a)
+	await wait(0.2)
+	var hps: Array[float] = []
+	for a in victims:
+		hps.append(a.hp)
+	m.projectiles._splash(burst, float(Projectiles.KINDS["plasma"]["splash"]), 34.0)
+	var hit_report := PackedStringArray()
+	for i in victims.size():
+		hit_report.append("%.0f m: -%.0f" % [[0.0, 7.0, 12.0, 18.0][i], hps[i] - victims[i].hp])
+		victims[i].queue_free()
+	print("[autotest] plasma mortar blast (radius %.0f m): %s" % [float(Projectiles.KINDS["plasma"]["splash"]), ", ".join(hit_report)])
+	# Mining: a chunk flies to the mining laser's tip.
+	var lid: String = ship.laser_stations()[0]
+	var lt: Turret = ship.turrets[lid]
+	var tip := ship.to_global(lt.muzzle_local(lt.aim))
+	var credits0 := ship.credits
+	var chunk := m.pickup_spawner.spawn({"name": "PT1", "kind": "aurium", "pos": tip + ship.global_basis * Vector3(6.0, -4.0, -18.0),
+		"vel": Vector3.ZERO, "value": 6, "fuel": 0.0}) as MineralChunk
+	var last := chunk.global_position
+	for i in 600:
+		if not is_instance_valid(chunk) or chunk._collected:
+			break
+		last = chunk.global_position
+		await get_tree().physics_frame
+	tip = ship.to_global(lt.muzzle_local(lt.aim))
+	print("[autotest] mineral chunk collected %.1f m from the laser tip (%.1f m from the old belly collector), credits %d -> %d" % [
+		last.distance_to(tip), last.distance_to(ship.to_global(ship.layout["collector"])), credits0, ship.credits])
+	# Hostility: no ambushes while docile, then more and bigger ones.
+	_clear_aliens()
+	await wait(0.3)
+	for h: float in [0.1, 0.3, 0.6, 0.9]:
+		ship.hostility = h
+		await wait(0.2)
+		var waves := 0
+		var spawned := 0
+		for i in 4:
+			var n0 := get_tree().get_nodes_in_group("aliens").size()
+			m._director_t = 0.0
+			await wait(0.25)
+			var n1 := get_tree().get_nodes_in_group("aliens").size()
+			if n1 > n0:
+				waves += 1
+				spawned += n1 - n0
+		print("[autotest] hostility %.2f = %s: %d of 4 forced director ticks sent an ambush, %d aliens; next one in %.0f s" % [h,
+			Mothership.HOSTILITY_STAGES[ship.hostility_stage()], waves, spawned, m._director_t])
+		_clear_aliens()
+		await wait(0.2)
+	ship.hostility = 0.62
+	await wait(0.3)
+	if shots:
+		await shot("bl01_hostility_hud")
+	# Waystation: landing resets the hostility; the shop door, the buyback counter.
+	var st := m.cave.station(1)
+	ship.gate_k = 0
+	await _put_ship(m, float(st["s_entry"]) - 80.0, [float(st["s"])])
+	ship.request_station.rpc_id(1, "pilot")
+	await wait(0.6)
+	ship.hostility = 0.8
+	await _tap("land")
+	var t0 := Time.get_ticks_msec()
+	while ship.landing != Mothership.Dock.LANDED and Time.get_ticks_msec() - t0 < 60000:
+		await wait(0.5)
+		if ship.landing == Mothership.Dock.APPROACH and absf(ship.hostility - 0.8) > 0.01:
+			print("[autotest] FAIL: hostility changed while docking: %.2f" % ship.hostility)
+	await wait(0.6)
+	print("[autotest] docked at %s: %s, hostility %.2f (%s), HUD '%s'" % [st["name"], ship.landing == Mothership.Dock.LANDED,
+		ship.hostility, Mothership.HOSTILITY_STAGES[ship.hostility_stage()], m.hud._hostility_label.text])
+	p.exit_station(true)
+	await wait(0.3)
+	var floor_y := StationBuilder.DECK_Y - StationBuilder.LAND_HEIGHT + 0.05
+	for dir: float in [1.0, -1.0]:
+		p.position = Vector3(0, floor_y, 17.6 if dir > 0.0 else 24.0)
+		p.look_yaw = PI if dir > 0.0 else 0.0
+		p.look_pitch = 0.0
+		p.velocity = Vector3.ZERO
+		p.reset_physics_interpolation()
+		await wait(0.3)
+		var lo := INF
+		var hi := -INF
+		Input.action_press("move_forward")
+		for i in 120:
+			await get_tree().physics_frame
+			if absf(p.position.z - StationBuilder.FACADE_Z) < 1.0:
+				lo = minf(lo, p.position.y)
+				hi = maxf(hi, p.position.y)
+		Input.action_release("move_forward")
+		print("[autotest] walked %s the shop door: now z %.1f, height in the doorway %.3f .. %.3f (floor %.3f)" % [
+			"in through" if dir > 0.0 else "out through", p.position.z, lo, hi, floor_y - 0.05])
+	if shots:
+		p.position = Vector3(0, floor_y, 25.0)
+		p.look_yaw = 0.0
+		p.look_pitch = 0.25
+		p.reset_physics_interpolation()
+		await wait(0.4)
+		await shot("bl02_shop_door_inside")
+		p.position = Vector3(0, floor_y, 15.0)
+		p.look_yaw = PI
+		p.look_pitch = 0.42
+		p.reset_physics_interpolation()
+		await wait(0.4)
+		await shot("bl03_shop_door_outside")
+		var counter := StationBuilder.SELL_SPOT - Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+		p.position = Vector3(1.2, floor_y, 21.2)
+		p.reset_physics_interpolation()
+		_face(p, counter + Vector3(0, 1.4, 0))
+		await wait(0.4)
+		await shot("bl03b_buyback_counter")
+	# Buy a crate, carry it to the buyback counter and sell it.
+	ship.credits = 3000
+	var sale: SupplyCrate = null
+	for c in ship.cargo_root.get_children():
+		var crate := c as SupplyCrate
+		if crate and crate.price > 0 and crate.item != "hull_kit":
+			sale = crate
+			break
+	if sale:
+		var price := sale.price
+		print("[autotest] bought %s for %d: %s, picked up: %s" % [sale.item, price, await _buy(p, sale), await _pick_up(m, p, sale)])
+		var spot := StationBuilder.SELL_SPOT - Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+		p.position = Vector3(spot.x, floor_y, spot.z - 1.6)
+		p.velocity = Vector3.ZERO
+		p.reset_physics_interpolation()
+		await wait(0.3)
+		_face(p, spot + Vector3(0, 0.9, 0))
+		await wait(0.3)
+		var prompt := p.prompt
+		if shots:
+			await shot("bl04_buyback")
+		var c0 := ship.credits
+		await _tap("interact")
+		await wait(0.3)
+		print("[autotest] buyback prompt '%s'; sold: %s, credits %d -> %d (+%d = %d%% of %d)" % [prompt, not is_instance_valid(sale),
+			c0, ship.credits, ship.credits - c0, int(round(100.0 * (ship.credits - c0) / float(price))), price])
+	else:
+		print("[autotest] FAIL: nothing to buy in the shop")
+	# Lift off, then land at an abandoned station: hostility holds there, flashlights, skitters.
+	p.position = p.ship.spawn_points()[0]
+	p.reset_physics_interpolation()
+	await wait(0.3)
+	var k := -1
+	var d := {}
+	for kk in 12:
+		d = m.cave.derelict(kk)
+		if not d.is_empty():
+			k = kk
+			break
+	if k < 0:
+		print("[autotest] FAIL: no abandoned station in this cave")
+		return
+	ship.landing = Mothership.Dock.FLYING
+	ship.station_k = -1
+	ship.gate_k = k
+	ship.gate_entry = 0.0
+	ship._exit_state = 3
+	_clear_aliens()
+	await _put_ship(m, float(d["s"]) - 70.0, [float(d["s"])])
+	ship.request_station.rpc_id(1, "pilot")
+	await wait(0.8)
+	ship.hostility = 0.55
+	# No landing with aliens close (that rule is tested in backlog2): clear any that came along.
+	_clear_aliens()
+	await wait(0.1)
+	await _tap("land")
+	t0 = Time.get_ticks_msec()
+	while ship.landing != Mothership.Dock.LANDED and Time.get_ticks_msec() - t0 < 60000:
+		await wait(0.5)
+	await wait(4.0)
+	print("[autotest] landed at %s: %s; hostility after 4 s down there %.2f (%s), HUD '%s'" % [d["name"],
+		ship.landing == Mothership.Dock.LANDED, ship.hostility, Mothership.HOSTILITY_STAGES[ship.hostility_stage()], m.hud._hostility_label.text])
+	# Clear the station's own aliens so only our test pack is about.
+	for c in ship.boarder_root.get_children():
+		c.queue_free()
+	p.exit_station(true)
+	await wait(0.3)
+	print("[autotest] flashlight aboard: %s" % p._flash_on)
+	var layout: Dictionary = d["layout"]
+	var rooms: Array = layout["rooms"]
+	var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	var r0: Dictionary = rooms[0]
+	var entry := DerelictBuilder.door_inside(r0, (r0["doors"] as Array)[0]) - lift
+	p.position = Vector3(entry.x, floor_y, entry.z)
+	p.velocity = Vector3.ZERO
+	p.reset_physics_interpolation()
+	await wait(0.5)
+	var c0v: Vector2 = r0["c"]
+	_face(p, Vector3(c0v.x, floor_y + 1.0, c0v.y) - lift + lift)
+	await wait(0.3)
+	print("[autotest] flashlight out in the station: %s (aboard %s)" % [p._flash_on, ship.is_aboard(p.position)])
+	if shots:
+		await shot("bl05_flashlight")
+		# A doorway from inside a room (the skirting band stops at the door frame).
+		var dr: Dictionary = (r0["doors"] as Array)[0]
+		var door_in := DerelictBuilder.door_inside(r0, dr) - lift
+		var c0p := Vector3(c0v.x, floor_y, c0v.y) - Vector3(0, 0, 0)
+		p.position = c0p + (Vector3(door_in.x, floor_y, door_in.z) - c0p) * 0.2
+		p.reset_physics_interpolation()
+		await wait(0.2)
+		_face(p, Vector3(door_in.x, floor_y + 0.3, door_in.z))
+		p.look_pitch = -0.25
+		await wait(0.4)
+		await shot("bl06_room_door")
+	# A pack of skitters in the room furthest from the door: let them settle, then go in.
+	var far: Dictionary = rooms[int(layout["vault"])]
+	var fc: Vector2 = far["c"]
+	var pack: Array[Boarder] = []
+	for i in 5:
+		ship._boarder_seq += 1
+		var b := ship.boarder_spawner.spawn({"name": "T%d" % ship._boarder_seq, "kind": "skitter",
+			"pos": Vector3(fc.x - 2.0 + i * 1.0, floor_y - 0.05, fc.y), "hp": 9999.0, "max_hp": 9999.0, "dmg": 0.3, "outside": true}) as Boarder
+		pack.append(b)
+	await wait(9.0)
+	print("[autotest] skitters settled: %s" % _skitter_report(ship, pack, floor_y - 0.05))
+	var fdoor: Dictionary = (far["doors"] as Array)[0]
+	var fentry := DerelictBuilder.door_inside(far, fdoor) - lift
+	p.position = Vector3(fentry.x, floor_y, fentry.z)
+	p.velocity = Vector3.ZERO
+	p.reset_physics_interpolation()
+	_face(p, Vector3(fc.x, floor_y + 2.0, fc.y))
+	var hp0 := p.hp
+	var seen := {}
+	for i in 12:
+		await wait(0.25)
+		for b in pack:
+			if is_instance_valid(b):
+				seen[_surface_of(ship, b)] = int(seen.get(_surface_of(ship, b), 0)) + 1
+		if i == 3 and shots:
+			p.look_pitch = 0.45
+			await shot("bl07_skitters")
+	print("[autotest] skitters chasing: %s; surfaces seen %s; crew hp %.0f -> %.0f (attacked: %s)" % [_skitter_report(ship, pack, floor_y - 0.05),
+		seen, hp0, p.hp, p.hp < hp0])
+	var b0: Boarder = pack[0]
+	if is_instance_valid(b0):
+		print("[autotest] skitter size: radius %.2f height %.2f (was 0.45 / 0.9)" % [b0.stat("radius"), b0.stat("height")])
+	# Back aboard: the flashlight goes off.
+	p.position = p.ship.spawn_points()[0]
+	p.reset_physics_interpolation()
+	await wait(0.5)
+	print("[autotest] flashlight back aboard: %s" % p._flash_on)
+
+
+## Which surface a skitter clings to: "floor", "wall" or "ceiling".
+static func _surface_of(ship: Mothership, b: Boarder) -> String:
+	var up := ship.global_basis.inverse() * b.global_basis.y
+	return "floor" if up.y > 0.7 else ("ceiling" if up.y < -0.7 else "wall")
+
+
+static func _skitter_report(ship: Mothership, pack: Array[Boarder], floor_y: float) -> String:
+	var out := PackedStringArray()
+	for b in pack:
+		if is_instance_valid(b):
+			out.append("%s %.1f m up" % [_surface_of(ship, b), b.position.y - floor_y])
+	return ", ".join(out)
+
+
 ## Steer a given scout through points (like _scout_fly_path, for any scout).
 func _scout_fly_path_for(m: MissionLevel, sc: Scout, points: Array, reach: float, timeout: float) -> bool:
 	var p := m.local_player
@@ -2026,6 +2637,23 @@ func _run_sound() -> void:
 		var rms := sqrt(sum / smp.size())
 		print("[autotest] %s: rms %.3f (%.1f dBFS), peak %.2f, player %.0f dB -> %.1f dB effective, brightness %.4f, loop seam jump %.3f" % [pair[0], rms,
 			linear_to_db(rms), peak, pair[2], linear_to_db(rms) + float(pair[2]), diff / smp.size(), absf(smp[smp.size() - 1] - smp[0])])
+	# The engine hum heard from around the ship: the first version (-8 dB, unit size 20, max +3 dB),
+	# the second (-22 dB, unit size 9, max 0 dB, both from a point behind the reactor) and now (even
+	# in the engine room, fading with distance from it; see Mothership.engine_hum_db).
+	var hum := _stream_samples(Sfx.stream("engine_loop") as AudioStreamWAV)
+	var blaster := _stream_samples(Sfx.stream("blaster") as AudioStreamWAV)
+	var engine := Vector3(0, 1.5, 9.0)
+	var room: Array = ShipInteriors.get_layout("prospector")["engine_room"]
+	for spot: Array in [["engine room", Vector3(0, 1.6, 7.0)], ["install hub", ShipInteriors.get_layout("prospector")["hub"] + Vector3(0.8, 1.6, 0)],
+			["mid-ship hall", Vector3(0, 1.6, 0.8)], ["gun window", Vector3(-4.75, 1.6, -2.5)], ["cockpit", Vector3(0, 1.6, -8.5)],
+			["pilot chase camera", Vector3(0, 12.0, 38.0)]]:
+		var ear: Vector3 = spot[1]
+		var dist := ear.distance_to(engine)
+		print("[autotest] engine hum at the %s (%.0f m): first %.1f dB, second %.1f dB, now %.1f .. %.1f dB (idle .. full throttle)" % [spot[0], dist,
+			_loudness(hum, -8.0, 20.0, 3.0, dist), _loudness(hum, -22.0, 9.0, 0.0, dist),
+			_rms_db(hum) + Mothership.engine_hum_db(room, ear, 0.0), _rms_db(hum) + Mothership.engine_hum_db(room, ear, 1.0)])
+	print("[autotest] for comparison: your own blaster shot %.1f dB, a mining laser at its console %.1f dB" % [
+		_loudness(blaster, -5.0, 14.0, 3.0, 0.8), _loudness(cur, -13.0, 8.0, 3.0, 1.0)])
 
 
 ## Every mothership (and both scout models) in a plain lit studio, for judging the models.
@@ -2186,3 +2814,1168 @@ func _run_cheats() -> void:
 	hb._cheat_btn.pressed.emit()
 	await wait(0.3)
 	await shot("cheat04_restored")
+
+
+## Tunnel width and station fit over several seeds: the free space along the ship's flight line,
+## every waystation's gates on the straightened centre line with its bulkheads sealing the tunnel
+## (no open space around them), and the abandoned stations: placement between the waystations,
+## hangar open from the tunnel to the pad, rooms carved out of the rock.
+func _run_tunnels() -> void:
+	for seed_i: int in [1, 7, 42, 1234, 99999]:
+		var cave := CaveGen.new(seed_i)
+		var clear_min := INF
+		var clear_sum := 0.0
+		var n := 0
+		var s := 30.0
+		while s < 2100.0:
+			if not cave.near_station(s, 120.0):
+				var free := -cave.sdf(cave.center3(s) + Vector3(0, -1.4, 0))
+				clear_min = minf(clear_min, free)
+				clear_sum += free
+				n += 1
+			s += 4.0
+		print("[autotest] seed %d: free space around the flight line: min %.1f m, mean %.1f m (radius %.0f +- %.0f m)" % [seed_i,
+			clear_min, clear_sum / n, CaveGen.TUNNEL_RADIUS, CaveGen.TUNNEL_RADIUS_VAR])
+		for k in 4:
+			var st := cave.station(k)
+			var xf: Transform3D = st["xform"]
+			var open_ok := true
+			for z: float in [StationBuilder.ENTRY_FACE + 40.0, StationBuilder.ENTRY_FACE + 4.0, 0.0, StationBuilder.EXIT_FACE - 4.0, StationBuilder.EXIT_FACE - 40.0]:
+				if cave.sdf(xf * Vector3(0, StationBuilder.LINE_Y, z)) > -4.0:
+					open_ok = false
+			var leaks := 0
+			var margin := INF
+			for z: float in [(StationBuilder.EXIT_FACE + StationBuilder.EXIT_INNER) * 0.5, (StationBuilder.FACADE_Z + StationBuilder.ENTRY_FACE) * 0.5]:
+				var x := -45.0
+				while x <= 45.0:
+					var y := -25.0
+					while y <= 60.0:
+						var d := cave.sdf(xf * Vector3(x, y, z))
+						var in_wall := absf(x) < StationBuilder.WALL_X and y > StationBuilder.WALL_Y0 and y < StationBuilder.WALL_Y1
+						if d < 0.0:
+							if not in_wall:
+								leaks += 1
+							else:
+								margin = minf(margin, minf(StationBuilder.WALL_X - absf(x), minf(y - StationBuilder.WALL_Y0, StationBuilder.WALL_Y1 - y)))
+						y += 1.0
+					x += 1.0
+			print("[autotest]   waystation %d at %.0f m: gate line open %s, open space around the bulkheads %d points (%s), closest open point %.1f m inside the wall edge" % [
+				k, st["s"], open_ok, leaks, "sealed" if leaks == 0 else "LEAK", margin])
+		for k in 5:
+			var dr := cave.derelict(k)
+			if dr.is_empty():
+				print("[autotest]   stretch after waystation %d: no abandoned station" % k)
+				continue
+			var dxf: Transform3D = dr["xform"]
+			var hangar_ok := true
+			for z: float in [-float(dr["depth"]) + 3.0, -14.0, -6.0, 0.0, 8.0, 14.0]:
+				for x: float in [-12.0, 0.0, 12.0]:
+					if cave.sdf(dxf * Vector3(x, 7.2, z)) > -1.0:
+						hangar_ok = false
+			var layout: Dictionary = dr["layout"]
+			var carved := 0
+			for room: Dictionary in layout["rooms"]:
+				var c: Vector2 = room["c"]
+				if cave.sdf(dxf * Vector3(c.x, StationBuilder.DECK_Y + 2.0, c.y)) < -1.0:
+					carved += 1
+			var to_prev := float(dr["s"]) - float(cave.station(k)["s_exit"])
+			var to_next := float(cave.station(k + 1)["s_entry"]) - float(dr["s"])
+			var props := 0
+			var spots := 0
+			for room: Dictionary in layout["rooms"]:
+				props += (room["props"] as Array).size()
+				spots += (room["spots"] as Array).size()
+			print("[autotest]   abandoned station %d '%s' at %.0f m on the %s wall (%.0f m after waystation %d, %.0f m before the next): %d rooms (%d carved out), %d corridors, vault room %d, %d props, %d salvage spots, hangar open: %s" % [
+				k, dr["name"], dr["s"], "right" if float(dr["side"]) > 0.0 else "left", to_prev, k, to_next, (layout["rooms"] as Array).size(),
+				carved, (layout["corridors"] as Array).size(), layout["vault"], props, spots, hangar_ok])
+
+
+## Stand `dist` metres from a crate, on the side facing `toward` (ship-local), and look at it.
+func _stand_near(p: CrewMember, crate: SupplyCrate, toward: Vector3, floor_y: float, dist := 1.25) -> void:
+	var flat := Vector3(crate.net_pos.x, 0, crate.net_pos.z)
+	var away := flat.direction_to(Vector3(toward.x, 0, toward.z))
+	if away.length_squared() < 0.01:
+		away = Vector3.FORWARD
+	p.position = Vector3(flat.x, floor_y, flat.z) + away * dist
+	p.velocity = Vector3.ZERO
+	p.reset_physics_interpolation()
+	await wait(0.35)
+	_face(p, crate.net_pos)
+	await wait(0.25)
+
+
+func _hostile_report(ship: Mothership) -> String:
+	var counts := {}
+	for c in ship.boarder_root.get_children():
+		var b := c as Boarder
+		if b and b.outside:
+			counts[b.kind] = int(counts.get(b.kind, 0)) + 1
+	return str(counts)
+
+
+## Abandoned stations: the HUD marker, landing (optional; side-on into the hangar, nose out), the
+## salvage and hostiles in the rooms, walking in, bots following the host, clearing the rooms with
+## hand weapons while needlers shoot back, swapping weapons at a crate with F, carrying salvage
+## aboard and fitting it, and lifting off (what is left stays in the station).
+func _run_derelict() -> void:
+	Game.bot_count = 2
+	var m := await _start_solo_mission()
+	Game.bot_count = 0
+	if m == null:
+		print("[autotest] FAIL: mission not ready")
+		return
+	var ship := m.ship
+	var p := m.local_player
+	# A sturdy crew for the test (crew health follows the ship's crew stat).
+	var tough := ship.stats.duplicate()
+	tough["crew_hp"] = 1500.0
+	ship.stats = tough
+	var k := -1
+	var d := {}
+	for kk in 10:
+		d = m.cave.derelict(kk)
+		if not d.is_empty():
+			k = kk
+			break
+	if k < 0:
+		print("[autotest] FAIL: no abandoned station in this cave")
+		return
+	var xf: Transform3D = d["xform"]
+	var layout: Dictionary = d["layout"]
+	var rooms: Array = layout["rooms"]
+	print("[autotest] abandoned station %d '%s' at %.0f m: %d rooms, vault %d, side %+.0f, pad %s" % [k, d["name"], d["s"], rooms.size(),
+		layout["vault"], d["side"], xf.origin])
+	# The abandoned station is in the stretch after waystation k: pretend the crew came through it.
+	ship.gate_k = k
+	ship.gate_entry = 0.0
+	ship._exit_state = 3
+	await _put_ship(m, float(d["s"]) - 70.0, [float(d["s"])])
+	ship.request_station.rpc_id(1, "pilot")
+	await wait(1.0)
+	print("[autotest] marker: '%s' (visible %s); pilot info: %s" % [m.hud._derelict_marker.text.replace("\n", " | "),
+		m.hud._derelict_marker.visible, m.hud._station_info.text.replace("\n", " | ")])
+	await shot("dr01_approach")
+	# No landing with aliens close (that rule is tested in backlog2): clear any that came along.
+	_clear_aliens()
+	await wait(0.1)
+	await _tap("land")
+	print("[autotest] landing state after L: %d (derelict %d)" % [ship.landing, ship.derelict_k])
+	var t0 := Time.get_ticks_msec()
+	var shot_dock := false
+	while ship.landing != Mothership.Dock.LANDED and Time.get_ticks_msec() - t0 < 50000:
+		await wait(0.5)
+		if not shot_dock and ship._dock_keys.size() <= 2:
+			shot_dock = true
+			await shot("dr02_docking")
+	var pad := xf * Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	print("[autotest] landed: %s after %.1f s, error %.2f m, nose out: %.2f (1 = facing the tunnel), hull %.0f" % [
+		ship.landing == Mothership.Dock.LANDED, (Time.get_ticks_msec() - t0) / 1000.0, ship.global_position.distance_to(pad),
+		(-ship.global_basis.z).dot(-xf.basis.z), ship.hull])
+	await wait(3.0)
+	var crate_items := PackedStringArray()
+	for c in ship.cargo_root.get_children():
+		crate_items.append((c as SupplyCrate).item)
+	print("[autotest] salvage: %s | hostiles: %s (%d) | ramp %.2f | status '%s'" % [", ".join(crate_items), _hostile_report(ship),
+		ship.hostiles, ship.ramp, m.hud._dock_status.text])
+	await shot("dr03_landed")
+	# Free camera views of the hangar, the front wall and the rooms.
+	var cam := Camera3D.new()
+	cam.far = 600.0
+	m.add_child(cam)
+	var vault: Dictionary = rooms[int(layout["vault"])]
+	var r0: Dictionary = rooms[0]
+	var views: Array = [
+		["dr04_hangar", Vector3(14.0, 12.0, -float(d["depth"]) + 6.0), Vector3(0, 5.0, 8.0)],
+		["dr05_facade", Vector3(9.5, 9.0, 13.5), Vector3(-1.0, 4.5, DerelictBuilder.FACADE_Z)],
+	]
+	for room: Dictionary in [r0, vault]:
+		var c: Vector2 = room["c"]
+		var size: Vector2 = room["size"]
+		views.append(["dr06_room%d" % rooms.find(room), Vector3(c.x - size.x * 0.42, StationBuilder.DECK_Y + 2.6, c.y - size.y * 0.42),
+			Vector3(c.x + size.x * 0.2, StationBuilder.DECK_Y + 1.0, c.y + size.y * 0.2)])
+	for v: Array in views:
+		cam.global_position = xf * (v[1] as Vector3)
+		cam.look_at(xf * (v[2] as Vector3))
+		cam.current = true
+		await wait(0.3)
+		await shot(v[0])
+	cam.queue_free()
+	p.camera.current = true
+	# Walk down the ramp, along the pier and in through the door.
+	p.exit_station(true)
+	await wait(0.3)
+	p.position = Vector3(0, 0.05, 10.6)
+	p.look_yaw = PI
+	p.look_pitch = -0.05
+	p.reset_physics_interpolation()
+	await wait(0.3)
+	Input.action_press("move_forward")
+	await wait(2.0)
+	await shot("dr07_pier")
+	await wait(2.4)
+	Input.action_release("move_forward")
+	await wait(0.4)
+	print("[autotest] walked to %s: inside the station %s, aboard %s, crew outside '%s'" % [p.position.snapped(Vector3.ONE * 0.1),
+		p.position.z > DerelictBuilder.FACADE_Z, p.ship.is_aboard(p.position), ship.crew_outside()])
+	await shot("dr08_inside")
+	await wait(4.0)
+	var follow := PackedStringArray()
+	for c in ship.crew_root.get_children():
+		var cm := c as CrewMember
+		if cm.bot:
+			follow.append("%s following=%s %.1f m from the host" % [cm.display_name, cm.brain.following, cm.position.distance_to(p.position)])
+	print("[autotest] bots: ", ", ".join(follow))
+	# Clear the rooms: walk into each one (nearest first) and shoot whatever is there.
+	var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	var floor_y := StationBuilder.DECK_Y - StationBuilder.LAND_HEIGHT + 0.05
+	var kills0 := m.kills
+	var bot_kills0 := 0
+	var taken := 0.0
+	var last_hp := p.hp
+	var weapons := ["blaster", "rifle", "scatter", "rail", "plasma"]
+	var fight_shot := false
+	for idx in rooms.size():
+		var room: Dictionary = rooms[idx]
+		var doors: Array = room["doors"]
+		var entry := DerelictBuilder.door_inside(room, doors[0]) - lift
+		p.position = Vector3(entry.x, floor_y, entry.z)
+		p.reset_physics_interpolation()
+		p.set_weapon(weapons[idx % weapons.size()])
+		ship._crew_weapons[1] = p.weapon
+		await wait(0.4)
+		var rt := Time.get_ticks_msec()
+		var quiet := 0.0
+		var hostiles_before := ship.hostiles
+		while Time.get_ticks_msec() - rt < 12000 and quiet < 2.5:
+			taken += maxf(0.0, last_hp - p.hp)
+			last_hp = p.hp
+			var foe := _nearest_hostile(ship, p, 18.0)
+			if foe == null:
+				Input.action_release("fire")
+				quiet += 0.25
+				await wait(0.25)
+				continue
+			quiet = 0.0
+			if p.ammo <= 0 and not p.reloading:
+				Input.action_release("fire")
+				await _tap("reload")
+			_face(p, foe.position + Vector3(0, foe.stat("height") * 0.55, 0))
+			Input.action_press("fire")
+			await wait(0.12)
+			if not fight_shot and idx > 0 and is_instance_valid(foe) and foe.position.distance_to(p.position) < 9.0:
+				fight_shot = true
+				await shot("dr09_fight")
+		Input.action_release("fire")
+		print("[autotest]   room %d %s with the %s: hostiles %d -> %d, player hp %.0f, bots %s" % [idx, room["name"],
+			CrewWeapons.display_name(p.weapon), hostiles_before, ship.hostiles, p.hp,
+			", ".join(ship.crew_root.get_children().filter(func(c): return c.bot).map(func(c): return "%s %.0f m%s" % [c.display_name,
+				c.position.distance_to(p.position), " FIGHTING" if c.brain.is_fighting() else ""]))])
+	print("[autotest] cleared: kills %d -> %d, hostiles left %d (%s), player took %.0f damage, alive %s | %s" % [kills0, m.kills, ship.hostiles,
+		_hostile_report(ship), taken, p.alive, _bot_report(m)])
+	# Swap hand weapons at a crate with F.
+	p.set_weapon(CrewWeapons.DEFAULT)
+	ship._crew_weapons.erase(1)
+	var wc: SupplyCrate = null
+	for c in ship.cargo_root.get_children():
+		var crate := c as SupplyCrate
+		if RunItems.is_crew_weapon(crate.item):
+			wc = crate
+	if wc == null:
+		var spot := Vector3(r0["c"].x, StationBuilder.DECK_Y + SupplyCrate.SIZE.y * 0.5, r0["c"].y) - lift
+		ship.cargo_spawner.spawn({"name": "CW1", "item": "crew:rifle", "price": 0, "pos": spot, "yaw": 0.0})
+		await wait(0.3)
+		wc = ship.cargo_root.get_node("CW1") as SupplyCrate
+	await _stand_near(p, wc, _room_center_near(rooms, wc.net_pos), floor_y)
+	var want := RunItems.crew_weapon_of(wc.item)
+	print("[autotest] at the weapon crate: prompt '%s'" % p.prompt)
+	await shot("dr10_swap_prompt")
+	await _tap("equip")
+	await wait(0.4)
+	print("[autotest] after F: weapon %s (wanted %s), crate now holds %s" % [p.weapon, want, wc.item])
+	await shot("dr11_new_weapon")
+	# Carry some salvage aboard and fit it.
+	var loot: SupplyCrate = null
+	for c in ship.cargo_root.get_children():
+		var crate := c as SupplyCrate
+		if not RunItems.is_crew_weapon(crate.item) and not RunItems.is_weapon(crate.item) and crate.item != "autocannon":
+			loot = crate
+	if loot:
+		await _stand_near(p, loot, _room_center_near(rooms, loot.net_pos), floor_y)
+		await _tap("interact")
+		await wait(0.3)
+		print("[autotest] picked up salvage %s: %s" % [loot.item, p.carrying == loot])
+		p.position = Vector3(0, floor_y, 17.0)
+		p.look_yaw = 0.0
+		p.look_pitch = 0.0
+		p.reset_physics_interpolation()
+		Input.action_press("move_forward")
+		await wait(2.4)
+		await shot("dr12_carry")
+		await wait(1.6)
+		Input.action_release("move_forward")
+		print("[autotest] carried it aboard: %s, hub prompt: '%s'" % [p.ship.is_aboard(p.position), await _install_at_hub(p)])
+		print("[autotest] installed: %s, mods %s" % [not is_instance_valid(loot), ship.run_mods])
+	# Back aboard: the bots come back, then lift off.
+	p.position = p.ship.spawn_points()[0]
+	p.reset_physics_interpolation()
+	t0 = Time.get_ticks_msec()
+	while ship.crew_outside() != "" and Time.get_ticks_msec() - t0 < 30000:
+		await wait(0.5)
+	print("[autotest] everyone aboard after %.1f s (outside: '%s') | %s" % [(Time.get_ticks_msec() - t0) / 1000.0, ship.crew_outside(), _bot_report(m)])
+	ship.request_station.rpc_id(1, "pilot")
+	await wait(0.4)
+	await _tap("land")
+	t0 = Time.get_ticks_msec()
+	while ship.landing != Mothership.Dock.FLYING and Time.get_ticks_msec() - t0 < 30000:
+		await wait(0.5)
+	var state: Dictionary = ship._derelict_state.get(k, {})
+	print("[autotest] flying again: %s after %.1f s, derelict_k %d, left in the station: %d crates, %d hostiles; nav points %d" % [
+		ship.landing == Mothership.Dock.FLYING, (Time.get_ticks_msec() - t0) / 1000.0, ship.derelict_k,
+		(state.get("crates", []) as Array).size(), (state.get("enemies", []) as Array).size(), ship.nav.get_point_count()])
+	await wait(1.0)
+	await shot("dr13_liftoff")
+	_status(m)
+
+
+## Ship-local middle of the abandoned station room nearest to a ship-local point (ship landed).
+func _room_center_near(rooms: Array, p: Vector3) -> Vector3:
+	var best := Vector3.ZERO
+	var best_d := INF
+	for room: Dictionary in rooms:
+		var c: Vector2 = room["c"]
+		var q := Vector3(c.x, p.y, c.y)
+		if q.distance_to(p) < best_d:
+			best_d = q.distance_to(p)
+			best = q
+	return best
+
+
+## The nearest alien in an abandoned station within `reach` that the player can see.
+func _nearest_hostile(ship: Mothership, p: CrewMember, reach: float) -> Boarder:
+	var best: Boarder = null
+	var best_d := reach
+	var space := p.get_world_3d().direct_space_state
+	for c in ship.boarder_root.get_children():
+		var b := c as Boarder
+		if b == null or b.hp <= 0.0 or b.is_queued_for_deletion():
+			continue
+		var dist := b.position.distance_to(p.position)
+		if dist >= best_d:
+			continue
+		var q := PhysicsRayQueryParameters3D.create(ship.to_global(p.position + Vector3(0, CrewMember.EYE, 0)),
+			ship.to_global(b.position + Vector3(0, b.stat("height") * 0.5, 0)), Game.LAYER_STATION | Game.LAYER_INTERIOR)
+		if not space.intersect_ray(q).is_empty():
+			continue
+		best_d = dist
+		best = b
+	return best
+
+
+## Hand weapons against a line of boarders aboard (held still): damage each weapon deals in a few
+## seconds, rail slugs piercing the line, plasma splash, the HUD label and the first-person models;
+## then swapping weapons at a crate with F, and a crate holding a hand weapon at the install hub.
+func _run_weapons() -> void:
+	var m := await _start_solo_mission()
+	if m == null:
+		print("[autotest] FAIL: mission not ready")
+		return
+	var ship := m.ship
+	var p := m.local_player
+	p.max_hp = 99999.0
+	p.hp = 99999.0
+	var n := 0
+	for w: String in CrewWeapons.ORDER:
+		p.set_weapon(w)
+		ship._crew_weapons[1] = w
+		p.position = Vector3(0, 0.05, 4.2)
+		p.look_yaw = 0.0
+		p.reset_physics_interpolation()
+		var line: Array[Boarder] = []
+		for i in 3:
+			n += 1
+			ship.boarder_spawner.spawn({"name": "W%d" % n, "pos": Vector3(0.25 * (i - 1), 0.0, -1.0 - i * 1.4), "hp": 2000.0})
+		await wait(0.2)
+		for i in 3:
+			var b := ship.boarder_root.get_node("W%d" % (n - 2 + i)) as Boarder
+			b.set_physics_process(false)
+			line.append(b)
+		_face(p, line[0].position + Vector3(0, 0.9, 0))
+		await wait(0.3)
+		if w == "blaster" or w == "scatter" or w == "rail" or w == "plasma" or w == "rifle":
+			await shot("wp_%s" % w)
+		# Three seconds on the trigger, reloading (R) whenever the magazine runs dry.
+		var reloads := 0
+		var t0 := Time.get_ticks_msec()
+		Input.action_press("fire")
+		while Time.get_ticks_msec() - t0 < 3000:
+			await get_tree().physics_frame
+			if p.ammo <= 0 and not p.reloading:
+				reloads += 1
+				p.start_reload()
+		Input.action_release("fire")
+		await wait(0.6)
+		print("[autotest]   %s: magazine %d, %d reload%s in those 3 s" % [w, CrewWeapons.mag(w), reloads, "" if reloads == 1 else "s"])
+		var hits := PackedStringArray()
+		var total := 0.0
+		for b in line:
+			hits.append("%.0f" % (2000.0 - b.hp))
+			total += 2000.0 - b.hp
+		var d := CrewWeapons.def(w)
+		print("[autotest] %s: %.0f damage in 3 s (%.0f/s; nominal %.0f/s per target) - per boarder [%s], HUD '%s'" % [CrewWeapons.display_name(w),
+			total, total / 3.0, float(d["damage"]) * int(d["pellets"]) / float(d["cooldown"]), ", ".join(hits), m.hud._tool_label.text])
+		for b in line:
+			b.queue_free()
+		await wait(0.2)
+	# Swap at a crate with F (the old weapon goes into the crate).
+	p.set_weapon(CrewWeapons.DEFAULT)
+	ship._crew_weapons[1] = CrewWeapons.DEFAULT
+	ship.cargo_spawner.spawn({"name": "CW9", "item": "crew:scatter", "price": 0, "pos": Vector3(-2.5, 0.3, 7.5), "yaw": 0.0})
+	await wait(0.3)
+	var crate := ship.cargo_root.get_node("CW9") as SupplyCrate
+	await _stand_near(p, crate, Vector3(0, 0, 7.5), 0.05)
+	print("[autotest] prompt: '%s'" % p.prompt)
+	await _tap("equip")
+	await wait(0.4)
+	print("[autotest] after F: weapon %s, crate holds %s, label '%s'" % [p.weapon, crate.item, crate._label.text])
+	await _tap("equip")
+	await wait(0.4)
+	print("[autotest] F again: weapon %s, crate holds %s" % [p.weapon, crate.item])
+	# Carry it to the install hub: refused.
+	await _stand_near(p, crate, Vector3(0, 0, 7.5), 0.05)
+	await _tap("interact")
+	await wait(0.3)
+	print("[autotest] carrying the weapon crate: %s, hub prompt '%s'" % [p.carrying == crate, await _install_at_hub(p)])
+	print("[autotest] still carrying after E at the hub: %s, mods %s" % [p.carrying == crate, ship.run_mods])
+	await shot("wp_hub_refused")
+
+
+## Effective loudness (dB) of a looping stream for a listener `dist` metres away from a player with
+## the given volume, unit size and max_db (inverse-distance attenuation, as Godot does it: the
+## volume plus the attenuation, capped at max_db, so close to the source it gets louder than the
+## volume itself).
+func _loudness(smp: PackedFloat32Array, volume_db: float, unit: float, max_db: float, dist: float) -> float:
+	return _rms_db(smp) + minf(volume_db + linear_to_db(1.0 / (dist / unit + 0.0001)), max_db)
+
+
+static func _rms_db(smp: PackedFloat32Array) -> float:
+	var sum := 0.0
+	for v in smp:
+		sum += v * v
+	return linear_to_db(sqrt(sum / maxf(smp.size(), 1.0)))
+
+
+static func _stream_samples(st: AudioStreamWAV) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	out.resize(st.data.size() / 2)
+	for i in out.size():
+		out[i] = st.data.decode_s16(i * 2) / 32000.0
+	return out
+
+
+## Multiplayer abandoned station test, host side (run --autotest=join_derelict in a second
+## instance): land at an abandoned station, leave a Rail Carbine crate in the first room for the
+## client, and report what the host sees of the client's weapon swap and fight.
+func _run_host_derelict() -> void:
+	Net.local_name = "HostPilot"
+	if Net.host(Net.DEFAULT_PORT) != OK:
+		print("[autotest] FAIL: could not host")
+		return
+	Game.main.change_level("homebase")
+	for i in 400:
+		await wait(0.1)
+		if Net.human_count() >= 2:
+			break
+	if Net.human_count() < 2:
+		print("[autotest] FAIL: no client joined")
+		return
+	await wait(1.0)
+	Game.main.start_mission()
+	var m: MissionLevel = null
+	for i in 900:
+		await get_tree().process_frame
+		m = Game.mission as MissionLevel
+		if m and m.started and m.local_player:
+			break
+	var ship := m.ship
+	var tough := ship.stats.duplicate()
+	tough["crew_hp"] = 1500.0
+	ship.stats = tough
+	# The abandoned station may be deep down (they are 650 m apart): a sturdy ship survives the wait.
+	ship.max_hull = 5000.0
+	ship.hull = 5000.0
+	var k := -1
+	var d := {}
+	for kk in 10:
+		d = m.cave.derelict(kk)
+		if not d.is_empty():
+			k = kk
+			break
+	if k < 0:
+		print("[autotest] FAIL: no abandoned station in this cave")
+		return
+	ship.gate_k = k
+	ship.gate_entry = 0.0
+	ship._exit_state = 3
+	await _put_ship(m, float(d["s"]) - 60.0, [float(d["s"])])
+	ship.request_station.rpc_id(1, "pilot")
+	await wait(0.5)
+	# No landing with aliens close (that rule is tested in backlog2): clear any that came along.
+	_clear_aliens()
+	await wait(0.1)
+	await _tap("land")
+	for i in 600:
+		await wait(0.1)
+		if ship.landing == Mothership.Dock.LANDED:
+			break
+	print("[autotest] host: landed at abandoned station %d (%.0f m): %s, hostiles %d (%s), hull %.0f" % [k, float(d["s"]),
+		ship.landing == Mothership.Dock.LANDED, ship.hostiles, _hostile_report(ship), ship.hull])
+	var r0: Dictionary = (d["layout"]["rooms"] as Array)[0]
+	var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	var c: Vector2 = r0["c"]
+	ship.cargo_spawner.spawn({"name": "HX", "item": "crew:rail", "price": 0,
+		"pos": Vector3(c.x, StationBuilder.DECK_Y + SupplyCrate.SIZE.y * 0.5, c.y) - lift, "yaw": 0.0})
+	await wait(0.3)
+	var crate := ship.cargo_root.get_node("HX") as SupplyCrate
+	var client_id := 0
+	for id in Net.roster:
+		if int(id) > 1:
+			client_id = int(id)
+	for i in 900:
+		await wait(0.1)
+		if i % 20 == 0 and is_instance_valid(ship):
+			print("[autotest] host: t+%.0f s hull %.0f shield %.0f alive %s, aliens %d, latched %s" % [i * 0.1, ship.hull, ship.shield,
+				ship.alive, get_tree().get_nodes_in_group("aliens").size(), get_tree().get_nodes_in_group("aliens").filter(func(a): return a.attached >= 0).size()])
+		if not is_instance_valid(crate) or not is_instance_valid(ship) or not ship.alive or crate.item != "crew:rail":
+			break
+	if not is_instance_valid(crate) or not is_instance_valid(ship) or not ship.alive:
+		print("[autotest] FAIL: host: the swap crate is gone (ship valid %s, alive %s, ending %s)" % [is_instance_valid(ship),
+			ship.alive if is_instance_valid(ship) else false, m.ending if is_instance_valid(m) else true])
+		return
+	var cm := ship.crew_root.get_node_or_null(str(client_id)) as CrewMember
+	await wait(0.5)
+	print("[autotest] host: crate now holds %s; the client's weapon as the host sees it: %s (server record %s)" % [crate.item,
+		cm.weapon if cm else "?", ship.crew_weapon(client_id)])
+	var kills0 := m.kills
+	var hostiles0 := ship.hostiles
+	for i in 400:
+		await wait(0.1)
+		if ship.crew_outside() == "" and i > 50:
+			break
+	print("[autotest] host: while the client was out: hostiles %d -> %d, kills %d -> %d, client hp %.0f / %.0f" % [hostiles0, ship.hostiles,
+		kills0, m.kills, cm.hp if cm else -1.0, cm.max_hp if cm else -1.0])
+	await _tap("land")
+	for i in 400:
+		await wait(0.1)
+		if ship.landing == Mothership.Dock.FLYING:
+			break
+	print("[autotest] host: flying again=%s, derelict_k %d" % [ship.landing == Mothership.Dock.FLYING, ship.derelict_k])
+	await wait(3.0)
+	m.abort_mission()
+	await wait(6.0)
+
+
+## Multiplayer abandoned station test, client side: walk into the first room, swap weapons at the
+## crate the host left there with F, fight the aliens that come, and go back aboard.
+func _run_join_derelict() -> void:
+	Net.local_name = "ClientScavenger"
+	await wait(2.0)
+	if Net.join("127.0.0.1", Net.DEFAULT_PORT) != OK:
+		print("[autotest] FAIL: could not start join")
+		return
+	var m: MissionLevel = null
+	for i in 900:
+		await wait(0.1)
+		m = Game.mission as MissionLevel
+		if m and m.local_ready and m.local_player:
+			break
+	if m == null or m.local_player == null:
+		print("[autotest] FAIL: client never got into a mission")
+		return
+	var ship := m.ship
+	var p := m.local_player
+	for i in 1200:
+		await wait(0.1)
+		if ship.landing == Mothership.Dock.LANDED and ship.derelict_k >= 0 and ship.ramp >= 1.0 and ship.cargo_root.has_node("HX"):
+			break
+	var d := m.cave.derelict(ship.derelict_k)
+	var built := false
+	for c in m.cave_root.get_children():
+		if c.has_node("Derelict%d" % ship.derelict_k):
+			built = true
+	print("[autotest] client: landed at abandoned station %d: %s, built locally %s, hostiles %d, crates %d" % [ship.derelict_k,
+		ship.landing == Mothership.Dock.LANDED, built, ship.hostiles, ship.cargo_root.get_child_count()])
+	var rooms: Array = d["layout"]["rooms"]
+	var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	var floor_y := StationBuilder.DECK_Y - StationBuilder.LAND_HEIGHT + 0.05
+	var entry := DerelictBuilder.door_inside(rooms[0], (rooms[0]["doors"] as Array)[0]) - lift
+	p.position = Vector3(entry.x, floor_y, entry.z)
+	p.reset_physics_interpolation()
+	await wait(0.5)
+	var crate := ship.cargo_root.get_node("HX") as SupplyCrate
+	await _stand_near(p, crate, _room_center_near(rooms, crate.net_pos) + Vector3(0, 0, -3.0), floor_y)
+	print("[autotest] client: prompt at the crate: '%s'" % p.prompt)
+	await _tap("equip")
+	await wait(0.8)
+	print("[autotest] client: weapon %s, crate holds %s, HUD '%s'" % [p.weapon, crate.item, m.hud._tool_label.text])
+	await shot("net_derelict_client_swap")
+	var hp_lost := 0.0
+	var last := p.hp
+	var t0 := Time.get_ticks_msec()
+	var fired := 0
+	while Time.get_ticks_msec() - t0 < 25000 and ship.hostiles > 0:
+		hp_lost += maxf(0.0, last - p.hp)
+		last = p.hp
+		var foe := _nearest_hostile(ship, p, 20.0)
+		if foe == null:
+			Input.action_release("fire")
+			await wait(0.25)
+			continue
+		if p.ammo <= 0 and not p.reloading:
+			Input.action_release("fire")
+			await _tap("reload")
+		_face(p, foe.position + Vector3(0, foe.stat("height") * 0.55, 0))
+		Input.action_press("fire")
+		fired += 1
+		await wait(0.15)
+	Input.action_release("fire")
+	print("[autotest] client: fought for %.1f s (%d aim updates): hostiles left %d, hp lost %.0f, alive %s" % [
+		(Time.get_ticks_msec() - t0) / 1000.0, fired, ship.hostiles, hp_lost, p.alive])
+	p.position = p.ship.spawn_points()[1]
+	p.reset_physics_interpolation()
+	for i in 600:
+		await wait(0.1)
+		if ship.landing == Mothership.Dock.FLYING:
+			break
+	print("[autotest] client: ship flying again=%s" % (ship.landing == Mothership.Dock.FLYING))
+	for i in 200:
+		await wait(0.1)
+		var lvl: Node = Game.main.current_level()
+		if lvl and lvl.name == "Homebase":
+			break
+	print("[autotest] client: back at ", Game.main.current_level().name if Game.main.current_level() else "none")
+
+
+
+## The second 2026-10-16 backlog round: the engine hum (even all over the engine room, fading with
+## distance), reloading hand weapons, the waystation (the buyback counter facing the middle of the
+## shop, no pillars across the gates, revolving warning beacons while the bulkhead doors move), and
+## abandoned stations (no landing with aliens close, the cave's aliens leaving a landed ship alone,
+## and the aliens inside going for crew bots as well as players). backlog2_check: no screenshots.
+func _run_backlog2(shots: bool) -> void:
+	Game.bot_count = 2
+	var m := await _start_solo_mission()
+	Game.bot_count = 0
+	if m == null:
+		print("[autotest] FAIL: mission not ready")
+		return
+	var ship := m.ship
+	var tough := ship.stats.duplicate()
+	tough["crew_hp"] = 99999.0
+	ship.stats = tough
+	ship.max_hull = 99999.0
+	ship.hull = 99999.0
+	await _bl2_hum(m)
+	await _bl2_reload(m, shots)
+	await _bl2_station(m, shots)
+	await _bl2_derelict(m, shots)
+	_status(m)
+
+
+## Engine hum levels around every ship (from the formula), and the live player with the listener
+## at the reactor, in a corner of the engine room and in the cockpit.
+func _bl2_hum(m: MissionLevel) -> void:
+	var ship := m.ship
+	var p := m.local_player
+	var hum := _stream_samples(Sfx.stream("engine_loop") as AudioStreamWAV)
+	var rms := _rms_db(hum)
+	var inner := ShipInteriors.get_layout("prospector")
+	var room: Array = inner["engine_room"]
+	var old_src := Vector3(0, 1.5, 9.0)
+	for spot: Array in [["right by the reactor", Vector3(0, 1.6, 8.7)], ["engine room corner", Vector3(-5.6, 1.6, 5.5)],
+			["engine room doorway", Vector3(0, 1.6, 5.3)], ["install hub", (inner["hub"] as Vector3) + Vector3(0.8, 1.6, 0)],
+			["mid-ship hall", Vector3(0, 1.6, 0.8)], ["gun window", Vector3(-4.75, 1.6, -2.5)], ["cockpit", Vector3(0, 1.6, -8.5)],
+			["pilot chase camera", Vector3(0, 12.0, 38.0)]]:
+		var ear: Vector3 = spot[1]
+		print("[autotest] hum %s: before %.1f .. %.1f dB, now %.1f .. %.1f dB (idle .. full throttle)" % [spot[0],
+			_loudness(hum, -22.0, 9.0, 0.0, ear.distance_to(old_src)), _loudness(hum, -16.0, 9.0, 0.0, ear.distance_to(old_src)),
+			rms + Mothership.engine_hum_db(room, ear, 0.0), rms + Mothership.engine_hum_db(room, ear, 1.0)])
+	for id: String in ShipInteriors.LAYOUTS:
+		var lay := ShipInteriors.get_layout(id)
+		var r: Array = lay["engine_room"]
+		var lo: Vector3 = r[0]
+		var hi: Vector3 = r[1]
+		var cores: Array = lay["cores"]
+		var seat: Vector3 = ((lay["spots"] as Dictionary).values()[0] as Dictionary)["seat"]
+		print("[autotest] hum in the %s (idle): engine room middle %.1f, corner %.1f, by a core %.1f, mid-ship %.1f, bridge %.1f dB" % [id,
+			rms + Mothership.engine_hum_db(r, (lo + hi) * 0.5, 0.0), rms + Mothership.engine_hum_db(r, lo + Vector3(0.3, 1.6, 0.3), 0.0),
+			rms + Mothership.engine_hum_db(r, (cores[0] as Vector3) + Vector3(0, 1.6, 0.8), 0.0),
+			rms + Mothership.engine_hum_db(r, (lay["spawns"] as Array)[0] + Vector3(0, 1.5, 0), 0.0),
+			rms + Mothership.engine_hum_db(r, seat + Vector3(0, 1.6, 0), 0.0)])
+	var cam := Camera3D.new()
+	m.add_child(cam)
+	cam.current = true
+	for ear: Vector3 in [Vector3(0, 1.6, 8.7), Vector3(-5.6, 1.6, 5.5), Vector3(0, 1.6, -8.5)]:
+		cam.global_position = ship.to_global(ear)
+		for i in 3:
+			await get_tree().physics_frame
+		var a := ship._engine_audio
+		print("[autotest] live hum, listener at %s: player %.1f dB at %s, attenuation %s, playing %s" % [ear, a.volume_db,
+			a.position.snapped(Vector3.ONE * 0.01), "off" if a.attenuation_model == AudioStreamPlayer3D.ATTENUATION_DISABLED else "ON", a.playing])
+	cam.queue_free()
+	p.camera.current = true
+
+
+## Reloading: every weapon fires its magazine dry, the trigger then only clicks (no automatic
+## reload), R reloads it in the weapon's time; switching to the toolkit cuts a reload short; a
+## weapon out of a crate comes loaded.
+func _bl2_reload(m: MissionLevel, shots: bool) -> void:
+	var ship := m.ship
+	var p := m.local_player
+	if p.station != "":
+		p.exit_station(true)
+	p.position = ship.spawn_points()[0]
+	p.look_yaw = 0.0
+	p.look_pitch = 0.0
+	p.tool = 0
+	p.reset_physics_interpolation()
+	await wait(0.4)
+	print("[autotest] start of the dive: %s with %d / %d shots, HUD '%s'" % [p.weapon, p.ammo, CrewWeapons.mag(p.weapon), m.hud._tool_label.text])
+	for w: String in CrewWeapons.ORDER:
+		p.set_weapon(w)
+		ship._crew_weapons[1] = w
+		await wait(0.5)
+		var full := p.ammo
+		var d := CrewWeapons.def(w)
+		var fired := 0
+		var last := p.ammo
+		var t0 := Time.get_ticks_msec()
+		Input.action_press("fire")
+		while p.ammo > 0 and Time.get_ticks_msec() - t0 < (full * float(d["cooldown"]) + 2.0) * 1000.0:
+			await get_tree().physics_frame
+			if p.ammo < last:
+				fired += last - p.ammo
+				last = p.ammo
+		var dry_s := (Time.get_ticks_msec() - t0) / 1000.0
+		# Keep the trigger held a moment longer: nothing fires and nothing reloads by itself.
+		await wait(0.8)
+		Input.action_release("fire")
+		var empty_label := m.hud._tool_label.text
+		if shots and w == "blaster":
+			await shot("b2_01_empty")
+		await _tap("fire")
+		var still := "ammo %d, reloading %s" % [p.ammo, p.reloading]
+		await _tap("reload")
+		var started := p.reloading
+		var lead := p.reload_progress() * CrewWeapons.reload_time(w)
+		var t1 := Time.get_ticks_msec()
+		var mid := ""
+		while p.reloading and Time.get_ticks_msec() - t1 < 6000:
+			await get_tree().physics_frame
+			if mid == "" and p.reload_progress() > 0.4:
+				mid = m.hud._tool_label.text
+				if shots and w == "blaster":
+					await shot("b2_02_reloading")
+		print("[autotest] %s: magazine %d, fired %d in %.2f s; held trigger + click on empty: %s, HUD '%s'; R -> reloading %s, done in %.2f s (nominal %.2f), mid-way '%s', now %d, HUD '%s'" % [
+			CrewWeapons.display_name(w), full, fired, dry_s, still, empty_label, started, (Time.get_ticks_msec() - t1) / 1000.0 + lead,
+			CrewWeapons.reload_time(w), mid, p.ammo, m.hud._tool_label.text])
+	# Interrupting a reload.
+	p.set_weapon("blaster")
+	ship._crew_weapons[1] = "blaster"
+	await wait(0.5)
+	Input.action_press("fire")
+	await wait(0.6)
+	Input.action_release("fire")
+	await wait(0.2)
+	var part := p.ammo
+	await _tap("reload")
+	await wait(0.3)
+	var was := p.reloading
+	await _tap("tool_toolkit")
+	await wait(0.2)
+	print("[autotest] reload cut short by the toolkit: was reloading %s, now %s, ammo %d (was %d), HUD '%s'" % [was, p.reloading, p.ammo, part, m.hud._tool_label.text])
+	await _tap("tool_blaster")
+	await _tap("reload")
+	await wait(CrewWeapons.reload_time("blaster") + 0.3)
+	print("[autotest] reloaded again: ammo %d" % p.ammo)
+	await _tap("reload")
+	print("[autotest] R with a full magazine: reloading %s" % p.reloading)
+	# A weapon out of a crate comes loaded.
+	Input.action_press("fire")
+	await wait(1.0)
+	Input.action_release("fire")
+	var before := p.ammo
+	ship.cargo_spawner.spawn({"name": "RL1", "item": "crew:rifle", "price": 0, "pos": Vector3(-2.5, 0.3, 7.5), "yaw": 0.0})
+	await wait(0.3)
+	var crate := ship.cargo_root.get_node("RL1") as SupplyCrate
+	await _stand_near(p, crate, Vector3(0, 0, 7.5), 0.05)
+	await _tap("equip")
+	await wait(0.4)
+	print("[autotest] swapped a blaster with %d shots left for %s: %d / %d" % [before, p.weapon, p.ammo, CrewWeapons.mag(p.weapon)])
+	await _tap("equip")
+	await wait(0.4)
+	print("[autotest] and back: %s %d / %d (the crate holds %s)" % [p.weapon, p.ammo, CrewWeapons.mag(p.weapon), crate.item])
+	crate.queue_free()
+
+
+## A free camera at station-local `from` looking at `to` (station transform `xf`).
+func _bl2_view(m: MissionLevel, xf: Transform3D, from: Vector3, to: Vector3) -> Camera3D:
+	var cam := Camera3D.new()
+	cam.far = 600.0
+	m.add_child(cam)
+	cam.global_position = xf * from
+	cam.look_at(xf * to)
+	cam.current = true
+	return cam
+
+
+## Land at waystation 1: the entrance bulkhead's beacons turn while it seals and stop once it is
+## shut; the buyback counter faces the middle of the shop and still buys crates; on liftoff the
+## exit bulkhead's beacons turn while it opens.
+func _bl2_station(m: MissionLevel, shots: bool) -> void:
+	var ship := m.ship
+	var p := m.local_player
+	var st := m.cave.station(1)
+	var xf: Transform3D = st["xform"]
+	ship.gate_k = 0
+	ship.gate_entry = 0.0
+	ship._exit_state = 3
+	await _put_ship(m, float(st["s_entry"]) - 80.0, [float(st["s"])])
+	var ws := _waystation(m, 1)
+	if ws == null:
+		print("[autotest] FAIL: waystation 1 not built")
+		return
+	print("[autotest] waystation %s: beacons entry %d, exit %d; turning before landing: %s / %s" % [st["name"],
+		(ws.doors["entry"]["beacons"] as Array).size(), (ws.doors["exit"]["beacons"] as Array).size(), ws.beacons_on("entry"), ws.beacons_on("exit")])
+	if shots:
+		var cam := _bl2_view(m, xf, Vector3(0, 16.0, StationBuilder.ENTRY_FACE + 40.0), Vector3(0, 16.0, StationBuilder.ENTRY_FACE))
+		await wait(0.4)
+		await shot("b2_03_entry_gate_outside")
+		cam.queue_free()
+		p.camera.current = true
+	ship.request_station.rpc_id(1, "pilot")
+	await wait(0.6)
+	await _tap("land")
+	var t0 := Time.get_ticks_msec()
+	while ship.landing != Mothership.Dock.LANDED and Time.get_ticks_msec() - t0 < 60000:
+		await wait(0.25)
+	# The entrance seals behind the ship.
+	var spin: Node3D = (ws.doors["entry"]["beacons"] as Array)[0]["spin"]
+	var on_samples := 0
+	var samples := 0
+	var turned := 0.0
+	var shot_taken := false
+	var t1 := Time.get_ticks_msec()
+	while ws.is_open("entry") > 0.001 and Time.get_ticks_msec() - t1 < 12000:
+		# physics_frame comes before the nodes' physics step: one full step lies between two of them.
+		await get_tree().physics_frame
+		var a0 := spin.rotation.y
+		await get_tree().physics_frame
+		turned += absf(angle_difference(a0, spin.rotation.y))
+		await wait(0.2)
+		samples += 1
+		if ws.beacons_on("entry"):
+			on_samples += 1
+		if shots and not shot_taken and ws.is_open("entry") < 0.6:
+			shot_taken = true
+			var cam := _bl2_view(m, xf, Vector3(-11.0, 17.0, 3.0), Vector3(-2.0, 17.0, StationBuilder.FACADE_Z))
+			await wait(0.15)
+			await shot("b2_04_entry_beacons")
+			cam.global_position = xf * Vector3(9.0, 21.0, 9.0)
+			cam.look_at(xf * Vector3(14.5, 24.0, StationBuilder.FACADE_Z))
+			await wait(0.1)
+			await shot("b2_05_beacon_close")
+			cam.queue_free()
+			p.camera.current = true
+	var during := "%d of %d samples, spinning at %.1f rad/s" % [on_samples, samples, turned / maxf(samples, 1) * Engine.physics_ticks_per_second]
+	await wait(Waystation.BEACON_LINGER + 0.5)
+	print("[autotest] entrance sealing (%.1f s): beacons turning %s; after it shut: turning %s, lamp glow %.2f" % [
+		(Time.get_ticks_msec() - t1) / 1000.0, during, ws.beacons_on("entry"), (ws.doors["entry"]["lamp"] as StandardMaterial3D).emission_energy_multiplier])
+	if shots:
+		var cam := _bl2_view(m, xf, Vector3(-13.0, 15.0, 2.0), Vector3(0, 14.0, StationBuilder.FACADE_Z))
+		await wait(0.3)
+		await shot("b2_06_entry_gate_hall")
+		cam.global_position = xf * Vector3(12.0, 16.0, -4.0)
+		cam.look_at(xf * Vector3(0, 15.0, StationBuilder.EXIT_INNER))
+		await wait(0.3)
+		await shot("b2_07_exit_gate_hall")
+		cam.queue_free()
+		p.camera.current = true
+	# The buyback counter.
+	p.exit_station(true)
+	await wait(0.3)
+	var floor_y := StationBuilder.DECK_Y - StationBuilder.LAND_HEIGHT + 0.05
+	var pad: Area3D = null
+	for c in ws.get_children():
+		if c is Area3D and c.has_meta("sell_pad"):
+			pad = c
+	var spot := StationBuilder.SELL_SPOT - Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	var to_mid := Vector3(-spot.x, 0, (StationBuilder.FACADE_Z + StationBuilder.ROOM_END) * 0.5 - StationBuilder.SELL_SPOT.z).normalized()
+	print("[autotest] buyback counter faces %s (station-local; the middle of the shop is %s, the door -z)" % [
+		(pad.basis * Vector3.FORWARD).snapped(Vector3.ONE * 0.01) if pad else Vector3.ZERO, to_mid.snapped(Vector3.ONE * 0.01)])
+	if shots:
+		p.position = Vector3(-1.5, floor_y, 26.5)
+		p.reset_physics_interpolation()
+		_face(p, spot + Vector3(0, 1.3, 0))
+		await wait(0.4)
+		await shot("b2_08_buyback_from_shop")
+		p.position = Vector3(0, floor_y, 21.3)
+		p.reset_physics_interpolation()
+		_face(p, spot + Vector3(0, 1.2, 0))
+		await wait(0.4)
+		await shot("b2_09_buyback_from_door")
+	ship.credits = 3000
+	var sale: SupplyCrate = null
+	for c in ship.cargo_root.get_children():
+		var crate := c as SupplyCrate
+		if crate and crate.price > 0 and crate.item != "hull_kit":
+			sale = crate
+			break
+	if sale:
+		var price := sale.price
+		print("[autotest] bought %s for %d: %s, picked up: %s" % [sale.item, price, await _buy(p, sale), await _pick_up(m, p, sale)])
+		p.position = Vector3(spot.x - 1.6, floor_y, spot.z)
+		p.velocity = Vector3.ZERO
+		p.reset_physics_interpolation()
+		await wait(0.3)
+		_face(p, spot + Vector3(0, 0.9, 0))
+		await wait(0.3)
+		var prompt := p.prompt
+		if shots:
+			await shot("b2_10_selling")
+		var c0 := ship.credits
+		await _tap("interact")
+		await wait(0.3)
+		print("[autotest] at the counter's front: prompt '%s'; sold %s, credits %d -> %d" % [prompt, not is_instance_valid(sale), c0, ship.credits])
+	else:
+		print("[autotest] FAIL: nothing to buy in the shop")
+	# Liftoff: the exit bulkhead opens with its beacons turning.
+	p.position = ship.spawn_points()[0]
+	p.reset_physics_interpolation()
+	await wait(0.3)
+	t0 = Time.get_ticks_msec()
+	while ship.crew_outside() != "" and Time.get_ticks_msec() - t0 < 20000:
+		await wait(0.3)
+	ship.request_station.rpc_id(1, "pilot")
+	await wait(0.4)
+	await _tap("land")
+	if ship.landing == Mothership.Dock.LANDED:
+		await _tap("land")
+	var exit_on := 0
+	var exit_samples := 0
+	var exit_shot := false
+	t0 = Time.get_ticks_msec()
+	while ship.landing != Mothership.Dock.FLYING and Time.get_ticks_msec() - t0 < 60000:
+		await wait(0.2)
+		if ws.is_open("exit") > 0.02 and ws.is_open("exit") < 0.98:
+			exit_samples += 1
+			if ws.beacons_on("exit"):
+				exit_on += 1
+			if shots and not exit_shot and ws.is_open("exit") > 0.3:
+				exit_shot = true
+				var cam := _bl2_view(m, xf, Vector3(13.0, 10.0, -6.0), Vector3(4.0, 17.0, StationBuilder.EXIT_INNER))
+				await wait(0.15)
+				await shot("b2_11_exit_beacons")
+				cam.queue_free()
+				p.camera.current = true
+	print("[autotest] liftoff: flying %s; exit bulkhead opening: beacons turning in %d of %d samples" % [ship.landing == Mothership.Dock.FLYING, exit_on, exit_samples])
+
+
+## Abandoned station: refused with an alien close; a critter latched on lets go when landing
+## starts and roams the tunnel, a spitter that turns up leaves the ship alone; the station's
+## aliens go for the bots as well as the host; bots reload as they fight.
+func _bl2_derelict(m: MissionLevel, shots: bool) -> void:
+	var ship := m.ship
+	var p := m.local_player
+	var k := -1
+	var d := {}
+	for kk in 12:
+		d = m.cave.derelict(kk)
+		if not d.is_empty():
+			k = kk
+			break
+	if k < 0:
+		print("[autotest] FAIL: no abandoned station in this cave")
+		return
+	ship.landing = Mothership.Dock.FLYING
+	ship.station_k = -1
+	ship.gate_k = k
+	ship.gate_entry = 0.0
+	ship._exit_state = 3
+	_clear_aliens()
+	if p.station != "":
+		p.exit_station(true)
+	await _put_ship(m, float(d["s"]) - 70.0, [float(d["s"])])
+	ship.request_station.rpc_id(1, "pilot")
+	await wait(0.6)
+	# An alien close by: no landing.
+	var near := m.spawn_alien(Alien.Kind.SPITTER, ship.global_position + ship.global_basis * Vector3(0, 6.0, -35.0), 50.0, 1.0) as Alien
+	await wait(0.6)
+	var info := m.hud._station_info.text.replace("\n", " | ")
+	var marker := m.hud._derelict_marker.text.replace("\n", " | ")
+	await _tap("land")
+	print("[autotest] alien %.0f m off: aliens_near %d, after L landing state %d (0 = flying); pilot info '%s'; marker '%s'" % [
+		near.global_position.distance_to(ship.global_position), ship.aliens_near(Mothership.DERELICT_CLEAR_RANGE), ship.landing, info, marker])
+	if shots:
+		await shot("b2_12_too_close")
+	near.queue_free()
+	# A critter latches onto the hull.
+	var hp0: Array = ship.hull_point(0)
+	var critter := m.spawn_alien(Alien.Kind.CRITTER, ship.to_global((hp0[0] as Vector3) + (hp0[1] as Vector3) * 4.0), 1000.0, 1.0) as Alien
+	var t0 := Time.get_ticks_msec()
+	while critter.attached < 0 and Time.get_ticks_msec() - t0 < 8000:
+		await wait(0.1)
+	await wait(0.3)
+	print("[autotest] critter latched: %s; aliens_near now %d; pilot info '%s'" % [critter.attached >= 0,
+		ship.aliens_near(Mothership.DERELICT_CLEAR_RANGE), m.hud._station_info.text.replace("\n", " | ")])
+	# Other aliens about (from the cave) would block the landing: only the latched critter stays.
+	for a in get_tree().get_nodes_in_group("aliens"):
+		if a != critter:
+			a.queue_free()
+	await wait(0.2)
+	var hull0 := ship.hull
+	await _tap("land")
+	await wait(0.6)
+	print("[autotest] landing at %s: state %d (1 = approach); critter attached %d, roaming %s, hull claims %s" % [d["name"], ship.landing,
+		critter.attached, critter._roaming, ship._hull_claims])
+	# A spitter turns up while the ship is coming in.
+	var spitter := m.spawn_alien(Alien.Kind.SPITTER, ship.global_position + ship.global_basis * Vector3(10.0, 8.0, -24.0), 1000.0, 1.0) as Alien
+	var spits := 0
+	var relatched := false
+	var far_crit := 0.0
+	t0 = Time.get_ticks_msec()
+	while Time.get_ticks_msec() - t0 < 70000:
+		await wait(0.25)
+		for s: Dictionary in m.projectiles._shots:
+			if str(s["kind"]) == "spit":
+				spits += 1
+		if is_instance_valid(critter):
+			relatched = relatched or critter.attached >= 0
+			far_crit = maxf(far_crit, critter.global_position.distance_to(ship.global_position))
+		if ship.landing == Mothership.Dock.LANDED and Time.get_ticks_msec() - t0 > 8000:
+			break
+	await wait(5.0)
+	var crit_home := critter.home.distance_to(m.cave.center3(-critter.home.z)) if is_instance_valid(critter) else -1.0
+	print("[autotest] landed %s; while landing and 5 s down: spit samples %d, critter re-latched %s, critter up to %.0f m from the ship (now %.0f m; its home %.1f m from the tunnel's centre line), spitter %.0f m off, hull %.0f -> %.0f" % [
+		ship.landing == Mothership.Dock.LANDED, spits, relatched, far_crit,
+		critter.global_position.distance_to(ship.global_position) if is_instance_valid(critter) else -1.0, crit_home,
+		spitter.global_position.distance_to(ship.global_position) if is_instance_valid(spitter) else -1.0, hull0, ship.hull])
+	if shots:
+		var dxf: Transform3D = d["xform"]
+		var cam := _bl2_view(m, dxf, Vector3(16.0, 12.0, -float(d["depth"]) + 8.0), Vector3(0, 4.0, 0))
+		await wait(0.3)
+		await shot("b2_13_landed_aliens_roam")
+		cam.queue_free()
+		p.camera.current = true
+	# The station's aliens against the host and the bots: walk into the first room, let the bots
+	# catch up, then set a pack loose between them.
+	for c in ship.boarder_root.get_children():
+		c.queue_free()
+	if p.station != "":
+		p.exit_station(true)
+	await wait(0.3)
+	var rooms: Array = d["layout"]["rooms"]
+	var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	var floor_y := StationBuilder.DECK_Y - StationBuilder.LAND_HEIGHT + 0.05
+	var r0: Dictionary = rooms[0]
+	var c0: Vector2 = r0["c"]
+	var mid := Vector3(c0.x, floor_y, c0.y)
+	var entry := DerelictBuilder.door_inside(r0, (r0["doors"] as Array)[0]) - lift
+	p.position = Vector3(entry.x, floor_y, entry.z)
+	p.reset_physics_interpolation()
+	await wait(0.4)
+	p.position = mid
+	p.reset_physics_interpolation()
+	var bots: Array[CrewMember] = []
+	for c in ship.crew_root.get_children():
+		if (c as CrewMember).bot:
+			bots.append(c)
+	t0 = Time.get_ticks_msec()
+	while Time.get_ticks_msec() - t0 < 30000:
+		await wait(0.5)
+		var ok := true
+		for b in bots:
+			ok = ok and b.position.distance_to(p.position) < 7.0
+		if ok:
+			break
+	await wait(1.0)
+	var where := PackedStringArray()
+	for b in bots:
+		where.append("%s %.1f m from the host" % [b.display_name, b.position.distance_to(p.position)])
+	print("[autotest] in room 0 (%s): %s" % [r0["name"], ", ".join(where)])
+	var hp := {}
+	var reloads := {}
+	var was_reloading := {}
+	for c in ship.crew_root.get_children():
+		hp[c.name] = (c as CrewMember).hp
+		reloads[c.name] = 0
+		was_reloading[c.name] = false
+	# The pack comes at the host from the far side of the room: the host is the nearest one to
+	# all of them, the bots (who followed the host in) are further off.
+	var pack: Array[Boarder] = []
+	var away := (mid - Vector3(entry.x, floor_y, entry.z)).normalized()
+	var spawn_at := mid + away * 2.8 + Vector3(0, -0.05, 0)
+	var kinds := ["skitter", "skitter", "skitter", "skitter", "boarder", "needler"]
+	for i in kinds.size():
+		ship._boarder_seq += 1
+		var b := ship.boarder_spawner.spawn({"name": "Q%d" % ship._boarder_seq, "kind": kinds[i],
+			"pos": spawn_at + away.cross(Vector3.UP) * ((i % 3 - 1) * 0.9) + away * floorf(i / 3.0) * 0.9, "hp": 4000.0, "max_hp": 4000.0, "dmg": 0.4, "outside": true}) as Boarder
+		pack.append(b)
+	var targets := {}
+	var fight_shot := false
+	t0 = Time.get_ticks_msec()
+	while Time.get_ticks_msec() - t0 < 16000:
+		await wait(0.25)
+		for b in pack:
+			if not is_instance_valid(b) or b._target_id == 0:
+				continue
+			var who := instance_from_id(b._target_id) as CrewMember
+			if who:
+				var key := "%s -> %s" % [b.kind, "host" if not who.bot else "bot"]
+				targets[key] = int(targets.get(key, 0)) + 1
+		for c in ship.crew_root.get_children():
+			var cm := c as CrewMember
+			if cm.reloading and not bool(was_reloading[cm.name]):
+				reloads[cm.name] = int(reloads[cm.name]) + 1
+			was_reloading[cm.name] = cm.reloading
+		if shots and not fight_shot and Time.get_ticks_msec() - t0 > 5000:
+			fight_shot = true
+			var cam := Camera3D.new()
+			m.add_child(cam)
+			cam.global_position = ship.to_global(mid + Vector3(-3.0, 2.6, -3.0))
+			cam.look_at(ship.to_global(mid + Vector3(0, 0.8, 0)), ship.global_basis.y)
+			cam.current = true
+			await wait(0.1)
+			await shot("b2_14_pack_vs_bots")
+			cam.queue_free()
+			p.camera.current = true
+	var lost := PackedStringArray()
+	for c in ship.crew_root.get_children():
+		var cm := c as CrewMember
+		lost.append("%s%s -%.0f hp, %d reloads (ammo %d)" % [cm.display_name, " [bot]" if cm.bot else "", float(hp[cm.name]) - cm.hp,
+			int(reloads[cm.name]), cm.ammo])
+	print("[autotest] pack of %d vs host + %d bots for 16 s: target samples %s" % [pack.size(), bots.size(), targets])
+	print("[autotest] damage taken: %s" % ", ".join(lost))
+	for b in pack:
+		if is_instance_valid(b):
+			b.queue_free()
+	# Back aboard and away: the roaming critter comes for the ship again once it is out.
+	p.position = ship.spawn_points()[0]
+	p.reset_physics_interpolation()
+	t0 = Time.get_ticks_msec()
+	while ship.crew_outside() != "" and Time.get_ticks_msec() - t0 < 30000:
+		await wait(0.5)
+	ship.request_station.rpc_id(1, "pilot")
+	await wait(0.4)
+	await _tap("land")
+	t0 = Time.get_ticks_msec()
+	while ship.landing != Mothership.Dock.FLYING and Time.get_ticks_msec() - t0 < 40000:
+		await wait(0.5)
+	var back := false
+	t0 = Time.get_ticks_msec()
+	while Time.get_ticks_msec() - t0 < 10000 and is_instance_valid(critter):
+		await wait(0.25)
+		if critter.attached >= 0 or critter._claim >= 0:
+			back = true
+			break
+	print("[autotest] flying again %s: the critter %s" % [ship.landing == Mothership.Dock.FLYING,
+		"came back for the hull" if back else ("is gone" if not is_instance_valid(critter) else "is still roaming (%.0f m off)" % critter.global_position.distance_to(ship.global_position))])

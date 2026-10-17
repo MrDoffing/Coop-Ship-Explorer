@@ -43,8 +43,8 @@ const PLAYER_COLORS: Array[Color] = [
 ## homebase with research points and then turn up in waystation shops during a dive.
 const GUNS := {
 	"pulse": {"name": "Pulse Cannon", "short": "Rapid energy bolts", "desc": "Rapid energy bolts. A reliable all-rounder, fitted to every gun at launch.", "rp": 0},
-	"flak": {"name": "Scatter Cannon", "short": "Short-range pellet bursts", "desc": "Short-range pellet bursts that shred swarms.", "rp": 60},
-	"plasma": {"name": "Plasma Mortar", "short": "Exploding plasma orbs", "desc": "Slow orbs that explode, damaging everything nearby.", "rp": 100},
+	"flak": {"name": "Flak Cannon", "short": "Rapid close-range flak bursts", "desc": "Rapid bursts of flak that shred anything close to the ship. Useless at long range.", "rp": 60},
+	"plasma": {"name": "Plasma Mortar", "short": "Exploding plasma orbs", "desc": "Slow orbs that burst in a huge blast, damaging everything in it.", "rp": 100},
 	"rail": {"name": "Rail Lance", "short": "Piercing hitscan slug", "desc": "Piercing hitscan slug. Slow but devastating.", "rp": 140},
 }
 const GUN_ORDER := ["pulse", "flak", "plasma", "rail"]
@@ -432,11 +432,13 @@ func ship_stats(ship_id := "") -> Dictionary:
 		"collateral": 0.35,
 		"turret_damage": 1.0,
 		"turret_rate": 1.0,
-		"mining_power": 24.0 * float(t["mining"]),
+		# Mining lasers deal Mothership.LASER_ALIEN_SHARE of this to aliens and egg sacs.
+		"mining_power": 40.0 * float(t["mining"]),
 		"mining_vs_alien": float(t["laser_vs_alien"]),
 		"overcharge_step": 0.5 * float(t["laser_vs_alien"]),
-		"mining_range": 48.0,
-		"tractor_range": 42.0,
+		"mining_range": 60.0,
+		# Measured from the tip of the mining laser, so it reaches everything the laser does.
+		"tractor_range": 64.0,
 		"scout_hp": 70.0 * float(t["scout_hp"]),
 		"scout_damage": 7.0 * float(t["scout_damage"]),
 		"scout_cargo": 40.0,
@@ -502,6 +504,8 @@ func _setup_input() -> void:
 	_bind_keys("emergency", [KEY_B])
 	_bind_keys("land", [KEY_L])
 	_bind_keys("drop", [KEY_G])
+	_bind_keys("equip", [KEY_F])
+	_bind_keys("reload", [KEY_R])
 	_bind_keys("crew_list", [KEY_TAB])
 	_bind_keys("pause", [KEY_ESCAPE])
 	_bind_keys("fullscreen", [KEY_F11])

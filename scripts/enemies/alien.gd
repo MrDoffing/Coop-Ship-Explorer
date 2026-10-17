@@ -6,6 +6,8 @@ extends Node3D
 ## CRITTER latches onto the mothership's hull and scratches it; turrets can't reach it there, so
 ## the scout has to shoot it off. INFILTRATOR latches onto a roof hatch and, once the shield is
 ## down, cuts through and drops into the ship as a boarder the crew must kill with blasters.
+## While the ship is down at an abandoned station they leave it alone: latched aliens let go, and
+## those that were after it roam the tunnel by the hangar until it comes back out.
 
 enum Kind { SPITTER, CRITTER, INFILTRATOR }
 
@@ -98,6 +100,8 @@ var _scratch := 0.0
 var _breach := 0.0
 var _orbit := 1.0
 var _range := 24.0
+## True while leaving the ship alone (it is down at an abandoned station).
+var _roaming := false
 
 
 static func organic(base: Color, glow: Color, pulse := 2.0, veins := 6.0) -> ShaderMaterial:
@@ -311,6 +315,10 @@ func _attach_point(ship: Mothership) -> Vector3:
 
 func _think(delta: float, mission: MissionLevel) -> void:
 	var ship := mission.ship
+	if ship.at_derelict():
+		_roam(delta, mission)
+		return
+	_roaming = false
 	match kind:
 		Kind.SPITTER:
 			_think_spitter(delta, mission)
@@ -433,13 +441,36 @@ func _think_latcher(delta: float, mission: MissionLevel, claim: Callable) -> voi
 	_steer(delta, desired, 18.0, true, mission)
 
 
+## Let go of the hull point or hatch this alien is latched onto (or was flying to).
 func _detach(ship: Mothership) -> void:
-	if kind == Kind.CRITTER:
-		ship.release_hull_point(attached, get_instance_id())
-	else:
-		ship.release_hatch(attached, get_instance_id())
+	var idx := attached if attached >= 0 else _claim
+	if idx >= 0:
+		if kind == Kind.CRITTER:
+			ship.release_hull_point(idx, get_instance_id())
+		else:
+			ship.release_hatch(idx, get_instance_id())
 	attached = -1
 	_claim = -1
+
+
+## The ship is down at an abandoned station: leave it alone. Latched aliens push off the hull, and
+## every alien that was after the ship takes the tunnel beside the hangar as its new home and
+## wanders about there (no spitting) until the ship is back out in the tunnel.
+func _roam(delta: float, mission: MissionLevel) -> void:
+	var ship := mission.ship
+	var speed := float(KIND_STATS[kind]["speed"])
+	if not _roaming:
+		_roaming = true
+		_breach = 0.0
+		_scratch = 0.0
+		var engaged := attached >= 0 or _claim >= 0 or ship.global_position.distance_to(global_position) < AGGRO_RANGE
+		if attached >= 0:
+			net_vel = (global_position - ship.to_global(ship.shield_center())).normalized() * speed
+		_detach(ship)
+		if engaged:
+			home = mission.cave.center3(-global_position.z) + Vector3(randf_range(-6.0, 6.0), randf_range(-3.0, 3.0), 0.0)
+			_wander_t = 0.0
+	_steer(delta, _wander_velocity(delta, speed * 0.3), 18.0, true, mission)
 
 
 func _wander_velocity(delta: float, speed: float) -> Vector3:
@@ -488,13 +519,8 @@ func take_damage(amount: float, info: Dictionary) -> void:
 
 func _die(_source: String) -> void:
 	var mission := Game.mission as MissionLevel
-	if attached >= 0 and mission and mission.ship:
+	if mission and mission.ship:
 		_detach(mission.ship)
-	elif _claim >= 0 and mission and mission.ship:
-		if kind == Kind.CRITTER:
-			mission.ship.release_hull_point(_claim, get_instance_id())
-		elif kind == Kind.INFILTRATOR:
-			mission.ship.release_hatch(_claim, get_instance_id())
 	if mission:
 		mission.kills += 1
 		mission.fx_event.rpc("alien_die", global_position, int(kind))

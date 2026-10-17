@@ -1,6 +1,6 @@
 class_name Projectiles
 extends Node3D
-## All bolts, orbs and alien spit in a mission.
+## All bolts, orbs, alien spit and needles in a mission.
 ##
 ## The server simulates authoritative projectiles and applies damage. Every shot is announced to
 ## clients, which fly cosmetic copies that stop on the same geometry but never deal damage.
@@ -8,9 +8,10 @@ extends Node3D
 const KINDS := {
 	"pulse": {"color": Color(0.35, 0.85, 1.0), "len": 2.4, "width": 0.13, "life": 1.6},
 	"flak": {"color": Color(1.0, 0.75, 0.3), "len": 1.0, "width": 0.1, "life": 0.5},
-	"plasma": {"color": Color(0.75, 0.4, 1.0), "orb": 0.55, "life": 3.0, "splash": 6.0},
+	"plasma": {"color": Color(0.75, 0.4, 1.0), "orb": 0.75, "life": 3.0, "splash": 16.0},
 	"scout": {"color": Color(0.45, 1.0, 0.45), "len": 1.6, "width": 0.09, "life": 1.3},
 	"spit": {"color": Color(0.55, 1.0, 0.15), "orb": 0.42, "life": 5.0},
+	"needle": {"color": Color(1.0, 0.35, 0.85), "len": 0.8, "width": 0.05, "life": 2.0},
 }
 
 ## Ship weapons hit enemies, minerals and rock (Game.LAYER_CAVE | LAYER_ENEMY | LAYER_MINERAL).
@@ -18,6 +19,8 @@ const KINDS := {
 const MASK_SHIP := 1 | 16 | 128
 const LAYER_ATTACHED := 512
 const MASK_SCOUT := MASK_SHIP | LAYER_ATTACHED
+## Needlers' needles hit crew members (their bodies) and stop on walls, rock and the ship.
+const MASK_NEEDLE := 1 | 2 | 4 | 8 | 1024
 
 var _shots: Array[Dictionary] = []
 var _mats: Dictionary = {}
@@ -105,6 +108,15 @@ func _physics_process(delta: float) -> void:
 		var done := false
 		if kind == "spit":
 			done = _spit_step(s, from, to, ship, scouts, space)
+		elif kind == "needle":
+			var nq := PhysicsRayQueryParameters3D.create(from, to, MASK_NEEDLE)
+			var nhit := space.intersect_ray(nq)
+			if not nhit.is_empty():
+				done = true
+				var crew := nhit["collider"] as CrewMember
+				if crew and s["auth"]:
+					crew.hurt(float(s["dmg"]))
+				Fx.sparks(nhit["position"], KINDS["needle"]["color"], 6 if crew == null else 10, 4.0, 0.03, 0.3)
 		else:
 			var q := PhysicsRayQueryParameters3D.create(from, to, MASK_SCOUT if kind == "scout" else MASK_SHIP)
 			q.collide_with_areas = true
@@ -151,10 +163,12 @@ func _impact(s: Dictionary, pos: Vector3, collider: Object) -> void:
 	var kind: String = s["kind"]
 	var color: Color = KINDS[kind]["color"]
 	if kind == "plasma":
-		Fx.explosion(pos, 3.5, color)
-		Sfx.play("small_explosion", pos, -6.0)
+		var splash := float(KINDS["plasma"]["splash"])
+		Fx.explosion(pos, splash * 0.55, color)
+		Fx.shockwave(pos, splash, color)
+		Sfx.play("explosion", pos, -4.0, 1.4)
 		if s["auth"]:
-			_splash(pos, float(KINDS["plasma"]["splash"]), float(s["dmg"]))
+			_splash(pos, splash, float(s["dmg"]))
 		return
 	Fx.sparks(pos, color, 8, 7.0)
 	if s["auth"] and collider is Area3D and collider.has_meta("target"):
@@ -176,7 +190,7 @@ func _splash(pos: Vector3, radius: float, dmg: float) -> void:
 	q.collision_mask = Game.LAYER_ENEMY
 	q.collide_with_areas = true
 	q.collide_with_bodies = false
-	for r in get_world_3d().direct_space_state.intersect_shape(q, 24):
+	for r in get_world_3d().direct_space_state.intersect_shape(q, 64):
 		var col: Object = r["collider"]
 		if col is Area3D and col.has_meta("target"):
 			var tpos: Vector3 = (col as Node3D).global_position

@@ -3,14 +3,14 @@ extends Node3D
 ## A crystal cluster growing out of the cave wall.
 ##
 ## The mining laser (or the scout's guns, for fuel crystals) wears it down; every quarter of its
-## health breaks off chunks that float away and get pulled in by the mothership's tractor field
-## (fuel chunks are collected by the scout instead).
+## health breaks off chunks that float away and get pulled in to the tip of the mothership's mining
+## laser (fuel chunks are collected by the scout instead).
 
 const TYPES := {
-	"ferrite": {"name": "Ferrite", "color": Color(0.95, 0.55, 0.3), "value": 6, "hp": 60.0, "chunks": 4},
-	"cobalt": {"name": "Cobaltite", "color": Color(0.3, 0.6, 1.0), "value": 14, "hp": 85.0, "chunks": 4},
-	"aurium": {"name": "Aurium", "color": Color(1.0, 0.82, 0.25), "value": 28, "hp": 110.0, "chunks": 5},
-	"voidstone": {"name": "Voidstone", "color": Color(0.8, 0.35, 1.0), "value": 60, "hp": 150.0, "chunks": 5},
+	"ferrite": {"name": "Ferrite", "color": Color(0.95, 0.55, 0.3), "value": 2, "hp": 60.0, "chunks": 4},
+	"cobalt": {"name": "Cobaltite", "color": Color(0.3, 0.6, 1.0), "value": 4, "hp": 85.0, "chunks": 4},
+	"aurium": {"name": "Aurium", "color": Color(1.0, 0.82, 0.25), "value": 6, "hp": 110.0, "chunks": 5},
+	"voidstone": {"name": "Voidstone", "color": Color(0.8, 0.35, 1.0), "value": 9, "hp": 150.0, "chunks": 5},
 	"fuel": {"name": "Fuel crystal", "color": Color(1.0, 0.38, 0.12), "value": 0, "hp": 40.0, "chunks": 5, "fuel": 7.0},
 }
 
@@ -158,7 +158,7 @@ func _spawn_chunk() -> void:
 				best = d
 				collector = sc.global_position
 	if collector == Vector3.ZERO and mission.ship:
-		collector = mission.ship.collector_global()
+		collector = mission.ship.collector_global(global_position)
 	var toward := (collector - global_position).normalized() if collector != Vector3.ZERO else Vector3.ZERO
 	var vel := (up + jitter + toward * 1.2).normalized() * randf_range(4.0, 7.0)
 	Game.mission.spawn_pickup(kind, global_position + up * (1.2 * size) + jitter, vel, int(t["value"]), float(t.get("fuel", 0.0)))

@@ -3,17 +3,23 @@ extends Node3D
 ## A waystation built into the tunnel (see StationBuilder). It animates its two bulkhead doors on
 ## every peer from the mothership's replicated gate state: stations ahead of the ship have their
 ## entrance open and exit sealed, the station the ship last landed at follows `gate_entry` /
-## `gate_exit`, and stations behind it stay sealed for good.
+## `gate_exit`, and stations behind it stay sealed for good. While a door opens or closes, the
+## yellow warning beacons over its gate turn.
 
 ## How fast (open fraction per second) clients move a door towards the replicated gate state; a
 ## little faster than the server's own rate (Mothership.GATE_RATE) so they keep up.
 const FOLLOW_RATE := 0.35
+## Warning beacons: how fast they turn (rad/s), and for how long they keep turning once a door has
+## stopped.
+const BEACON_SPIN := 8.5
+const BEACON_LINGER := 1.0
 
 var k := 0
-## "entry" / "exit" -> {"panels", "lights", "audio", "pos"} (built by StationBuilder).
+## "entry" / "exit" -> {"panels", "lights", "audio", "pos", "beacons", "lamp"} (built by StationBuilder).
 var doors: Dictionary = {}
 var _open: Dictionary = {}
 var _moving: Dictionary = {}
+var _beacon_t: Dictionary = {}
 
 
 func _physics_process(delta: float) -> void:
@@ -40,6 +46,7 @@ func _physics_process(delta: float) -> void:
 				audio.stop()
 				Sfx.play("gate_clang", to_global(d["pos"]), 4.0)
 		_update_lights(id, next, moving)
+		_update_beacons(id, moving and not first, delta)
 
 
 ## Open fraction (0 sealed .. 1 open) each door should have for the ship's progress.
@@ -72,3 +79,25 @@ func _update_lights(id: String, open: float, moving: bool) -> void:
 		col = Color(0.2, 1.0, 0.35)
 	for mat: StandardMaterial3D in doors[id]["lights"]:
 		mat.emission = col
+
+
+## The door's warning beacons turn (lamps lit, spot lights and beams on) while it moves and a
+## moment after; otherwise they stand dark and still.
+func _update_beacons(id: String, moving: bool, delta: float) -> void:
+	var t := BEACON_LINGER if moving else maxf(0.0, float(_beacon_t.get(id, 0.0)) - delta)
+	_beacon_t[id] = t
+	var on := t > 0.0
+	var d: Dictionary = doors[id]
+	for bc: Dictionary in d["beacons"]:
+		var beam: Node3D = bc["beam"]
+		if beam.visible != on:
+			beam.visible = on
+		if on:
+			var spin: Node3D = bc["spin"]
+			spin.rotation.y = wrapf(spin.rotation.y + BEACON_SPIN * delta, -PI, PI)
+	(d["lamp"] as StandardMaterial3D).emission_energy_multiplier = StationBuilder.BEACON_ACTIVE_GLOW if on else StationBuilder.BEACON_IDLE_GLOW
+
+
+## True while the warning beacons of door `id` are turning.
+func beacons_on(id: String) -> bool:
+	return float(_beacon_t.get(id, 0.0)) > 0.0

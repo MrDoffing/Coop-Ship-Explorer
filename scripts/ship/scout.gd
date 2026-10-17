@@ -316,7 +316,7 @@ func _fly(delta: float) -> void:
 		var hit := get_world_3d().direct_space_state.intersect_ray(ray)
 		var focus: Vector3 = hit["position"] if not hit.is_empty() else global_position - aim.z * 120.0
 		var muzzle := to_global(Vector3(_side * 1.1, -0.18 if style == "standard" else -0.24, -1.3))
-		var dir := (focus - muzzle).normalized()
+		var dir := Mothership.scatter(focus - muzzle, deg_to_rad(Mothership.SCOUT_SPREAD))
 		Game.mission.projectiles.fire("scout", muzzle, dir * 170.0 + velocity, _stat("scout_damage"))
 
 

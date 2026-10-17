@@ -9,7 +9,12 @@ extends CharacterBody3D
 ##
 ## While the ship is docked at a waystation the crew can walk down the cargo ramp into the shop
 ## (ship-local space still works: the ship is parked), buy supplies with the dive's credits and
-## carry the crates aboard.
+## carry the crates aboard. At an abandoned station they explore its rooms the same way.
+##
+## Slot 1 holds the crew member's hand weapon (CrewWeapons; the Blaster at the start of a dive),
+## slot 2 the toolkit. Looking at a crate with another hand weapon, F swaps the two. The weapon
+## fires from a magazine: once it runs dry the trigger only clicks until R reloads it (switching to
+## the toolkit, taking a station or picking up a crate cuts a reload short).
 ##
 ## Crew bots are CrewMembers with `bot = true`: the server owns them and a CrewBot brain drives
 ## them (repairs and side guns); everyone else sees them like any other crew member.
@@ -22,8 +27,6 @@ const GRAVITY := 14.0
 const EYE := 1.62
 const REACH := 2.7
 const RESPAWN_TIME := 8.0
-const BLASTER_COOLDOWN := 0.24
-const MUZZLE := Vector3(0.24, -0.17, -0.78)
 
 var peer_id := 1
 var display_name := ""
@@ -39,6 +42,9 @@ var look_yaw := 0.0
 var look_pitch := 0.0
 var station := ""
 var tool := 0
+## Hand weapon (CrewWeapons id), and whether it is being reloaded.
+var weapon := CrewWeapons.DEFAULT
+var reloading := false
 var hp := 100.0
 var max_hp := 100.0
 var alive := true
@@ -53,16 +59,24 @@ var prompt := ""
 var carrying: SupplyCrate
 var respawn_left := 0.0
 var hurt_flash := 0.0
+## Shots left in the hand weapon's magazine (owner only; the server's for bots).
+var ammo := 0
 
 var _body: Node3D
 var _head: Node3D
 var _held: Array[Node3D] = []
 var _view: Node3D
 var _view_tools: Array[Node3D] = []
+## The hand weapon the models currently show.
+var _shown_weapon := ""
 var _name_label: Label3D
 var _cam_light: OmniLight3D
 var _recall_hold := 0.0
 var _fire_cd := 0.0
+var _reload_left := 0.0
+var _was_reloading := false
+## How far the held weapon is tipped for a reload (0..1, third person).
+var _reload_pose := 0.0
 var _repair_acc := 0.0
 var _repair_sys := ""
 var _repair_send := 0.0
@@ -74,10 +88,14 @@ var _chase_pitch := -0.22
 var _bob := 0.0
 var _recoil := 0.0
 var _was_on_floor := true
+## Flashlight: on while out exploring an abandoned station.
+var _flashlight: SpotLight3D
+var _lamp_mat: StandardMaterial3D
+var _flash_on := false
 
 
 func _init() -> void:
-	NetUtil.add_sync(self, ["net_pos", "look_yaw", "look_pitch"], ["station", "tool", "hp", "max_hp", "alive"], 1.0 / 30.0)
+	NetUtil.add_sync(self, ["net_pos", "look_yaw", "look_pitch"], ["station", "tool", "weapon", "reloading", "hp", "max_hp", "alive"], 1.0 / 30.0)
 
 
 func setup(data: Dictionary) -> void:
@@ -107,6 +125,7 @@ func _ready() -> void:
 	shape.shape = cap
 	shape.position = Vector3(0, 0.9, 0)
 	add_child(shape)
+	ammo = CrewWeapons.mag(weapon)
 	_build_body()
 	if bot and multiplayer.is_server():
 		brain = CrewBot.new(self)
@@ -126,6 +145,7 @@ func _ready() -> void:
 		_cam_light.light_color = Color(0.85, 0.9, 1.0)
 		camera.add_child(_cam_light)
 		_build_viewmodel()
+		_flashlight = _make_flashlight(camera, Vector3(0.18, -0.1, 0.0), true)
 		_body.visible = false
 		look_yaw = rotation.y
 		if Game.mission:
@@ -142,6 +162,7 @@ func _ready() -> void:
 		_name_label.position = Vector3(0, 2.2, 0)
 		_name_label.no_depth_test = true
 		add_child(_name_label)
+		_flashlight = _make_flashlight(_head, Vector3(0.14, 0.06, -0.2), false)
 
 
 func _exit_tree() -> void:
@@ -170,46 +191,60 @@ func _build_body() -> void:
 		# Bots wear an antenna so they are easy to tell apart.
 		Models.cylinder(_head, Vector3(0.1, 0.32, 0.05), 0.012, 0.3, Models.mat(Color(0.6, 0.6, 0.62), 0.7, 0.3))
 		Models.sphere(_head, Vector3(0.1, 0.48, 0.05), 0.04, Models.emissive(Color(1.0, 0.3, 0.2), 4.0))
-	# Held tools (third person).
+	# Held tools (third person): the hand weapon (built by _show_weapon) and the toolkit.
 	var blaster := Node3D.new()
-	blaster.position = Vector3(0.3, 1.15, -0.5)
+	blaster.position = CrewWeapons.HELD_POS
 	_body.add_child(blaster)
-	Models.box(blaster, Vector3.ZERO, Vector3(0.1, 0.14, 0.5), dark)
-	Models.box(blaster, Vector3(0, 0.08, -0.05), Vector3(0.06, 0.04, 0.3), Models.emissive(Color(1.0, 0.5, 0.2), 2.0))
 	var toolkit := Node3D.new()
 	toolkit.position = Vector3(0.3, 1.1, -0.45)
 	_body.add_child(toolkit)
 	Models.box(toolkit, Vector3.ZERO, Vector3(0.08, 0.08, 0.45), Models.mat(Color(0.7, 0.7, 0.72), 0.7, 0.3))
 	Models.box(toolkit, Vector3(0, 0, -0.25), Vector3(0.2, 0.08, 0.1), Models.mat(Color(0.95, 0.75, 0.15), 0.4, 0.5))
 	_held = [blaster, toolkit]
+	# Helmet lamp (it lights up with the flashlight).
+	_lamp_mat = StandardMaterial3D.new()
+	_lamp_mat.albedo_color = Color(0.2, 0.2, 0.2)
+	_lamp_mat.emission_enabled = true
+	_lamp_mat.emission = Color(1.0, 0.95, 0.8)
+	_lamp_mat.emission_energy_multiplier = 0.0
+	Models.cylinder(_head, Vector3(0.14, 0.06, -0.14), 0.05, 0.1, _lamp_mat, Vector3(90, 0, 0))
 
 
 func _build_viewmodel() -> void:
 	_view = Node3D.new()
 	camera.add_child(_view)
-	var dark := Models.mat(Color(0.14, 0.15, 0.17), 0.5, 0.45)
 	var blaster := Node3D.new()
+	blaster.position = CrewWeapons.VIEW_POS
 	_view.add_child(blaster)
-	Models.box(blaster, Vector3(0.24, -0.2, -0.45), Vector3(0.09, 0.12, 0.42), dark)
-	Models.box(blaster, Vector3(0.24, -0.27, -0.33), Vector3(0.07, 0.16, 0.08), dark, Vector3(-15, 0, 0))
-	Models.cylinder(blaster, Vector3(0.24, -0.17, -0.7), 0.025, 0.18, Models.mat(Color(0.3, 0.3, 0.32), 0.7, 0.3), Vector3(90, 0, 0))
-	Models.box(blaster, Vector3(0.24, -0.137, -0.45), Vector3(0.025, 0.015, 0.26), Models.emissive(Color(1.0, 0.5, 0.2), 1.0))
-	Models.box(blaster, Vector3(0.196, -0.17, -0.5), Vector3(0.006, 0.02, 0.12), Models.emissive(color, 0.8))
 	var toolkit := Node3D.new()
 	_view.add_child(toolkit)
 	Models.box(toolkit, Vector3(0.26, -0.22, -0.42), Vector3(0.06, 0.06, 0.4), Models.mat(Color(0.7, 0.7, 0.72), 0.7, 0.3))
 	Models.box(toolkit, Vector3(0.26, -0.22, -0.66), Vector3(0.18, 0.07, 0.09), Models.mat(Color(0.95, 0.75, 0.15), 0.4, 0.5))
 	Models.box(toolkit, Vector3(0.26, -0.22, -0.72), Vector3(0.05, 0.04, 0.06), Models.emissive(Color(0.4, 0.9, 1.0), 3.0))
 	_view_tools = [blaster, toolkit]
-	for n in [blaster, toolkit]:
-		for c in n.get_children():
-			(c as GeometryInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	for c in toolkit.get_children():
+		(c as GeometryInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+
+## Rebuild the hand weapon models (first person and third person) when the weapon changes.
+func _show_weapon() -> void:
+	if weapon == _shown_weapon:
+		return
+	_shown_weapon = weapon
+	for i in 2:
+		var slot: Node3D = _held[0] if i == 0 else (_view_tools[0] if _view_tools.size() > 0 else null)
+		if slot == null:
+			continue
+		for c in slot.get_children():
+			c.queue_free()
+		CrewWeapons.build_model(slot, weapon, color, i == 1)
 
 
 # --- Per-frame ---------------------------------------------------------------------------------
 
 func _physics_process(delta: float) -> void:
 	_clock += delta
+	_show_weapon()
 	if bot:
 		if multiplayer.is_server():
 			_bot_physics(delta)
@@ -224,6 +259,7 @@ func _physics_process(delta: float) -> void:
 	carrying = ship.crate_carried_by(peer_id)
 	_sync_max_hp()
 	_fire_cd = maxf(0.0, _fire_cd - delta)
+	_tick_reload(delta)
 	hurt_flash = maxf(0.0, hurt_flash - delta * 1.5)
 	_recoil = maxf(0.0, _recoil - delta * 8.0)
 	if not alive:
@@ -243,7 +279,7 @@ func _physics_process(delta: float) -> void:
 	_flush_repair(delta)
 	# Safety net: never let the avatar fall out of the ship (or off the pier while docked).
 	if not _in_bounds(position):
-		position = ShipBuilder.SPAWN_POINTS[0]
+		position = ship.spawn_points()[0]
 		velocity = Vector3.ZERO
 		reset_physics_interpolation()
 	net_pos = position
@@ -253,9 +289,7 @@ func _physics_process(delta: float) -> void:
 ## Where a crew member may be (ship-local): inside the ship, plus the ramp, pier and station
 ## building while docked.
 func _in_bounds(p: Vector3) -> bool:
-	if ship.landing == Mothership.Dock.LANDED:
-		return p.y > -2.6 and p.y < 8.0 and absf(p.x) < 12.0 and p.z > -11.0 and p.z < StationBuilder.ROOM_END + 1.0
-	return p.y > -3.0 and p.y < 6.0 and absf(p.x) < 7.0 and p.z > -11.0 and p.z < 12.2
+	return ship.walk_bounds().has_point(p)
 
 
 ## Max health follows the ship's crew stats (crew armour from waystations raises it).
@@ -271,6 +305,38 @@ func _sync_max_hp() -> void:
 func _process(delta: float) -> void:
 	if is_multiplayer_authority() and camera:
 		_update_camera(delta)
+	_update_flashlight()
+
+
+## A flashlight (off) under `parent`, pointing along its -Z.
+func _make_flashlight(parent: Node3D, offset: Vector3, local: bool) -> SpotLight3D:
+	var l := SpotLight3D.new()
+	l.position = offset
+	l.spot_range = 24.0 if local else 18.0
+	l.spot_angle = 28.0
+	l.spot_attenuation = 0.8
+	l.light_energy = 3.2 if local else 2.2
+	l.light_color = Color(1.0, 0.95, 0.85)
+	l.shadow_enabled = local
+	l.visible = false
+	parent.add_child(l)
+	return l
+
+
+## The flashlight comes on by itself out in an abandoned station and goes off back aboard.
+func _update_flashlight() -> void:
+	if _flashlight == null or ship == null or not is_instance_valid(ship):
+		return
+	var on := alive and ship.landing == Mothership.Dock.LANDED and ship.derelict_k >= 0 and not ship.is_aboard(position)
+	if on != _flash_on:
+		_flash_on = on
+		_flashlight.visible = on
+		_lamp_mat.emission_energy_multiplier = 3.0 if on else 0.0
+		if camera and not bot:
+			Sfx.play("ui", null, -14.0, 1.7)
+	if on and _flashlight.get_parent() == _head:
+		# The head only pitches part of the way; the lamp follows the rest of the look.
+		_flashlight.rotation.x = look_pitch * 0.4
 
 
 ## Server: crew bot update (the CrewBot brain does the thinking).
@@ -287,6 +353,7 @@ func _bot_physics(delta: float) -> void:
 	else:
 		if hp < max_hp and _clock - _last_hurt > 6.0:
 			hp = minf(max_hp, hp + 4.0 * delta)
+		_tick_reload(delta)
 		brain.tick(delta)
 	net_pos = position
 	_head.rotation.x = look_pitch * 0.6
@@ -368,12 +435,25 @@ func _interact(delta: float, blocked: bool) -> void:
 					ship.request_crate_buy.rpc_id(1, str(crate.name))
 			else:
 				prompt = "%s costs %d CR - you have %d CR" % [RunItems.display_name(crate.item), crate.price, ship.credits]
+		elif crate and crate.carrier == 0 and RunItems.is_crew_weapon(crate.item):
+			var w := RunItems.crew_weapon_of(crate.item)
+			if w == weapon:
+				prompt = "%s - you already carry one   [E] Pick up" % CrewWeapons.display_name(w)
+			else:
+				prompt = "[F] Equip %s (your %s goes in the crate)   [E] Pick up - %s" % [CrewWeapons.display_name(w),
+					CrewWeapons.display_name(weapon), RunItems.describe(crate.item)]
+				if not blocked and Input.is_action_just_pressed("equip"):
+					ship.request_weapon_swap.rpc_id(1, str(crate.name))
+			if not blocked and Input.is_action_just_pressed("interact"):
+				ship.request_crate_pickup.rpc_id(1, str(crate.name))
 		elif crate and crate.carrier == 0:
 			prompt = "[E] Pick up %s - %s" % [RunItems.display_name(crate.item), RunItems.describe(crate.item)]
 			if not blocked and Input.is_action_just_pressed("interact"):
 				ship.request_crate_pickup.rpc_id(1, str(crate.name))
 	elif col is Area3D and col.has_meta("install_hub"):
 		prompt = "Install hub - carry supply crates here from a waystation"
+	elif col is Area3D and col.has_meta("sell_pad"):
+		prompt = "Buyback - carry a crate here to sell it for %d%% of its price" % int(RunItems.SELL_SHARE * 100.0)
 	elif col is Area3D and col.has_meta("station"):
 		var id := str(col.get_meta("station"))
 		var holder := int(ship.occupants.get(id, 0))
@@ -416,18 +496,34 @@ func _interact(delta: float, blocked: bool) -> void:
 			prompt = "[E] EMERGENCY BLAST - kills nearby aliens; costs hull, fuel and shields"
 			if not blocked and Input.is_action_just_pressed("interact"):
 				ship.request_blast.rpc_id(1)
-	if tool == 0 and not blocked and Input.is_action_pressed("fire") and _fire_cd <= 0.0:
-		_shoot()
+	if tool == 0 and not blocked:
+		if Input.is_action_just_pressed("reload"):
+			start_reload()
+		if Input.is_action_pressed("fire") and _fire_cd <= 0.0 and not reloading:
+			if ammo > 0:
+				_shoot()
+			elif Input.is_action_just_pressed("fire"):
+				# Empty: the trigger clicks until R reloads.
+				Sfx.play("dry_fire", null, -4.0)
 
 
 ## Interaction while carrying a crate: no tools; install it at the hub or a gun console, or drop it.
 func _interact_carrying(col: Object, blocked: bool) -> void:
 	var item := carrying.item
-	var weapon := RunItems.is_weapon(item)
+	var gun := RunItems.is_weapon(item)
 	var name_s := RunItems.display_name(item)
 	var target := ""
-	if col is Area3D and col.has_meta("install_hub"):
-		if weapon:
+	if col is Area3D and col.has_meta("sell_pad"):
+		prompt = "[E] Sell %s for %d CR (%d%% of its price)" % [name_s, RunItems.sell_price(item, ship.station_k),
+			int(RunItems.SELL_SHARE * 100.0)]
+		target = "sell"
+	elif RunItems.is_crew_weapon(item):
+		if col is Area3D and (col.has_meta("install_hub") or col.has_meta("station")):
+			prompt = "Hand weapons aren't installed - [G] put the crate down, then [F] to equip it"
+		elif col is Area3D and (col.has_meta("repair") or col.has_meta("crate")):
+			prompt = "Your hands are full - [G] drop the crate"
+	elif col is Area3D and col.has_meta("install_hub"):
+		if gun:
 			prompt = "Guns are mounted at a GUN console"
 		elif item == "autocannon" and ship.autocannons >= ship.turret_slots():
 			prompt = "Every turret slot is taken" if ship.turret_slots() > 0 else "This ship has no turret slots"
@@ -436,20 +532,22 @@ func _interact_carrying(col: Object, blocked: bool) -> void:
 			target = "hub"
 	elif col is Area3D and col.has_meta("station"):
 		var id := str(col.get_meta("station"))
-		if ship.station_kind(id) == "gun" and weapon:
+		if ship.station_kind(id) == "gun" and gun:
 			var current := ship.gun_weapon(id)
 			prompt = "[E] Mount %s on the %s (replaces the %s)" % [name_s, ship.station_name(id).to_lower(),
 				Game.GUNS[current]["name"]]
 			target = id
-		elif weapon:
+		elif gun:
 			prompt = "Mount guns at a GUN console"
 		else:
-			prompt = "Fit this at the INSTALL HUB in the engine room"
+			prompt = "Fit this at the INSTALL HUB in the %s" % ship.install_hub_room()
 	elif col is Area3D and (col.has_meta("repair") or col.has_meta("crate")):
 		prompt = "Your hands are full - [G] drop the crate"
 	if blocked:
 		return
-	if target != "" and Input.is_action_just_pressed("interact"):
+	if target == "sell" and Input.is_action_just_pressed("interact"):
+		ship.request_sell.rpc_id(1, str(carrying.name))
+	elif target != "" and Input.is_action_just_pressed("interact"):
 		ship.request_install.rpc_id(1, str(carrying.name), target)
 	elif Input.is_action_just_pressed("drop"):
 		_drop_carried()
@@ -495,32 +593,118 @@ func _flush_repair(delta: float) -> void:
 	_repair_acc = 0.0
 
 
+## Start reloading the hand weapon (R; crew bots do it by themselves). False when it is full,
+## already reloading or its owner is knocked out.
+func start_reload() -> bool:
+	if reloading or not alive or ammo >= CrewWeapons.mag(weapon):
+		return false
+	reloading = true
+	_reload_left = CrewWeapons.reload_time(weapon)
+	_reload_sound("reload")
+	return true
+
+
+## How far along the current reload is (0..1; 0 when not reloading).
+func reload_progress() -> float:
+	if not reloading:
+		return 0.0
+	return clampf(1.0 - _reload_left / CrewWeapons.reload_time(weapon), 0.0, 1.0)
+
+
+## Reload progress (run by the owner; by the server for bots). Switching to the toolkit, taking a
+## station, picking up a crate or being knocked out cuts a player's reload short.
+func _tick_reload(delta: float) -> void:
+	if not reloading:
+		return
+	if not alive or (not bot and (tool != 0 or station != "" or carrying != null)):
+		reloading = false
+		return
+	_reload_left -= delta
+	if _reload_left <= 0.0:
+		reloading = false
+		ammo = CrewWeapons.mag(weapon)
+		_reload_sound("reload_done")
+
+
+## Reload sounds: in 2D for your own avatar, from the crew member's hands for everyone else.
+func _reload_sound(id: String) -> void:
+	if camera:
+		Sfx.play(id, null, -7.0)
+	else:
+		Sfx.play(id, global_transform * CrewWeapons.HELD_POS, -3.0)
+
+
+## Fire the hand weapon: hitscan pellets (piercing for the Rail Carbine) or a plasma orb. Hits on
+## aliens are sent to the server, the effects to everyone.
 func _shoot() -> void:
-	_fire_cd = BLASTER_COOLDOWN
-	_recoil = 1.0
+	var d := CrewWeapons.def(weapon)
+	_fire_cd = float(d["cooldown"])
+	ammo -= 1
+	_recoil = 1.0 if weapon != "rifle" else 0.45
 	var eye := _eye_global()
-	var dir := _look_dir_global()
-	var q := PhysicsRayQueryParameters3D.create(eye, eye + dir * 60.0, Game.LAYER_INTERIOR | Game.LAYER_BOARDER | Game.LAYER_STATION)
-	q.collide_with_areas = true
-	q.exclude = [get_rid()]
-	var hit := get_world_3d().direct_space_state.intersect_ray(q)
-	var end := eye + dir * 60.0
-	var normal := -dir
-	var flesh := false
-	if not hit.is_empty():
-		end = hit["position"]
-		normal = hit["normal"]
-		var col: Object = hit["collider"]
-		if col.has_meta("boarder"):
-			flesh = true
-			ship.hit_boarder.rpc_id(1, str(col.get_meta("boarder")), float(ship.stats["blaster_damage"]))
-			if Game.mission and Game.mission.hud:
-				Game.mission.hud.hit_marker()
-		Fx.impact(end, normal, Color(0.6, 1.0, 0.3) if flesh else Color(1.0, 0.6, 0.3), 1.2 if flesh else 1.0)
-	var muzzle := camera.global_transform * MUZZLE
-	Fx.tracer(muzzle, end, Color(1.0, 0.5, 0.2), 0.035, 0.07)
-	Sfx.play("blaster", muzzle, -5.0)
-	ship.fx_blaster.rpc(ship.to_local(muzzle), ship.to_local(end), ship.global_basis.inverse() * normal, flesh, not hit.is_empty())
+	var aim := _look_dir_global()
+	var reach := float(d["range"])
+	var dmg := float(d["damage"]) * float(ship.stats["blaster_damage"]) / CrewWeapons.BASE_DAMAGE
+	var muzzle := camera.global_transform * CrewWeapons.view_muzzle(weapon)
+	var space := get_world_3d().direct_space_state
+	var ends := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var hit_mask := 0
+	var flesh_mask := 0
+	# Alien name -> damage dealt by this shot.
+	var dealt := {}
+	var spread := float(d["spread"])
+	var up := ship.global_basis.y if absf(aim.dot(ship.global_basis.y)) < 0.99 else ship.global_basis.z
+	var frame := Basis.looking_at(aim, up)
+	var pierce := int(d.get("pierce", 1))
+	for i in int(d["pellets"]):
+		var dir := aim
+		if spread > 0.0:
+			var r := spread * sqrt(randf())
+			var a := randf() * TAU
+			dir = (frame * Vector3(cos(a) * r, sin(a) * r, -1.0)).normalized()
+		var end := eye + dir * reach
+		var normal := -dir
+		var exclude: Array[RID] = [get_rid()]
+		for k in pierce:
+			var q := PhysicsRayQueryParameters3D.create(eye, eye + dir * reach, CrewWeapons.shot_mask())
+			q.collide_with_areas = true
+			q.exclude = exclude
+			var hit := space.intersect_ray(q)
+			if hit.is_empty():
+				end = eye + dir * reach
+				break
+			end = hit["position"]
+			normal = hit["normal"]
+			hit_mask |= 1 << i
+			var col: Object = hit["collider"]
+			if not col.has_meta("boarder"):
+				break
+			flesh_mask |= 1 << i
+			if weapon == "plasma":
+				break
+			var who := str(col.get_meta("boarder"))
+			dealt[who] = float(dealt.get(who, 0.0)) + dmg
+			# A rail slug carries on through the alien.
+			exclude.append(hit["rid"])
+		ends.append(end)
+		normals.append(normal)
+	for who: String in dealt:
+		ship.hit_boarder.rpc_id(1, who, float(dealt[who]))
+	if not dealt.is_empty() and Game.mission and Game.mission.hud:
+		Game.mission.hud.hit_marker()
+	if weapon == "plasma":
+		var burst := ship.to_local(ends[0] - aim * 0.3)
+		var splash := float(d["splash"])
+		CrewWeapons.launch_orb(ship, ship.to_local(muzzle), burst, func():
+			ship.crew_splash.rpc_id(1, burst, splash, dmg))
+	CrewWeapons.shot_fx(weapon, muzzle, ends, normals, hit_mask, flesh_mask)
+	var local_ends := PackedVector3Array()
+	var local_normals := PackedVector3Array()
+	for i in ends.size():
+		local_ends.append(ship.to_local(ends[i]))
+		local_normals.append(ship.global_basis.inverse() * normals[i])
+	ship.fx_weapon.rpc(weapon, ship.to_local(muzzle), local_ends, local_normals, hit_mask, flesh_mask)
 
 
 func _station_physics(blocked: bool) -> void:
@@ -610,6 +794,21 @@ func exit_station(send := true) -> void:
 	reset_physics_interpolation()
 
 
+## Server -> owner: the crew member swapped hand weapons at a crate.
+@rpc("any_peer", "call_local", "reliable")
+func set_weapon(id: String) -> void:
+	if multiplayer.get_remote_sender_id() > 1 or not is_multiplayer_authority() or not CrewWeapons.exists(id):
+		return
+	weapon = id
+	tool = 0
+	_fire_cd = 0.4
+	# A weapon out of a crate comes loaded.
+	reloading = false
+	ammo = CrewWeapons.mag(id)
+	if not bot:
+		Sfx.play("install", null, -10.0, 1.4)
+
+
 # --- Damage and respawn ------------------------------------------------------------------------
 
 ## Server: damage this crew member (boarding aliens). Bots take it here, players on their client.
@@ -662,7 +861,9 @@ func _die() -> void:
 func _respawn() -> void:
 	alive = true
 	hp = max_hp
-	position = ShipBuilder.SPAWN_POINTS.pick_random()
+	reloading = false
+	ammo = CrewWeapons.mag(weapon)
+	position = ship.spawn_points().pick_random()
 	velocity = Vector3.ZERO
 	look_pitch = 0.0
 	reset_physics_interpolation()
@@ -699,6 +900,11 @@ func _update_camera(delta: float) -> void:
 			_view.rotation = Vector3(_recoil * 0.12, 0, 0)
 			for i in _view_tools.size():
 				_view_tools[i].visible = i == tool and carrying == null
+			# Reloading: the weapon dips and tilts while the magazine is swapped, then comes back up.
+			var p := reload_progress()
+			var dip := smoothstep(0.0, 0.2, p) * (1.0 - smoothstep(0.8, 1.0, p)) if reloading else 0.0
+			_view_tools[0].position = CrewWeapons.VIEW_POS + Vector3(0.0, -0.12, 0.06) * dip
+			_view_tools[0].rotation = Vector3(-0.75, 0.0, 0.45) * dip
 		"pilot":
 			_chase_camera(ship_x, delta)
 			camera.global_position += shake
@@ -742,6 +948,9 @@ func _clip_to_cave(from: Vector3, to: Vector3) -> Vector3:
 func _update_held() -> void:
 	for i in _held.size():
 		_held[i].visible = i == tool and station == "" and carrying == null
+	# Reloading: the weapon tips down and to the side while the magazine is swapped.
+	_reload_pose = move_toward(_reload_pose, 1.0 if reloading else 0.0, get_physics_process_delta_time() * 5.0)
+	_held[0].rotation = Vector3(-0.8, 0.0, 0.5) * _reload_pose
 
 
 func _remote_update(delta: float) -> void:
@@ -753,6 +962,11 @@ func _remote_update(delta: float) -> void:
 	else:
 		position = position.lerp(net_pos, k)
 	rotation.y = lerp_angle(rotation.y, look_yaw if station == "" else float(ship.console(station).get("seat_yaw", look_yaw)), k)
+	if reloading != _was_reloading:
+		_was_reloading = reloading
+		# (A reload cut short by switching tools ends without the snap.)
+		if reloading or (tool == 0 and alive):
+			_reload_sound("reload" if reloading else "reload_done")
 	_head.rotation.x = look_pitch * 0.6
 	_body.visible = alive
 	_body.position.y = -0.3 if station != "" else 0.0
