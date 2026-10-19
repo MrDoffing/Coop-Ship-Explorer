@@ -8,6 +8,26 @@ extends Node3D
 ## Kinds with "trail" (the gun pods' tracer rounds) draw as a streak behind the round that grows
 ## to "len" as it leaves the muzzle: fast rounds that hit a tunnel wall a few metres off are still
 ## seen in flight.
+##
+## The scouts' heat-seeking missiles (fire_missile) home on their target, an alien, turning at most
+## MISSILE_TURN rad/s and speeding up to MISSILE_SPEED (m/s) after the launch. One whose target is
+## gone seeks the nearest alien within MISSILE_SEEK (radians) of its heading and MISSILE_SEEK_RANGE
+## metres. It bursts on rock (once it has flown MISSILE_ARM seconds, clear of its pylon, which may
+## hang over rock while the scout hugs a wall), on any alien in its way or within MISSILE_FUSE
+## metres of its target (or once it runs out after MISSILE_LIFE seconds): full damage to what it
+## hits, splash damage up to MISSILE_SPLASH metres round. The clients' copies fly the same way and
+## burst where the server's did.
+
+## The scouts' missiles: see above.
+const MISSILE_SPEED := 62.0
+const MISSILE_ACCEL := 45.0
+const MISSILE_TURN := 3.2
+const MISSILE_LIFE := 6.0
+const MISSILE_ARM := 0.2
+const MISSILE_SEEK := 0.6
+const MISSILE_SEEK_RANGE := 70.0
+const MISSILE_FUSE := 1.2
+const MISSILE_SPLASH := 9.0
 
 const KINDS := {
 	"pulse": {"color": Color(0.35, 0.85, 1.0), "len": 2.4, "width": 0.13, "life": 1.6},
@@ -17,7 +37,10 @@ const KINDS := {
 	"scout": {"color": Color(0.45, 1.0, 0.45), "len": 1.6, "width": 0.09, "life": 1.3},
 	"spit": {"color": Color(0.55, 1.0, 0.15), "orb": 0.42, "life": 5.0},
 	"needle": {"color": Color(1.0, 0.35, 0.85), "len": 0.8, "width": 0.05, "life": 2.0},
+	"acid": {"color": Color(0.6, 1.0, 0.18), "orb": 0.11, "life": 3.0},
 }
+## The acid spiders' globs arc down at this rate (m/s²); the spiders aim high to allow for it.
+const ACID_GRAVITY := 6.0
 
 ## Ship weapons hit enemies, minerals and rock (Game.LAYER_CAVE | LAYER_ENEMY | LAYER_MINERAL).
 ## Scout bolts also hit aliens latched onto the hull, which move to LAYER_ATTACHED.
@@ -30,6 +53,9 @@ const MASK_NEEDLE := 1 | 2 | 4 | 8 | 1024
 var _shots: Array[Dictionary] = []
 var _mats: Dictionary = {}
 var _meshes: Dictionary = {}
+## The server numbers its missiles, so the clients' copies can be put out where it burst.
+var _missile_seq := 0
+static var _trail_pm: ParticleProcessMaterial
 
 
 ## Server: fire a projectile. `dmg` is applied on impact (plasma: splash damage).
@@ -104,17 +130,25 @@ func _physics_process(delta: float) -> void:
 	for i in range(_shots.size() - 1, -1, -1):
 		var s := _shots[i]
 		s["life"] = float(s["life"]) - delta
+		if s["kind"] == "missile":
+			if _missile_step(s, delta, space):
+				_drop(i)
+			continue
 		var from: Vector3 = s["pos"]
 		var vel: Vector3 = s["vel"]
 		var kind: String = s["kind"]
 		if kind == "spit":
 			vel += Vector3.DOWN * 2.0 * delta
 			s["vel"] = vel
+		elif kind == "acid" and ship:
+			# Down is the ship's down: the station the spiders live in is level with the parked ship.
+			vel -= ship.global_basis.y * ACID_GRAVITY * delta
+			s["vel"] = vel
 		var to := from + vel * delta
 		var done := false
 		if kind == "spit":
 			done = _spit_step(s, from, to, ship, scouts, space)
-		elif kind == "needle":
+		elif kind == "needle" or kind == "acid":
 			var nq := PhysicsRayQueryParameters3D.create(from, to, MASK_NEEDLE)
 			var nhit := space.intersect_ray(nq)
 			if not nhit.is_empty():
@@ -122,7 +156,9 @@ func _physics_process(delta: float) -> void:
 				var crew := nhit["collider"] as CrewMember
 				if crew and s["auth"]:
 					crew.hurt(float(s["dmg"]))
-				Fx.sparks(nhit["position"], KINDS["needle"]["color"], 6 if crew == null else 10, 4.0, 0.03, 0.3)
+				Fx.sparks(nhit["position"], KINDS[kind]["color"], 6 if crew == null else 12, 4.0 if kind == "needle" else 2.5, 0.03, 0.3 if kind == "needle" else 0.6)
+				if kind == "acid":
+					Sfx.play("acid_hit", nhit["position"], -6.0)
 		else:
 			var q := PhysicsRayQueryParameters3D.create(from, to, MASK_SCOUT if kind == "scout" else MASK_SHIP)
 			q.collide_with_areas = true
@@ -187,21 +223,236 @@ func _damage(area: Object, dmg: float, pos: Vector3, source: String) -> void:
 		target.take_damage(dmg, {"source": source, "pos": pos, "sac": area.get_meta("sac", -1)})
 
 
-func _splash(pos: Vector3, radius: float, dmg: float) -> void:
+## Splash damage round `pos` to every target on `mask` (falling off with distance), but not to
+## `spare` (one already hit in full: its hit area, or the alien itself).
+func _splash(pos: Vector3, radius: float, dmg: float, mask := Game.LAYER_ENEMY, spare: Object = null) -> void:
 	var shape := SphereShape3D.new()
 	shape.radius = radius
 	var q := PhysicsShapeQueryParameters3D.new()
 	q.shape = shape
 	q.transform = Transform3D(Basis.IDENTITY, pos)
-	q.collision_mask = Game.LAYER_ENEMY
+	q.collision_mask = mask
 	q.collide_with_areas = true
 	q.collide_with_bodies = false
 	for r in get_world_3d().direct_space_state.intersect_shape(q, 64):
 		var col: Object = r["collider"]
-		if col is Area3D and col.has_meta("target"):
+		if col is Area3D and col.has_meta("target") and (spare == null or (col != spare and col.get_meta("target") != spare)):
 			var tpos: Vector3 = (col as Node3D).global_position
 			var falloff := clampf(1.0 - pos.distance_to(tpos) / (radius * 1.4), 0.3, 1.0)
 			_damage(col, dmg * falloff, tpos, "splash")
+
+
+# --- Missiles ----------------------------------------------------------------------------------
+
+## Server: launch a scout's heat-seeking missile at `target` (see MISSILE_SPEED and the rest).
+func fire_missile(pos: Vector3, vel: Vector3, target: Node3D, dmg: float) -> void:
+	if not multiplayer.is_server():
+		return
+	_missile_seq += 1
+	var tname := str(target.name) if target else ""
+	_spawn_missile(_missile_seq, pos, vel, tname, dmg, true)
+	_net_missile.rpc(_missile_seq, pos, vel, tname)
+
+
+@rpc("authority", "call_remote", "reliable")
+func _net_missile(id: int, pos: Vector3, vel: Vector3, tname: String) -> void:
+	_spawn_missile(id, pos, vel, tname, 0.0, false)
+
+
+## Server -> clients: missile `id` burst at `pos`.
+@rpc("authority", "call_remote", "reliable")
+func _net_missile_end(id: int, pos: Vector3) -> void:
+	_missile_fx(pos)
+	for i in range(_shots.size() - 1, -1, -1):
+		if _shots[i]["kind"] == "missile" and int(_shots[i]["id"]) == id:
+			_drop(i)
+			return
+
+
+func _spawn_missile(id: int, pos: Vector3, vel: Vector3, tname: String, dmg: float, auth: bool) -> void:
+	var target: Node3D = null
+	if tname != "" and Game.mission:
+		target = (Game.mission as MissionLevel).enemy_root.get_node_or_null(tname) as Node3D
+	var node := _missile_node()
+	node.transform = _xform(pos, vel)
+	add_child(node)
+	node.reset_physics_interpolation()
+	_shots.append({"kind": "missile", "id": id, "pos": pos, "vel": vel, "life": MISSILE_LIFE, "dmg": dmg, "auth": auth,
+		"node": node, "from": pos, "target": target})
+
+
+## One step of a missile's flight: it turns towards its target (or seeks a new one) and speeds up.
+## The server's bursts on what it meets (true: it is done); a client's copy only flies, until the
+## server says where it burst.
+func _missile_step(s: Dictionary, delta: float, space: PhysicsDirectSpaceState3D) -> bool:
+	var pos: Vector3 = s["pos"]
+	var vel: Vector3 = s["vel"]
+	var t: Variant = s["target"]
+	var target: Node3D = t if is_instance_valid(t) and (t as Node3D).is_inside_tree() else null
+	if target == null:
+		target = _seek(pos, vel)
+		s["target"] = target
+	var dir := vel.normalized() if vel.length_squared() > 0.01 else Vector3.FORWARD
+	if target:
+		var want := (target.global_position - pos).normalized()
+		var axis := dir.cross(want)
+		if axis.length_squared() > 1e-8:
+			dir = dir.rotated(axis.normalized(), minf(dir.angle_to(want), MISSILE_TURN * delta))
+	vel = dir * minf(vel.length() + MISSILE_ACCEL * delta, MISSILE_SPEED)
+	s["vel"] = vel
+	var to := pos + vel * delta
+	var node := s["node"] as Node3D
+	if not s["auth"]:
+		s["pos"] = to
+		node.global_transform = _xform(to, vel)
+		return float(s["life"]) < -1.0
+	var armed := MISSILE_LIFE - float(s["life"]) >= MISSILE_ARM
+	var q := PhysicsRayQueryParameters3D.create(pos, to, MASK_SCOUT if armed else MASK_SCOUT & ~Game.LAYER_CAVE)
+	q.collide_with_areas = true
+	var hit := space.intersect_ray(q)
+	var at := to
+	var dmg := float(s["dmg"])
+	# What takes the full blow: the area it flew into, or its target when it bursts beside it.
+	var spare: Object = null
+	if not hit.is_empty():
+		at = hit["position"]
+		var col: Object = hit["collider"]
+		if col is Area3D and col.has_meta("target"):
+			_damage(col, dmg, at, "missile")
+			spare = col
+	elif target and _seg_point_dist(pos, to, target.global_position) < MISSILE_FUSE:
+		at = target.global_position
+		if target.has_method("take_damage"):
+			target.take_damage(dmg, {"source": "missile", "pos": at})
+		spare = target
+	elif float(s["life"]) > 0.0:
+		s["pos"] = to
+		node.global_transform = _xform(to, vel)
+		return false
+	_splash(at, MISSILE_SPLASH, dmg, Game.LAYER_ENEMY | LAYER_ATTACHED, spare)
+	_missile_fx(at)
+	_net_missile_end.rpc(int(s["id"]), at)
+	return true
+
+
+## The alien nearest to a missile's heading, within MISSILE_SEEK of it and MISSILE_SEEK_RANGE.
+func _seek(pos: Vector3, vel: Vector3) -> Node3D:
+	var dir := vel.normalized() if vel.length_squared() > 0.01 else Vector3.FORWARD
+	var best: Node3D = null
+	var best_a := MISSILE_SEEK
+	for a in get_tree().get_nodes_in_group("aliens"):
+		var n := a as Node3D
+		var to := n.global_position - pos
+		if to.length() > MISSILE_SEEK_RANGE:
+			continue
+		var ang := dir.angle_to(to)
+		if ang < best_a:
+			best_a = ang
+			best = n
+	return best
+
+
+## A missile bursting: a fireball and a shock wave out to the edge of its blast.
+func _missile_fx(pos: Vector3) -> void:
+	Fx.explosion(pos, 3.6, Color(1.0, 0.6, 0.25))
+	Fx.shockwave(pos, MISSILE_SPLASH, Color(1.0, 0.55, 0.25), 0.35)
+	Sfx.play("explosion", pos, 0.0, 1.35)
+
+
+## Take shot `i` out of the air. A missile's smoke trail stays behind and fades.
+func _drop(i: int) -> void:
+	var node := _shots[i]["node"] as Node3D
+	_shots.remove_at(i)
+	var trail := node.get_node_or_null("Trail") as GPUParticles3D
+	if trail:
+		var xf := trail.global_transform
+		node.remove_child(trail)
+		add_child(trail)
+		trail.global_transform = xf
+		trail.emitting = false
+		get_tree().create_timer(trail.lifetime + 0.2).timeout.connect(trail.queue_free)
+	node.queue_free()
+
+
+## A missile's body under `parent`, pointing down -Z from its middle: white with a red nose and four
+## fins at the tail (also hung under the scouts' wings).
+static func missile_body(parent: Node3D, shadows := false) -> void:
+	var b := Models.Batch.new()
+	var dark := Models.mat(Color(0.12, 0.12, 0.13), 0.5, 0.5)
+	b.cyl(Vector3.ZERO, 0.07, 0.75, Models.mat(Color(0.82, 0.82, 0.78), 0.3, 0.5), Vector3(90, 0, 0), -1.0, 10)
+	b.cyl(Vector3(0, 0, -0.47), 0.001, 0.2, Models.mat(Color(0.75, 0.12, 0.08), 0.3, 0.5), Vector3(90, 0, 0), 0.07, 10)
+	for k in 4:
+		var a := TAU * k / 4.0 + PI / 4.0
+		b.box(Vector3(cos(a) * 0.1, sin(a) * 0.1, 0.3), Vector3(0.012, 0.1, 0.16), dark, Vector3(0, 0, rad_to_deg(a) - 90.0))
+	b.cyl(Vector3(0, 0, 0.39), 0.05, 0.04, dark, Vector3(90, 0, 0), -1.0, 10)
+	b.commit(parent, "Missile", shadows)
+
+
+## A missile in flight: its body, the motor's flame and light, a trail of smoke and the rocket's
+## roar.
+func _missile_node() -> Node3D:
+	var root := Node3D.new()
+	missile_body(root)
+	Models.sphere(root, Vector3(0, 0, 0.44), 0.06, Models.emissive(Color(1.0, 0.65, 0.25), 6.0))
+	var light := OmniLight3D.new()
+	light.position = Vector3(0, 0, 0.55)
+	light.omni_range = 6.0
+	light.light_energy = 2.5
+	light.light_color = Color(1.0, 0.6, 0.3)
+	root.add_child(light)
+	var trail := GPUParticles3D.new()
+	trail.name = "Trail"
+	trail.position = Vector3(0, 0, 0.45)
+	trail.amount = 60
+	trail.lifetime = 1.4
+	trail.local_coords = false
+	trail.process_material = _trail_material()
+	trail.draw_pass_1 = GunPod.smoke_mesh()
+	trail.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	trail.visibility_aabb = AABB(Vector3(-60, -60, -60), Vector3(120, 120, 120))
+	root.add_child(trail)
+	var audio := AudioStreamPlayer3D.new()
+	audio.stream = Sfx.stream("missile_loop")
+	audio.volume_db = -4.0
+	audio.unit_size = 8.0
+	audio.max_distance = 160.0
+	audio.autoplay = true
+	root.add_child(audio)
+	Sfx.track(audio)
+	return root
+
+
+## The missile's smoke: puffs left where it passed, swelling and fading from the flame's glow to
+## grey.
+static func _trail_material() -> ParticleProcessMaterial:
+	if _trail_pm:
+		return _trail_pm
+	var pm := ParticleProcessMaterial.new()
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+	pm.emission_sphere_radius = 0.04
+	pm.direction = Vector3(0, 0, 1)
+	pm.spread = 12.0
+	pm.initial_velocity_min = 0.5
+	pm.initial_velocity_max = 1.5
+	pm.damping_min = 1.0
+	pm.damping_max = 2.0
+	pm.gravity = Vector3(0, 0.3, 0)
+	var grow := Curve.new()
+	grow.add_point(Vector2(0.0, 0.4))
+	grow.add_point(Vector2(1.0, 2.2))
+	var grow_tex := CurveTexture.new()
+	grow_tex.curve = grow
+	pm.scale_curve = grow_tex
+	var fade := Gradient.new()
+	fade.offsets = PackedFloat32Array([0.0, 0.08, 0.3, 1.0])
+	fade.colors = PackedColorArray([Color(1.6, 1.0, 0.5, 0.9), Color(0.75, 0.68, 0.6, 0.5), Color(0.5, 0.5, 0.5, 0.32), Color(0.4, 0.4, 0.4, 0.0)])
+	var fade_tex := GradientTexture1D.new()
+	fade_tex.gradient = fade
+	pm.color_ramp = fade_tex
+	pm.angle_min = -180.0
+	pm.angle_max = 180.0
+	_trail_pm = pm
+	return pm
 
 
 static func _seg_point_dist(a: Vector3, b: Vector3, p: Vector3) -> float:

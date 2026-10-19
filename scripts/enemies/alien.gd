@@ -5,7 +5,7 @@ extends Node3D
 ## SPITTER keeps its distance and lobs acid at the mothership (or the scout).
 ## CRITTER latches onto the mothership's hull and scratches it; turrets can't reach it there, so
 ## the scout has to shoot it off. INFILTRATOR latches onto a roof hatch and, once the shield is
-## down, cuts through and drops into the ship as a boarder the crew must kill with blasters.
+## down, cuts through and drops into the ship as a boarder the crew must kill with their hand weapons.
 ## While the ship is down at an abandoned station they leave it alone: latched aliens let go, and
 ## those that were after it roam the tunnel by the hangar until it comes back out.
 

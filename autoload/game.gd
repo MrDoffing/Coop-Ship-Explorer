@@ -34,6 +34,25 @@ const LAYER_MINERAL := 128
 const LAYER_BOARDER := 256
 ## Walkable waystation geometry (pier, building, railings).
 const LAYER_STATION := 1024
+## Invisible walls only the crew's bodies collide with (layer 12): the cockpit's barrier keeps them
+## out of the nose, but their reach, sight and shots pass through.
+const LAYER_BARRIER := 2048
+
+## Render layer bit of the motherships' interiors. The cockpit's hull cameras leave it out: the hull
+## is solid from outside, so they could never see it anyway.
+const VIS_INTERIOR := 2
+## Render layer bit of a walking crew member's own helmet (round their first-person view): their
+## flashlight leaves it out (it sits inside the helmet), and so do the cockpit's camera feeds.
+const VIS_VIEWMODEL := 4
+## Render layer bit of the dirty glass in front of the gunners and pilots (the gun pods', the
+## cockpits' and the scouts' canopies). The fill lights that hang out in front of the glass to light
+## the cave leave it out: there is no lamp there, so there should be no glare in the glass from it.
+const VIS_GLASS := 8
+## Extra render layer bits (on top of the default one) of the surfaces decals paint (see Marks): a
+## mothership's hull and the fittings fixed to it, and the cave's rock. Crew, aliens, turrets and
+## interiors don't carry them, so a decal on the hull never paints whoever stands by it.
+const VIS_HULL := 16
+const VIS_ROCK := 32
 
 const PLAYER_COLORS: Array[Color] = [
 	Color(0.25, 0.65, 1.0), Color(1.0, 0.55, 0.2), Color(0.4, 0.95, 0.45), Color(0.95, 0.4, 0.85),
@@ -498,7 +517,7 @@ func _setup_input() -> void:
 	_bind_keys("interact", [KEY_E])
 	_bind_keys("tool_blaster", [KEY_1])
 	_bind_keys("tool_toolkit", [KEY_2])
-	_bind_keys("tool_swap", [KEY_Q])
+	_bind_keys("scanner", [KEY_Q])
 	_bind_keys("autopilot", [KEY_T])
 	_bind_keys("full_stop", [KEY_X])
 	_bind_keys("emergency", [KEY_B])

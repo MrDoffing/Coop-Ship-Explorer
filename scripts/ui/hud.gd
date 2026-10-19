@@ -1,17 +1,23 @@
 class_name Hud
 extends CanvasLayer
 ## In-mission HUD: ship systems (percentage inside each bar, absolute value beside it), depth,
-## credits and research points, crew roster, interaction prompts, station read-outs, alerts, the
-## scouts' dock markers, waystation and abandoned station markers, carried crates and
-## end-of-mission banners. In a gun pod there is no crosshair or station read-out: the pod has its
-## own sight and displays.
+## credits and research points, crew roster, interaction prompts, station read-outs, alerts,
+## waystation and abandoned station markers, carried crates and end-of-mission banners. In a gun
+## pod there is no crosshair or station read-out: the pod has its own sight and displays. In the
+## pilot seat there is no ship panel or station read-out either: the cockpit's gauges, lamps and
+## terminal show it all. Nor in a scout: its cockpit has its gunsight, its gauges and the dock's
+## marker on the glass (ScoutCockpit). Walking, the health is on the helmet (Helmet), the rounds or
+## heat on the weapon's own display, and there is no crosshair (the weapons have their sights) but
+## for the toolkit or a crate in hand.
 
 ## Waystations closer than this get a marker on screen.
 const STATION_MARKER_RANGE := 320.0
-## Colours of the hostility meter's four stages (docile .. high).
-const HOSTILITY_COLORS: Array[Color] = [Color(0.4, 0.9, 0.5), Color(0.95, 0.85, 0.3), Color(1.0, 0.55, 0.2), Color(1.0, 0.25, 0.2)]
+## Colours of the hostility meter's stages (docile .. high, then surging: the whole meter flashes).
+const HOSTILITY_COLORS: Array[Color] = [Color(0.4, 0.9, 0.5), Color(0.95, 0.85, 0.3), Color(1.0, 0.55, 0.2), Color(1.0, 0.25, 0.2),
+	Color(1.0, 0.1, 0.08)]
 
 var _root: Control
+var _ship_panel: Control
 var _bars: Dictionary = {}
 var _texts: Dictionary = {}
 var _depth: Label
@@ -37,7 +43,6 @@ var _banner: Label
 var _banner_sub: Label
 var _loading: Control
 var _loading_label: Label
-var _dock_marker: Label
 var _station_marker: Label
 var _derelict_marker: Label
 var _dock_status: Label
@@ -48,6 +53,8 @@ var _hostility: Control
 var _hostility_label: Label
 var _hostility_value := 0.0
 var _hostility_hold := false
+## The motion tracker's ambush warning, under the hostility meter.
+var _ambush: Label
 
 
 func _ready() -> void:
@@ -86,6 +93,7 @@ func _panel(pos: Vector2, min_size: Vector2) -> VBoxContainer:
 
 func _build_ship_panel() -> void:
 	var v := _panel(Vector2(16, 16), Vector2(380, 0))
+	_ship_panel = v.get_parent() as Control
 	_ship_title = UiTheme.label("", 20, UiTheme.ACCENT)
 	v.add_child(_ship_title)
 	for row: Array in [["hull", "HULL", Color(1.0, 0.45, 0.3)], ["shield", "SHIELD", Color(0.35, 0.85, 1.0)],
@@ -149,6 +157,12 @@ func _build_top() -> void:
 	_hostility_label = UiTheme.label("", 14)
 	_hostility_label.custom_minimum_size.x = 150
 	host_row.add_child(_hostility_label)
+	_ambush = UiTheme.label("", 23, Color(1.0, 0.45, 0.2))
+	_ambush.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_ambush.add_theme_color_override("font_outline_color", Color.BLACK)
+	_ambush.add_theme_constant_override("outline_size", 7)
+	_ambush.visible = false
+	top.add_child(_ambush)
 	_toasts = VBoxContainer.new()
 	_toasts.add_theme_constant_override("separation", 2)
 	top.add_child(_toasts)
@@ -231,12 +245,6 @@ func _build_station_panel() -> void:
 
 
 func _build_overlays() -> void:
-	_dock_marker = UiTheme.label("", 18, UiTheme.GOOD)
-	_dock_marker.add_theme_color_override("font_outline_color", Color.BLACK)
-	_dock_marker.add_theme_constant_override("outline_size", 6)
-	_dock_marker.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_dock_marker.custom_minimum_size = Vector2(160, 0)
-	_root.add_child(_dock_marker)
 	_station_marker = UiTheme.label("", 17, Color(1.0, 0.72, 0.3))
 	_station_marker.add_theme_color_override("font_outline_color", Color.BLACK)
 	_station_marker.add_theme_constant_override("outline_size", 6)
@@ -343,10 +351,10 @@ func _process(delta: float) -> void:
 	if ship == null:
 		return
 	_update_ship(ship, mission)
+	_update_ambush(ship)
 	_update_crew(ship)
 	_update_player(player, ship, delta)
 	_update_station(player, ship, mission)
-	_update_dock_marker(player, ship, mission)
 	_update_waystation(player, ship)
 	_update_derelict(player, ship)
 	_popup_t -= delta
@@ -363,7 +371,21 @@ func _process(delta: float) -> void:
 		_crew_detail.text = _crew_report(ship, mission)
 
 
+## The ambush the motion tracker picked up: where it comes from and how soon, flashing at the top
+## of the screen until it arrives.
+func _update_ambush(ship: Mothership) -> void:
+	var t := ship.contact_warning()
+	_ambush.visible = t > 0.0 and ship.alive
+	if not _ambush.visible:
+		return
+	_ambush.text = "MOTION DETECTED %s - AMBUSH IN %d s" % ["AHEAD" if ship.contact_ahead() else "ASTERN", int(ceil(t))]
+	_ambush.modulate.a = 0.7 + 0.3 * sin(Time.get_ticks_msec() * 0.014)
+
+
 func _update_ship(ship: Mothership, mission: MissionLevel) -> void:
+	var lp := mission.local_player
+	# The cockpit shows the ship's state; out in a scout it is the scout's that matters.
+	_ship_panel.visible = not (lp != null and lp.alive and (lp.station == "pilot" or ship.is_scout_station(lp.station)))
 	_ship_title.text = str(ship.layout.get("name", "MOTHERSHIP")).to_upper()
 	_set_bar("hull", ship.hull / ship.max_hull, _pct(ship.hull, ship.max_hull), "%d / %d" % [int(ship.hull), int(ship.max_hull)])
 	if ship.shield_down:
@@ -411,6 +433,8 @@ func _update_ship(ship: Mothership, mission: MissionLevel) -> void:
 	elif _hostility_hold and ship.derelict_k >= 0:
 		_hostility_label.text += " (holding)"
 	_hostility_label.add_theme_color_override("font_color", HOSTILITY_COLORS[stage])
+	# Surging: the label flashes.
+	_hostility_label.modulate.a = (0.55 + 0.45 * sin(Time.get_ticks_msec() * 0.012)) if stage == 4 and not _hostility_hold else 1.0
 	_hostility.queue_redraw()
 	var record := "" if mission.best_depth <= 0 else "   (record %d m)" % mission.best_depth
 	_depth.text = "DEPTH %d m%s" % [int(ship.depth), record]
@@ -472,8 +496,12 @@ func _update_player(player: CrewMember, ship: Mothership, _delta: float) -> void
 	_hp_bar.value = player.hp / player.max_hp
 	(_hp_bar.get_node("Pct") as Label).text = _pct(player.hp, player.max_hp)
 	_hp_text.text = "%d / %d" % [int(maxf(player.hp, 0.0)), int(player.max_hp)]
+	# Walking, the helmet's VITALS display shows the health and the weapon its own rounds (or heat);
+	# out in a scout nothing aboard can reach the pilot, and its gauges are what matters.
+	var walking := player.station == "" and player.alive
+	_hp_bar.get_parent().visible = not ship.is_scout_station(player.station) and not walking
 	_update_tool_label(player)
-	_tool_label.visible = player.station == "" and player.carrying == null
+	_tool_label.visible = false
 	_carry_label.visible = player.carrying != null and player.alive
 	if player.carrying:
 		var item := player.carrying.item
@@ -489,16 +517,30 @@ func _update_player(player: CrewMember, ship: Mothership, _delta: float) -> void
 		show_banner("", "")
 	if player.alive:
 		_prompt.text = player.prompt if player.station == "" else ""
-	# A gun pod has its own reflector sight in front of the gunner.
-	_crosshair.visible = player.alive and (player.station == "" or ship.station_kind(player.station) == "laser" or ship.is_scout_station(player.station))
+	# A gun pod and a scout have their own reflector sights in front of the gunner and the pilot, and
+	# the hand weapons their own sights (hip fire is a wide scatter anyway). The dot stays for the
+	# toolkit and a crate in hand, to point at what to repair or where to put it.
+	_crosshair.visible = player.alive and ((walking and (player.tool == 1 or player.carrying != null) and not player.scanning)
+		or ship.station_kind(player.station) == "laser")
 
 
 ## The tool in hand: the hand weapon with its magazine (or the reload under way, or a reminder to
-## reload once it is empty), or the toolkit.
+## reload once it is empty) or its heat, or the toolkit. (Hidden: the weapon's own display shows
+## it; kept up to date for the tests.)
 func _update_tool_label(player: CrewMember) -> void:
 	var col := UiTheme.ACCENT
 	if player.tool != 0:
 		_tool_label.text = "TOOLKIT  [2]"
+	elif CrewWeapons.uses_heat(player.weapon):
+		var w := CrewWeapons.display_name(player.weapon).to_upper()
+		if player.overheated:
+			_tool_label.text = "%s  OVERHEATED - VENTING %d%%  [1]" % [w, int(player.reload_progress() * 100.0)]
+			col = UiTheme.DANGER
+		elif player.reloading:
+			_tool_label.text = "%s  VENTING %d%%  [1]" % [w, int(player.reload_progress() * 100.0)]
+			col = UiTheme.WARN
+		else:
+			_tool_label.text = "%s  HEAT %d%%  [1]" % [w, int(player.heat * 100.0)]
 	else:
 		var w := CrewWeapons.display_name(player.weapon).to_upper()
 		var full := CrewWeapons.mag(player.weapon)
@@ -515,73 +557,18 @@ func _update_tool_label(player: CrewMember) -> void:
 	_tool_label.add_theme_color_override("font_color", col)
 
 
-func _update_station(player: CrewMember, ship: Mothership, mission: MissionLevel) -> void:
-	# Gun pods show everything on their own control panel.
-	if player == null or player.station == "" or not player.alive or ship.station_kind(player.station) == "gun":
+func _update_station(player: CrewMember, ship: Mothership, _mission: MissionLevel) -> void:
+	# Gun pods, the cockpit and the scouts show everything in the world, on their own panels.
+	if player == null or player.station == "" or not player.alive or ship.station_kind(player.station) in ["gun", "pilot", "scout"]:
 		_station_panel.visible = false
 		return
 	_station_panel.visible = true
 	_station_title.text = ship.station_name(player.station).to_upper()
 	match ship.station_kind(player.station):
-		"pilot":
-			var speed := ship.velocity.length()
-			var state := "ENGINE OFFLINE" if not ship.engine_online else ("LOW POWER (no fuel)" if ship.fuel <= 0.0 else "")
-			_station_info.text = "Throttle %d%%   Speed %.1f m/s\nAutopilot: %s   %s" % [int(ship.throttle * 100.0), speed,
-				"ON" if ship.autopilot else "OFF", state]
-			match ship.landing:
-				Mothership.Dock.FLYING:
-					var st := ship.nearest_station(Mothership.LAND_RANGE)
-					if not st.is_empty():
-						_station_info.text += "\n%s in range - press L to land" % st["name"]
-						if ship.in_hall(st):
-							_station_info.text += "\nExit bulkhead sealed until you land"
-					elif not ship.nearest_derelict(Mothership.DERELICT_LAND_RANGE).is_empty():
-						var near := ship.aliens_near(Mothership.DERELICT_CLEAR_RANGE)
-						if near > 0:
-							_station_info.text += "\nAbandoned station: %d alien%s too close to land" % [near, "s" if near > 1 else ""]
-						else:
-							_station_info.text += "\nAbandoned station in range - L to land (optional)"
-				Mothership.Dock.APPROACH:
-					_station_info.text = "Docking approach on autopilot..."
-				Mothership.Dock.LANDED:
-					var out := ship.crew_outside()
-					_station_info.text = "%s - L to lift off%s" % ["Landed" if ship.derelict_k >= 0 else "Docked",
-						"" if out == "" else "\n(waiting for %s to board)" % out]
-				Mothership.Dock.LIFTOFF:
-					_station_info.text = "Lifting off..."
-			_station_help.text = "W/S throttle   A/D turn   Space/Ctrl up/down\nT autopilot   X full stop   B emergency blast\nL land at / lift off from a station\nMouse: look around   E: leave"
 		"laser":
 			var reach := "Beam active" if ship.laser_on(player.station) else "Hold LMB to fire the mining laser"
 			_station_info.text = "%s%s" % [reach, "" if ship.weapons_online else "\nWEAPONS OFFLINE - needs repair"]
 			_station_help.text = "Aim at crystal deposits on the walls.\nChunks fly back to the laser's tip.   E: leave"
-		"scout":
-			var scout := mission.scout_at(player.station)
-			if scout:
-				_station_info.text = "Hull %d/%d   Fuel cargo %d/%d" % [int(scout.hp), int(scout.max_hp), int(scout.cargo), int(scout.max_cargo)]
-			_station_help.text = "WASD move   Space/Ctrl up/down   Shift boost\nMouse: steer   LMB: fire   E: dock (near the ship)\nHold E: recall the scout (cargo is lost)"
-
-
-func _update_dock_marker(player: CrewMember, ship: Mothership, mission: MissionLevel) -> void:
-	_dock_marker.visible = false
-	if player == null or not ship.is_scout_station(player.station):
-		return
-	var scout := mission.scout_at(player.station)
-	var cam := get_viewport().get_camera_3d()
-	if cam == null or scout == null:
-		return
-	var dock := ship.to_global(scout.dock_point())
-	var dist := scout.global_position.distance_to(dock)
-	var size := get_viewport().get_visible_rect().size
-	var screen: Vector2
-	if cam.is_position_behind(dock):
-		var v := cam.global_transform.basis.inverse() * (dock - cam.global_position)
-		screen = size * 0.5 + Vector2(-v.x, v.y).normalized() * size.length()
-	else:
-		screen = cam.unproject_position(dock)
-	screen = screen.clamp(Vector2(90, 60), size - Vector2(90, 80))
-	_dock_marker.visible = true
-	_dock_marker.text = "▼ DOCK %d m%s" % [int(dist), "  [E]" if dist <= Scout.DOCK_RANGE else ""]
-	_dock_marker.position = screen - Vector2(80, 10)
 
 
 ## Marker on the next waystation's entrance gate while flying.
@@ -600,14 +587,9 @@ func _update_waystation(player: CrewMember, ship: Mothership) -> void:
 	if ship.in_hall(st):
 		target = (st["xform"] as Transform3D) * Vector3(0, StationBuilder.LAND_HEIGHT, 0)
 	var size := get_viewport().get_visible_rect().size
-	var screen: Vector2
-	if cam.is_position_behind(target):
-		var v := cam.global_transform.basis.inverse() * (target - cam.global_position)
-		screen = size * 0.5 + Vector2(-v.x, v.y).normalized() * size.length()
-	else:
-		screen = cam.unproject_position(target)
+	var screen := _marker_point(cam, target, size)
+	_station_marker.visible = _marker_shown(player, screen, size)
 	screen = screen.clamp(Vector2(140, 70), size - Vector2(140, 90))
-	_station_marker.visible = true
 	var hint := ""
 	if dist <= Mothership.LAND_RANGE:
 		hint = "\n[L] LAND" if player.station == "pilot" else "\npilot: L to land"
@@ -615,7 +597,7 @@ func _update_waystation(player: CrewMember, ship: Mothership) -> void:
 		_station_marker.text = "◆ %s  LANDING PAD%s" % [st["name"], hint]
 	else:
 		_station_marker.text = "◆ %s  %d m - shop and safe haven%s" % [st["name"], int(dist), hint]
-	_station_marker.position = screen - Vector2(130, 10)
+	_place_marker(_station_marker, screen, size)
 
 
 ## Marker on the abandoned station in this stretch of tunnel while flying (landing is optional).
@@ -632,12 +614,8 @@ func _update_derelict(player: CrewMember, ship: Mothership) -> void:
 	if dist < 15.0:
 		return
 	var size := get_viewport().get_visible_rect().size
-	var screen: Vector2
-	if cam.is_position_behind(target):
-		var v := cam.global_transform.basis.inverse() * (target - cam.global_position)
-		screen = size * 0.5 + Vector2(-v.x, v.y).normalized() * size.length()
-	else:
-		screen = cam.unproject_position(target)
+	var screen := _marker_point(cam, target, size)
+	var shown := _marker_shown(player, screen, size)
 	screen = screen.clamp(Vector2(150, 70), size - Vector2(150, 110))
 	var hint := ""
 	if dist <= Mothership.DERELICT_LAND_RANGE:
@@ -645,9 +623,36 @@ func _update_derelict(player: CrewMember, ship: Mothership) -> void:
 			hint = "\nALIENS TOO CLOSE TO LAND"
 		else:
 			hint = "\n[L] LAND" if player.station == "pilot" else "\npilot: L to land"
-	_derelict_marker.visible = true
+	_derelict_marker.visible = shown
 	_derelict_marker.text = "◇ ABANDONED STATION  %d m\noptional - salvage, hostiles%s" % [int(dist), hint]
-	_derelict_marker.position = screen - Vector2(140, 10)
+	_place_marker(_derelict_marker, screen, size)
+
+
+## Where a marker for a world point goes on screen. A point behind the camera goes to the screen
+## edge on the side to turn towards (below and behind the cockpit = the bottom edge).
+func _marker_point(cam: Camera3D, target: Vector3, size: Vector2) -> Vector2:
+	if not cam.is_position_behind(target):
+		return cam.unproject_position(target)
+	var v := cam.global_transform.basis.inverse() * (target - cam.global_position)
+	var dir := Vector2(v.x, -v.y)
+	if dir.length() < 0.001:
+		dir = Vector2.DOWN
+	return size * 0.5 + dir.normalized() * size.length()
+
+
+## Whether a station marker shows. From the pilot seat it only labels what is in view through the
+## glass (looking down at the dashboard it would sit on the HUD's top lines); the cockpit's terminal
+## shows the distance and the landing hint.
+func _marker_shown(player: CrewMember, screen: Vector2, size: Vector2) -> bool:
+	return player.station != "pilot" or Rect2(Vector2.ZERO, size).has_point(screen)
+
+
+## Centre a marker's label over its point, kept whole on screen however long its text is.
+func _place_marker(label: Label, screen: Vector2, size: Vector2) -> void:
+	# A label grows with longer text but doesn't shrink back by itself.
+	label.reset_size()
+	var w := label.size.x
+	label.position = Vector2(clampf(screen.x - w * 0.5, 8.0, maxf(size.x - w - 8.0, 8.0)), screen.y - 10.0)
 
 
 func _crew_report(ship: Mothership, mission: MissionLevel) -> String:
@@ -689,13 +694,18 @@ func _draw_hostility() -> void:
 	var gap := 3.0
 	var seg_w := (size.x - gap * 3.0) / 4.0
 	var pulse := 0.75 + 0.25 * sin(Time.get_ticks_msec() * 0.008)
+	var surge := _hostility_value >= 1.0 and not _hostility_hold
+	var flash := 0.55 + 0.45 * sin(Time.get_ticks_msec() * 0.012)
 	for i in 4:
 		var r := Rect2(i * (seg_w + gap), 0, seg_w, size.y)
 		_hostility.draw_rect(r, Color(0.06, 0.08, 0.11, 0.85))
 		var fill := clampf(_hostility_value * 4.0 - i, 0.0, 1.0)
 		if fill > 0.0:
 			var col: Color = HOSTILITY_COLORS[i]
-			if i == 3 and fill >= 1.0 and not _hostility_hold:
+			if surge:
+				# Surging: the whole meter flashes red.
+				col = HOSTILITY_COLORS[4] * flash
+			elif i == 3 and fill >= 1.0 and not _hostility_hold:
 				col = col * pulse
 			_hostility.draw_rect(Rect2(r.position, Vector2(r.size.x * fill, r.size.y)), col)
 		_hostility.draw_rect(r, Color(1, 1, 1, 0.3), false, 1.0)

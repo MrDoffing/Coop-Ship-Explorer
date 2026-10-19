@@ -96,6 +96,9 @@ func _build_shell() -> void:
 	_visual = Node3D.new()
 	add_child(_visual)
 	_built_item = item
+	if RunItems.is_credits(item):
+		_build_strongbox()
+		return
 	var col := RunItems.color(item)
 	var shell := Models.panel_mat(Color(0.22, 0.24, 0.27), 0.5, 0.5, 1.2)
 	var band := Models.emissive(col, 2.2, col * 0.3)
@@ -132,12 +135,52 @@ func _build_shell() -> void:
 		w.rotation = Vector3(0, PI / 2.0, PI / 2.0)
 
 
+## A credit box: a heavy steel strongbox with brass corners and handles, a dial lock, what it is
+## worth on an amber readout front and back, and a thin amber light under the lid's seam so it can
+## be found in a dark station.
+func _build_strongbox() -> void:
+	var steel := Models.panel_mat(Color(0.17, 0.18, 0.16), 0.6, 0.45, 1.2)
+	var brass := Models.mat(Color(0.7, 0.52, 0.24), 0.85, 0.38)
+	var dark := Models.mat(Color(0.05, 0.05, 0.045), 0.3, 0.75)
+	var glow := Models.emissive(RunItems.CREDITS_COLOR, 2.0, RunItems.CREDITS_COLOR * 0.25)
+	Models.box(_visual, Vector3.ZERO, SIZE, steel)
+	Models.box(_visual, Vector3(0, SIZE.y * 0.5 - 0.12, 0), Vector3(SIZE.x + 0.012, 0.02, SIZE.z + 0.012), dark)
+	Models.box(_visual, Vector3(0, SIZE.y * 0.5 - 0.145, 0), Vector3(SIZE.x + 0.014, 0.012, SIZE.z + 0.014), glow)
+	Models.box(_visual, Vector3(0, SIZE.y * 0.5 + 0.015, 0), Vector3(SIZE.x - 0.14, 0.03, SIZE.z - 0.14), steel)
+	for x: float in [-1.0, 1.0]:
+		for y: float in [-1.0, 1.0]:
+			for z: float in [-1.0, 1.0]:
+				Models.box(_visual, Vector3(x * (SIZE.x * 0.5 - 0.04), y * (SIZE.y * 0.5 - 0.04), z * (SIZE.z * 0.5 - 0.04)),
+					Vector3(0.1, 0.1, 0.1), brass)
+		# A carry handle on each end.
+		Models.box(_visual, Vector3(x * (SIZE.x * 0.5 + 0.045), 0.05, 0), Vector3(0.025, 0.035, 0.26), brass)
+		for z: float in [-0.12, 0.12]:
+			Models.box(_visual, Vector3(x * (SIZE.x * 0.5 + 0.02), 0.05, z), Vector3(0.05, 0.035, 0.025), brass)
+	for z: float in [-1.0, 1.0]:
+		var fz := z * SIZE.z * 0.5
+		Models.cylinder(_visual, Vector3(0.25, -0.05, fz + z * 0.015), 0.07, 0.03, brass, Vector3(90, 0, 0))
+		Models.box(_visual, Vector3(-0.1, -0.03, fz + z * 0.004), Vector3(0.4, 0.13, 0.01), dark)
+		var readout := Label3D.new()
+		readout.text = "%d CR" % RunItems.credits_of(item)
+		readout.font_size = 32
+		readout.pixel_size = 0.0028
+		readout.outline_size = 0
+		readout.modulate = RunItems.CREDITS_COLOR
+		readout.position = Vector3(-0.1, -0.03, fz + z * 0.011)
+		readout.rotation.y = 0.0 if z > 0.0 else PI
+		readout.double_sided = false
+		_visual.add_child(readout)
+
+
 func _refresh_label() -> void:
 	_last_price = price
 	_label.modulate = RunItems.color(item).lerp(Color.WHITE, 0.4)
 	if price > 0:
 		_label.text = "%s\n%d CR\n%s" % [RunItems.display_name(item), price, RunItems.describe(item)]
 		_label.font_size = 34
+	elif RunItems.is_credits(item):
+		_label.text = "%s\n%d CR" % [RunItems.display_name(item), RunItems.credits_of(item)]
+		_label.font_size = 40
 	else:
 		_label.text = RunItems.display_name(item)
 		_label.font_size = 40

@@ -15,7 +15,11 @@ extends RefCounted
 ## - "panels": repair panels {system, pos, yaw} (yaw: the direction the panel faces, which is where
 ##   the crew stands to repair it).
 ## - "hub" / "hub_yaw": the install hub (its front faces local +x turned by hub_yaw), "hub_room": where
-##   it is, for prompts. "button": the emergency blast button.
+##   it is, for prompts.
+## - "cockpit": the room at the front where the pilot sits (see Cockpit): "z" is its front, where
+##   the hull's glazed nose begins (the hull's first section, ShipTypes), "half_w" the inside half
+##   width of the room. The pilot's spot is the seat right behind the glass; the dashboard, the side
+##   panels and the equipment racks either side, under an invisible barrier, close off the nose.
 ## - "cores": engine reactor cores. "engine_room": box (min, max) of the engine room, where the
 ##   engine hum is heard at full level (it fades with distance from the room).
 ## - "waypoints" / "links": the walking graph for crew bots and boarders; "exit" is the waypoint by
@@ -30,7 +34,7 @@ const LAYOUTS := {
 	"prospector": {
 		"height": 3.2, "door_h": 2.4, "half_w": 6.125,
 		"spots": {
-			"cockpit": {"seat": Vector3(0, 0, -8.5), "yaw": 0.0, "console": Vector3(0, 0, -9.55), "size": Vector3(3.4, 0.9, 0.8)},
+			"cockpit": {"seat": Vector3(0, 0, -9.63), "yaw": 0.0, "console": Vector3(0, 0, -10.55), "size": Vector3(1.9, 1.0, 0.6)},
 			"port_window": {"seat": Vector3(-4.75, 0, -2.5), "yaw": PI / 2.0, "console": Vector3(-5.55, 0, -2.5), "size": Vector3(0.8, 1.0, 1.8)},
 			"stbd_window": {"seat": Vector3(4.75, 0, -2.5), "yaw": -PI / 2.0, "console": Vector3(5.55, 0, -2.5), "size": Vector3(0.8, 1.0, 1.8)},
 			"front_port": {"seat": Vector3(-3.6, 0, -4.75), "yaw": 0.0, "console": Vector3(-3.6, 0, -5.55), "size": Vector3(1.8, 1.0, 0.8)},
@@ -46,7 +50,7 @@ const LAYOUTS := {
 			{"system": "weapons", "pos": Vector3(-5.94, 1.3, 4.0), "yaw": -PI / 2.0},
 		],
 		"hub": Vector3(-5.5, 0, 7.2), "hub_yaw": 0.0, "hub_room": "engine room",
-		"button": Vector3(2.25, 0, -8.6),
+		"cockpit": {"z": -10.25, "half_w": 3.0},
 		"cores": [Vector3(0, 0, 7.8)],
 		"engine_room": [Vector3(-6.0, 0.0, 5.125), Vector3(6.0, 3.2, 10.0)],
 		"waypoints": {
@@ -81,7 +85,7 @@ const LAYOUTS := {
 	"vanguard": {
 		"height": 3.2, "door_h": 2.4, "half_w": 6.125,
 		"spots": {
-			"bridge_pilot": {"seat": Vector3(0, 0, -10.4), "yaw": 0.0, "console": Vector3(0, 0, -11.45), "size": Vector3(1.8, 0.9, 0.7)},
+			"bridge_pilot": {"seat": Vector3(0, 0, -11.505), "yaw": 0.0, "console": Vector3(0, 0, -12.425), "size": Vector3(1.9, 1.0, 0.6)},
 			"bridge_port": {"seat": Vector3(-2.3, 0, -10.4), "yaw": 0.0, "console": Vector3(-2.3, 0, -11.45), "size": Vector3(1.4, 1.0, 0.7)},
 			"bridge_stbd": {"seat": Vector3(2.3, 0, -10.4), "yaw": 0.0, "console": Vector3(2.3, 0, -11.45), "size": Vector3(1.4, 1.0, 0.7)},
 			"flight_a": {"seat": Vector3(-4.75, 0, -3.75), "yaw": PI / 2.0, "console": Vector3(-5.55, 0, -3.75), "size": Vector3(0.8, 1.0, 1.6)},
@@ -94,7 +98,7 @@ const LAYOUTS := {
 			{"system": "weapons", "pos": Vector3(-5.94, 1.3, 3.6), "yaw": -PI / 2.0},
 		],
 		"hub": Vector3(5.5, 0, 2.4), "hub_yaw": PI, "hub_room": "quartermaster's store",
-		"button": Vector3(1.15, 0, -10.75),
+		"cockpit": {"z": -12.125, "half_w": 3.175},
 		"cores": [Vector3(-3.0, 0, 8.0), Vector3(3.0, 0, 8.0)],
 		"engine_room": [Vector3(-6.0, 0.0, 5.625), Vector3(6.0, 3.2, 10.0)],
 		"waypoints": {
@@ -132,7 +136,7 @@ const LAYOUTS := {
 	"excavator": {
 		"height": 3.2, "door_h": 2.4, "half_w": 6.6,
 		"spots": {
-			"ctl_pilot": {"seat": Vector3(0, 0, -8.6), "yaw": 0.0, "console": Vector3(0, 0, -9.65), "size": Vector3(1.8, 0.9, 0.7)},
+			"ctl_pilot": {"seat": Vector3(0, 0, -9.705), "yaw": 0.0, "console": Vector3(0, 0, -10.625), "size": Vector3(1.9, 1.0, 0.6)},
 			"ctl_port": {"seat": Vector3(-2.2, 0, -8.6), "yaw": 0.0, "console": Vector3(-2.2, 0, -9.65), "size": Vector3(1.3, 1.0, 0.7)},
 			"ctl_stbd": {"seat": Vector3(2.2, 0, -8.6), "yaw": 0.0, "console": Vector3(2.2, 0, -9.65), "size": Vector3(1.3, 1.0, 0.7)},
 			"gunnery": {"seat": Vector3(5.275, 0, -4.6), "yaw": -PI / 2.0, "console": Vector3(6.075, 0, -4.6), "size": Vector3(0.8, 1.0, 1.8)},
@@ -145,7 +149,7 @@ const LAYOUTS := {
 			{"system": "weapons", "pos": Vector3(2.07, 1.3, -1.6), "yaw": -PI / 2.0},
 		],
 		"hub": Vector3(-6.025, 0, 3.0), "hub_yaw": 0.0, "hub_room": "ore hall",
-		"button": Vector3(1.12, 0, -9.05),
+		"cockpit": {"z": -10.325, "half_w": 3.175},
 		"cores": [Vector3(0, 0, 7.7)],
 		"engine_room": [Vector3(-6.475, 0.0, 5.725), Vector3(6.475, 3.2, 10.0)],
 		"waypoints": {
@@ -179,7 +183,7 @@ const LAYOUTS := {
 	"dreadnought": {
 		"height": 3.6, "door_h": 2.6, "half_w": 7.8,
 		"spots": {
-			"helm": {"seat": Vector3(0, 0, -11.7), "yaw": 0.0, "console": Vector3(0, 0, -12.75), "size": Vector3(2.6, 0.9, 0.8)},
+			"helm": {"seat": Vector3(0, 0, -12.905), "yaw": 0.0, "console": Vector3(0, 0, -13.825), "size": Vector3(1.9, 1.0, 0.6)},
 			"bridge_port": {"seat": Vector3(-2.475, 0, -11.0), "yaw": PI / 2.0, "console": Vector3(-3.275, 0, -11.0), "size": Vector3(0.8, 1.0, 1.6)},
 			"bridge_stbd": {"seat": Vector3(2.475, 0, -11.0), "yaw": -PI / 2.0, "console": Vector3(3.275, 0, -11.0), "size": Vector3(0.8, 1.0, 1.6)},
 			"battery_port": {"seat": Vector3(-6.475, 0, -2.5), "yaw": PI / 2.0, "console": Vector3(-7.275, 0, -2.5), "size": Vector3(0.8, 1.0, 1.8)},
@@ -193,7 +197,7 @@ const LAYOUTS := {
 			{"system": "weapons", "pos": Vector3(1.87, 1.3, 2.35), "yaw": -PI / 2.0},
 		],
 		"hub": Vector3(-7.225, 0, 3.6), "hub_yaw": 0.0, "hub_room": "magazine",
-		"button": Vector3(1.75, 0, -12.6),
+		"cockpit": {"z": -13.525, "half_w": 3.675},
 		"cores": [Vector3(-4.4, 0, 7.6), Vector3(4.4, 0, 7.6)],
 		"engine_room": [Vector3(-7.675, 0.0, 5.125), Vector3(7.675, 3.6, 10.0)],
 		"waypoints": {

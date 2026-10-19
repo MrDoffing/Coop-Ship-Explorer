@@ -306,6 +306,7 @@ static func _build_entry_block(root: Node3D, b: Models.Batch, st: Dictionary, m:
 		flood.spot_attenuation = 0.7
 		flood.light_energy = 7.0
 		flood.light_color = Color(1.0, 0.94, 0.85)
+		flood.light_projector = Models.light_cookie("flood")
 		ShipBuilder.configure_shadow(flood)
 
 
@@ -414,6 +415,7 @@ static func _build_door(root: Node3D, z: float, faces: Array, m: Dictionary, tit
 	audio.max_distance = 220.0
 	audio.volume_db = -2.0
 	root.add_child(audio)
+	Sfx.track(audio)
 	return {"panels": panels, "lights": lights, "audio": audio, "pos": audio.position, "beacons": beacons, "lamp": lamp}
 
 
@@ -461,7 +463,10 @@ static func _beacon(root: Node3D, pos: Vector3, facing: float, m: Dictionary, la
 		light.spot_range = 34.0
 		light.spot_angle = 13.0
 		light.spot_attenuation = 0.6
-		light.shadow_enabled = false
+		# Its lens's streaks (a projector needs the light's shadows on; its narrow beam keeps them
+		# cheap, and it only burns while the door moves).
+		light.light_projector = Models.light_cookie("beacon")
+		light.shadow_enabled = true
 		holder.add_child(light)
 		var cone := MeshInstance3D.new()
 		var cm := CylinderMesh.new()

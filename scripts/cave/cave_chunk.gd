@@ -76,6 +76,8 @@ func _finish(data: Dictionary) -> void:
 		var mi := MeshInstance3D.new()
 		mi.mesh = mesh
 		mi.material_override = rock_material()
+		# The mining lasers' burns paint the rock (Marks), and only the rock.
+		mi.layers |= Game.VIS_ROCK
 		add_child(mi)
 		var shape := ConcavePolygonShape3D.new()
 		shape.backface_collision = true

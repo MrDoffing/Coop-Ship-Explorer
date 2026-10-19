@@ -1,9 +1,15 @@
 class_name DerelictBuilder
 extends RefCounted
-## Abandoned stations (derelicts): a hangar cut into the cave wall with a landing pad, a pier from
-## the ship's cargo ramp to the station's front wall, and behind it a procedurally generated
-## complex of rooms joined by corridors. Landing there is optional. The rooms hold salvage crates
-## and hostile aliens, which the mothership spawns when it lands (Mothership._derelict_contents).
+## Abandoned stations (derelicts, outposts): a hangar cut into the cave wall with a landing pad, a
+## pier from the ship's cargo ramp to the station's front wall, and behind it a complex of rooms
+## and corridors (OutpostLayout: the plan; OutpostProps: the furniture). Landing there is optional.
+## The rooms hold salvage crates and hostile aliens, which the mothership spawns when it lands
+## (Mothership._derelict_contents).
+##
+## The look: a military mining outpost of olive-drab and bronze plate, ribbed wall panels, grated
+## floors and heavy door frames; the corridors are ringed with octagonal frames every few metres,
+## with pipes along them and caged amber lamps. Some outposts have a generator: until the crew starts
+## it only red emergency lamps glow, and some doors stay shut for want of power.
 ##
 ## Station-local frame (see CaveGen.derelict): x along the tunnel, y up, z into the wall, origin on
 ## top of the landing pad. A landed mothership sits at (0, StationBuilder.LAND_HEIGHT, 0) with its
@@ -24,275 +30,120 @@ const HANGAR_ROUND := 3.0
 const FACADE_Z := 20.0
 const FACADE_T := 0.6
 const PIER_HALF_W := 1.9
-## Rooms sit on a grid of CELL-sized squares: columns -COLS..COLS along the tunnel and ROWS rows
-## going into the rock, starting ENTRY_LEN behind the front wall. Doorways and corridors are DOOR_W
-## wide and DOOR_H tall.
-const CELL := 13.0
-const COLS := 1
-const ROWS := 3
-const ENTRY_LEN := 5.0
-const ROOMS_MIN := 4
-const ROOMS_MAX := 7
-const ROOM_MIN := Vector2(7.5, 7.0)
-const ROOM_MAX := Vector2(10.5, 10.0)
-const ROOM_H := 4.0
-const DOOR_W := 2.6
-const DOOR_H := 3.0
-const WALL_T := 0.3
-## Chance of an extra corridor between two neighbouring rooms (making loops).
-const LOOP_CHANCE := 0.3
-## Rock is carved this far around the rooms.
-const CARVE_MARGIN := 2.0
-## Room walls: FRONT faces the hangar (-z), BACK is deeper in (+z), LEFT is -x, RIGHT is +x.
-enum Side { FRONT, BACK, LEFT, RIGHT }
-## Furniture along the walls: width along the wall, height, depth.
-const PROPS := {
-	"shelf": Vector3(1.8, 2.4, 0.8), "console": Vector3(1.4, 1.1, 0.7), "locker": Vector3(0.9, 2.1, 0.6),
-	"crates": Vector3(1.6, 1.4, 1.0), "bunk": Vector3(1.9, 1.5, 0.95),
-}
-const ROOM_NAMES := ["STORAGE", "CREW QUARTERS", "MESS HALL", "MED BAY", "WORKSHOP", "LAB", "CONTROL ROOM",
-	"REACTOR", "COMMS", "ORE PROCESSING"]
-const NAMES := ["VESTA", "KEPLER", "HADES", "CERES", "ORPHEUS", "TALOS", "ICARUS", "BOREAS", "LETHE", "NEREID",
-	"PALLAS", "HYGIEA"]
+## Corridors: the octagon's chamfers at the top and bottom corners, the frames' thickness and
+## depth, and lamps in every LAMP_EVERY-th straight cell.
+const CHAMFER_TOP := 0.6
+const CHAMFER_BOTTOM := 0.35
+const FRAME_T := 0.2
+const FRAME_D := 0.36
+const LAMP_EVERY := 2
+## Lamps: warm working light, the red emergency lamps, and how far they reach.
+const LAMP_COLOR := Color(1.0, 0.64, 0.3)
+const EMERGENCY_COLOR := Color(1.0, 0.16, 0.08)
+## Doors: a sealed door's slab slides up into the wall over the doorway; a lockdown shutter drops
+## in front of it on the corridor side (SHUTTER_OUT from the wall's middle).
+const SLAB_T := 0.18
+const SHUTTER_OUT := 0.42
+## Waypoint ids (see build_nav): cells, doorways and the pier.
+const NAV_CELL := 200000
+const NAV_DOOR := 100000
+const NAV_PIER := 300000
 
 
 # --- Layout (maths only) -----------------------------------------------------------------------
 
-## Lay out the rooms and corridors. Rooms: {"cell", "c" (centre x, z), "size" (x, z), "doors"
-## [{"side", "at" (position along the wall)}], "props" [{"kind", "pos", "yaw", "size"}], "spots"
-## [{"pos", "yaw"}] (free floor by the walls for salvage), "name"}. Corridors: {"from", "to",
-## "axis" (0 = along x, 2 = along z), "a", "b"} where a and b are [room, door] (room -1 = the
-## entrance in the front wall). "vault" is the room farthest from the entrance.
+## The plan: rooms, corridors, doors and furniture (see OutpostLayout).
 static func generate(rng: RandomNumberGenerator) -> Dictionary:
-	var want := rng.randi_range(ROOMS_MIN, ROOMS_MAX)
-	var cells := {Vector2i(0, 0): 0}
-	var order: Array[Vector2i] = [Vector2i(0, 0)]
-	var links: Array = []
-	var dirs: Array[Vector2i] = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
-	for attempt in 300:
-		if order.size() >= want:
-			break
-		var from: Vector2i = order[rng.randi() % order.size()]
-		var to := from + dirs[rng.randi() % dirs.size()]
-		if absi(to.x) > COLS or to.y < 0 or to.y >= ROWS or cells.has(to):
-			continue
-		cells[to] = order.size()
-		order.append(to)
-		links.append([cells[from], cells[to]])
-	for i in order.size():
-		for step: Vector2i in [Vector2i(1, 0), Vector2i(0, 1)]:
-			var j := int(cells.get(order[i] + step, -1))
-			if j < 0 or _linked(links, i, j) or rng.randf() > LOOP_CHANCE:
-				continue
-			links.append([i, j])
-	var names: Array = ROOM_NAMES.duplicate()
-	for i in range(names.size() - 1, 0, -1):
-		var j := rng.randi() % (i + 1)
-		var t: Variant = names[i]
-		names[i] = names[j]
-		names[j] = t
-	var rooms: Array = []
-	for i in order.size():
-		var cell := order[i]
-		var size := Vector2(rng.randf_range(ROOM_MIN.x, ROOM_MAX.x), rng.randf_range(ROOM_MIN.y, ROOM_MAX.y))
-		var c := Vector2(cell.x * CELL + rng.randf_range(-1.0, 1.0) * (CELL - size.x) * 0.25,
-			FACADE_Z + ENTRY_LEN + CELL * 0.5 + cell.y * CELL + rng.randf_range(-1.0, 1.0) * (CELL - size.y) * 0.25)
-		rooms.append({"cell": cell, "c": c, "size": size, "doors": [], "props": [], "spots": [], "name": names[i % names.size()]})
-	# The entrance corridor from the front wall to the first room, then one per link.
-	var corridors: Array = [{"from": Vector3(0, StationBuilder.DECK_Y, FACADE_Z),
-		"to": Vector3(0, StationBuilder.DECK_Y, _z0(rooms[0])), "axis": 2, "a": [-1, 0], "b": [0, _add_door(rooms[0], Side.FRONT, 0.0)]}]
-	for l: Array in links:
-		var ia: int = l[0]
-		var ib: int = l[1]
-		var ca: Vector2i = rooms[ia]["cell"]
-		var cb: Vector2i = rooms[ib]["cell"]
-		if ca.y == cb.y:
-			# Side by side: a corridor along x.
-			var left := ia if ca.x < cb.x else ib
-			var right := ib if left == ia else ia
-			var lo := maxf(_z0(rooms[left]), _z0(rooms[right])) + 0.5 + DOOR_W * 0.5
-			var hi := minf(_z1(rooms[left]), _z1(rooms[right])) - 0.5 - DOOR_W * 0.5
-			var at := (lo + hi) * 0.5
-			corridors.append({"from": Vector3(_x1(rooms[left]), StationBuilder.DECK_Y, at),
-				"to": Vector3(_x0(rooms[right]), StationBuilder.DECK_Y, at), "axis": 0,
-				"a": [left, _add_door(rooms[left], Side.RIGHT, at)], "b": [right, _add_door(rooms[right], Side.LEFT, at)]})
-		else:
-			# One behind the other: a corridor along z.
-			var front := ia if ca.y < cb.y else ib
-			var back := ib if front == ia else ia
-			var lo := maxf(_x0(rooms[front]), _x0(rooms[back])) + 0.5 + DOOR_W * 0.5
-			var hi := minf(_x1(rooms[front]), _x1(rooms[back])) - 0.5 - DOOR_W * 0.5
-			var at := (lo + hi) * 0.5
-			corridors.append({"from": Vector3(at, StationBuilder.DECK_Y, _z1(rooms[front])),
-				"to": Vector3(at, StationBuilder.DECK_Y, _z0(rooms[back])), "axis": 2,
-				"a": [front, _add_door(rooms[front], Side.BACK, at)], "b": [back, _add_door(rooms[back], Side.FRONT, at)]})
-	# The vault: the room the most corridors away from the entrance.
-	var dist: Array[int] = []
-	dist.resize(rooms.size())
-	dist.fill(-1)
-	dist[0] = 0
-	var queue: Array[int] = [0]
-	while not queue.is_empty():
-		var r: int = queue.pop_front()
-		for l: Array in links:
-			var other := -1
-			if int(l[0]) == r:
-				other = int(l[1])
-			elif int(l[1]) == r:
-				other = int(l[0])
-			if other >= 0 and dist[other] < 0:
-				dist[other] = dist[r] + 1
-				queue.append(other)
-	var vault := 0
-	for i in rooms.size():
-		if dist[i] >= dist[vault]:
-			vault = i
-	rooms[vault]["name"] = "SECURE STORAGE"
-	for room: Dictionary in rooms:
-		_furnish(room, rng)
-	var lo := Vector3(INF, StationBuilder.DECK_Y - 1.2, FACADE_Z - 1.0)
-	var hi := Vector3(-INF, StationBuilder.DECK_Y + ROOM_H + 1.2, -INF)
-	for room: Dictionary in rooms:
-		lo.x = minf(lo.x, _x0(room) - CARVE_MARGIN)
-		hi.x = maxf(hi.x, _x1(room) + CARVE_MARGIN)
-		hi.z = maxf(hi.z, _z1(room) + CARVE_MARGIN)
-	var title := "%s-%d OUTPOST" % [NAMES[rng.randi() % NAMES.size()], rng.randi_range(2, 19)]
-	return {"rooms": rooms, "corridors": corridors, "links": links, "vault": vault, "carve_min": lo, "carve_max": hi,
-		"name": title}
+	return OutpostLayout.generate(rng)
 
 
-static func _linked(links: Array, a: int, b: int) -> bool:
-	for l: Array in links:
-		if (int(l[0]) == a and int(l[1]) == b) or (int(l[0]) == b and int(l[1]) == a):
-			return true
-	return false
+## The floor point just inside a doorway (in its room), station-local.
+static func door_inside(door: Dictionary, depth := 1.2) -> Vector3:
+	return (door["pos"] as Vector3) - (door["normal"] as Vector3) * depth
 
 
-## Add a doorway to a room; returns its index in the room's door list.
-static func _add_door(room: Dictionary, side: int, at: float) -> int:
-	var doors: Array = room["doors"]
-	doors.append({"side": side, "at": at})
-	return doors.size() - 1
-
-
-static func _x0(room: Dictionary) -> float:
-	return (room["c"] as Vector2).x - (room["size"] as Vector2).x * 0.5
-
-
-static func _x1(room: Dictionary) -> float:
-	return (room["c"] as Vector2).x + (room["size"] as Vector2).x * 0.5
-
-
-static func _z0(room: Dictionary) -> float:
-	return (room["c"] as Vector2).y - (room["size"] as Vector2).y * 0.5
-
-
-static func _z1(room: Dictionary) -> float:
-	return (room["c"] as Vector2).y + (room["size"] as Vector2).y * 0.5
-
-
-## Wall `side` of a room: [fixed coordinate (z for front/back, x for left/right), inward normal].
-static func _wall_line(room: Dictionary, side: int) -> Array:
-	match side:
-		Side.FRONT:
-			return [_z0(room), Vector3(0, 0, 1)]
-		Side.BACK:
-			return [_z1(room), Vector3(0, 0, -1)]
-		Side.LEFT:
-			return [_x0(room), Vector3(1, 0, 0)]
-	return [_x1(room), Vector3(-1, 0, 0)]
-
-
-## Station-local floor point on wall `side` at `along` (x for front/back walls, z for side walls),
-## `inset` metres into the room.
-static func _wall_point(room: Dictionary, side: int, along: float, inset: float) -> Vector3:
-	var wl := _wall_line(room, side)
-	var p := Vector3(along, StationBuilder.DECK_Y, float(wl[0])) if side <= Side.BACK else Vector3(float(wl[0]), StationBuilder.DECK_Y, along)
-	return p + (wl[1] as Vector3) * inset
-
-
-## The floor point just inside a doorway (a waypoint).
-static func door_inside(room: Dictionary, door: Dictionary) -> Vector3:
-	return _wall_point(room, int(door["side"]), float(door["at"]), 1.0)
-
-
-## Furniture and salvage spots in slots along the walls, clear of the doorways and the corners.
-static func _furnish(room: Dictionary, rng: RandomNumberGenerator) -> void:
-	var c: Vector2 = room["c"]
-	var size: Vector2 = room["size"]
-	var kinds := PROPS.keys()
-	for side in 4:
-		var length := size.x if side <= Side.BACK else size.y
-		var mid := c.x if side <= Side.BACK else c.y
-		var n := int((length - 1.6) / 2.1)
-		var inward: Vector3 = _wall_line(room, side)[1]
-		# Furniture faces into the room; crates lie along the wall.
-		var yaw := atan2(inward.x, inward.z)
-		for i in n:
-			var along := mid + (i - (n - 1) * 0.5) * 2.1
-			var clear := true
-			for door: Dictionary in room["doors"]:
-				if int(door["side"]) == side and absf(float(door["at"]) - along) < DOOR_W * 0.5 + 1.3:
-					clear = false
-			if not clear:
-				continue
-			var r := rng.randf()
-			if r < 0.34:
-				var kind: String = kinds[rng.randi() % kinds.size()]
-				var ps: Vector3 = PROPS[kind]
-				(room["props"] as Array).append({"kind": kind, "size": ps, "yaw": yaw,
-					"pos": _wall_point(room, side, along, WALL_T * 0.5 + ps.z * 0.5 + 0.02)})
-			elif r < 0.7:
-				(room["spots"] as Array).append({"pos": _wall_point(room, side, along, WALL_T * 0.5 + 0.5), "yaw": yaw})
+## The floor point just outside a doorway (in its corridor), station-local.
+static func door_outside(door: Dictionary, depth := 1.2) -> Vector3:
+	return (door["pos"] as Vector3) + (door["normal"] as Vector3) * depth
 
 
 # --- Navigation --------------------------------------------------------------------------------
 
-## Waypoint graph for walking around the station: the pier, the doorways and the middle of every
-## room, in ship-local coordinates of a ship landed there. Given the mothership's interior layout
+## Waypoint graph for walking round the station: the pier, a point in the middle of every free cell
+## (rooms and corridors; cells furniture stands on are left out, and room cells link to their
+## neighbours, diagonals too, where nothing stands in the way) and one in each doorway, in
+## ship-local coordinates of a ship landed there. A closed door's waypoint is switched off (see
+## apply_doors), so nobody plans a way through it. Given the mothership's interior layout
 ## (ShipInteriors), its waypoints are linked in through its cargo ramp (for crew bots); with {} the
 ## graph covers just the station and its pier (for the aliens living there).
 static func build_nav(d: Dictionary, ship_interior: Dictionary) -> AStar3D:
 	var astar := AStar3D.new()
 	var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
 	var layout: Dictionary = d["layout"]
+	var kind: PackedByteArray = layout["kind"]
+	var owner: PackedInt32Array = layout["owner"]
+	var links: Dictionary = layout["links"]
 	var rooms: Array = layout["rooms"]
-	var pier0 := _point(astar, Vector3(0, StationBuilder.DECK_Y, StationBuilder.PIER_START + 0.8) - lift)
-	var pier1 := _point(astar, Vector3(0, StationBuilder.DECK_Y, FACADE_Z - 1.0) - lift)
-	var gate := _point(astar, Vector3(0, StationBuilder.DECK_Y, FACADE_Z + 1.2) - lift)
-	astar.connect_points(pier0, pier1)
-	astar.connect_points(pier1, gate)
-	var doors := {}
-	for i in rooms.size():
-		var room: Dictionary = rooms[i]
-		var c: Vector2 = room["c"]
-		var center := _point(astar, Vector3(c.x, StationBuilder.DECK_Y, c.y) - lift)
-		var mine: Array[int] = []
-		var list: Array = room["doors"]
-		for j in list.size():
-			var id := _point(astar, door_inside(room, list[j]) - lift)
-			doors[Vector2i(i, j)] = id
-			astar.connect_points(center, id)
-			for other in mine:
-				astar.connect_points(other, id)
-			mine.append(id)
-	for cor: Dictionary in layout["corridors"]:
-		var a: Array = cor["a"]
-		var b: Array = cor["b"]
-		var ia: int = gate if int(a[0]) < 0 else int(doors[Vector2i(a[0], a[1])])
-		astar.connect_points(ia, int(doors[Vector2i(b[0], b[1])]))
+	var blocked := {}
+	for room: Dictionary in rooms:
+		blocked.merge(OutpostLayout.blocked_cells(room))
+	var gx := OutpostLayout.GX
+	for i in gx * OutpostLayout.GZ:
+		var c := Vector2i(i % gx, i / gx)
+		if kind[i] != OutpostLayout.ROCK and not blocked.has(c):
+			astar.add_point(NAV_CELL + i, OutpostLayout.cell_pos(c) - lift)
+	for i in gx * OutpostLayout.GZ:
+		if not astar.has_point(NAV_CELL + i):
+			continue
+		var c := Vector2i(i % gx, i / gx)
+		for step: Vector2i in [Vector2i(1, 0), Vector2i(0, 1), Vector2i(1, 1), Vector2i(-1, 1)]:
+			var n := c + step
+			if not OutpostLayout.inside(n) or not astar.has_point(NAV_CELL + OutpostLayout.idx(n)):
+				continue
+			var ni := OutpostLayout.idx(n)
+			var diagonal := step.x != 0 and step.y != 0
+			if kind[i] == OutpostLayout.HALL:
+				if not diagonal and kind[ni] == OutpostLayout.HALL and links.has(OutpostLayout.edge_key(c, n)):
+					astar.connect_points(NAV_CELL + i, NAV_CELL + ni)
+				continue
+			if kind[ni] != OutpostLayout.ROOM or owner[ni] != owner[i]:
+				continue
+			if diagonal:
+				var a := Vector2i(n.x, c.y)
+				var e := Vector2i(c.x, n.y)
+				if not astar.has_point(NAV_CELL + OutpostLayout.idx(a)) or not astar.has_point(NAV_CELL + OutpostLayout.idx(e)) \
+						or owner[OutpostLayout.idx(a)] != owner[i] or owner[OutpostLayout.idx(e)] != owner[i]:
+					continue
+			if OutpostLayout.clear_line(rooms[owner[i]], OutpostLayout.cell_pos(c), OutpostLayout.cell_pos(n)):
+				astar.connect_points(NAV_CELL + i, NAV_CELL + ni)
+	var doors: Array = layout["doors"]
+	for di in doors.size():
+		var dd: Dictionary = doors[di]
+		astar.add_point(NAV_DOOR + di, (dd["pos"] as Vector3) - lift)
+		for c: Vector2i in [dd["cell"], dd["out"]]:
+			if OutpostLayout.inside(c) and astar.has_point(NAV_CELL + OutpostLayout.idx(c)):
+				astar.connect_points(NAV_DOOR + di, NAV_CELL + OutpostLayout.idx(c))
+	# The pier, out to the front door (door 0).
+	var deck := StationBuilder.DECK_Y
+	astar.add_point(NAV_PIER, Vector3(0, deck, StationBuilder.PIER_START + 0.8) - lift)
+	astar.add_point(NAV_PIER + 1, Vector3(0, deck, FACADE_Z - 1.2) - lift)
+	astar.connect_points(NAV_PIER, NAV_PIER + 1)
+	astar.connect_points(NAV_PIER + 1, NAV_DOOR)
 	if not ship_interior.is_empty():
 		var ids := ShipInteriors.add_to_nav(astar, ship_interior)
-		var ramp := _point(astar, Vector3(0, 0, 11.4))
+		var ramp := astar.get_available_point_id()
+		astar.add_point(ramp, Vector3(0, 0, 11.4))
 		astar.connect_points(ids[ship_interior["exit"]], ramp)
-		astar.connect_points(ramp, pier0)
+		astar.connect_points(ramp, NAV_PIER)
 	return astar
 
 
-static func _point(astar: AStar3D, p: Vector3) -> int:
-	var id := astar.get_available_point_id()
-	astar.add_point(id, p)
-	return id
+## Switch the doorways' waypoints on (open) or off (closed): `states` per door (Derelict.DOOR_*).
+static func apply_doors(astar: AStar3D, layout: Dictionary, states: PackedByteArray) -> void:
+	var doors: Array = layout["doors"]
+	for di in doors.size():
+		if astar.has_point(NAV_DOOR + di):
+			astar.set_point_disabled(NAV_DOOR + di, not Derelict.door_passable(doors[di], states, di))
 
 
 # --- Nodes -------------------------------------------------------------------------------------
@@ -302,27 +153,12 @@ static func build(parent: Node3D, d: Dictionary) -> Derelict:
 	var root := Derelict.new()
 	root.name = "Derelict%d" % int(d["k"])
 	root.k = int(d["k"])
+	root.layout = d["layout"]
 	root.transform = d["xform"]
 	parent.add_child(root)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = int(d["seed"])
-	var m := {
-		"wall": Models.panel_mat(Color(0.36, 0.37, 0.38), 0.4, 0.65, 0.35),
-		"inner": Models.panel_mat(Color(0.46, 0.47, 0.47), 0.25, 0.7, 0.45),
-		"floor": Models.panel_mat(Color(0.2, 0.21, 0.22), 0.45, 0.7, 0.5),
-		"ceiling": Models.panel_mat(Color(0.22, 0.23, 0.25), 0.3, 0.7, 0.5),
-		"dark": Models.mat(Color(0.1, 0.1, 0.11), 0.5, 0.7),
-		"mid": Models.mat(Color(0.27, 0.27, 0.28), 0.6, 0.55),
-		"rust": Models.mat(Color(0.34, 0.2, 0.12), 0.3, 0.85),
-		"yellow": Models.mat(Color(0.7, 0.55, 0.12), 0.3, 0.7),
-		"black": Models.mat(Color(0.06, 0.06, 0.06), 0.4, 0.7),
-		"crate": Models.panel_mat(Color(0.3, 0.33, 0.27), 0.2, 0.8, 1.0),
-		"dead_glass": Models.mat(Color(0.05, 0.07, 0.09), 0.6, 0.15),
-		"amber": Models.emissive(Color(1.0, 0.55, 0.15), 2.5),
-		"red": Models.emissive(Color(1.0, 0.12, 0.06), 3.0),
-		"screen": Models.emissive(Color(0.25, 0.7, 0.55), 0.7, Color(0.02, 0.03, 0.03)),
-		"goo": Alien.organic(Color(0.16, 0.07, 0.18), Color(0.6, 1.0, 0.25), 1.2, 5.0),
-	}
+	var m := _materials()
 	var b := Models.Batch.new()
 	var body := StaticBody3D.new()
 	body.collision_layer = Game.LAYER_CAVE | Game.LAYER_STATION
@@ -332,13 +168,78 @@ static func build(parent: Node3D, d: Dictionary) -> Derelict:
 	_build_facade(root, b, body, d, m, rng)
 	_build_pier(root, b, m)
 	var layout: Dictionary = d["layout"]
+	var powered := int(layout["generator"]) >= 0
+	_build_shell(b, body, layout, m)
+	_build_halls(root, b, layout, m, rng, powered)
+	var out := {"tanks": [], "subjects": [], "screens": [], "generator": {}}
 	var rooms: Array = layout["rooms"]
-	for i in rooms.size():
-		_build_room(root, b, body, rooms[i], m, rng, i == int(layout["vault"]))
-	for cor: Dictionary in layout["corridors"]:
-		_build_corridor(root, b, body, cor, m)
+	for ri in rooms.size():
+		_build_room(root, b, body, layout, ri, m, rng, powered, out)
+	_build_doors(root, b, layout, m, rng)
 	b.commit(root, "Derelict")
+	root.setup(out)
 	return root
+
+
+static func _materials() -> Dictionary:
+	return {
+		"wall": surface_mat("outpost_wall", Color(1, 1, 1), 0.5, true),
+		"hall_wall": surface_mat("outpost_wall", Color(0.82, 0.85, 0.8), 0.5, true),
+		"floor": surface_mat("outpost_floor", Color(1, 1, 1), 0.5, false),
+		"grate": surface_mat("outpost_grate", Color(1, 1, 1), 1.0, false),
+		"ceiling": surface_mat("outpost_wall", Color(0.5, 0.5, 0.5), 0.5, false),
+		"steel": Models.mat(Color(0.3, 0.31, 0.31), 0.75, 0.45),
+		"gunmetal": Models.mat(Color(0.14, 0.15, 0.16), 0.8, 0.4),
+		"olive": Models.mat(Color(0.3, 0.32, 0.2), 0.3, 0.68),
+		"bronze": Models.mat(Color(0.55, 0.38, 0.19), 0.85, 0.38),
+		"dark": Models.mat(Color(0.08, 0.08, 0.085), 0.5, 0.7),
+		"mid": Models.mat(Color(0.27, 0.27, 0.26), 0.6, 0.55),
+		"rust": Models.mat(Color(0.34, 0.2, 0.12), 0.3, 0.85),
+		"yellow": Models.mat(Color(0.72, 0.56, 0.12), 0.3, 0.7),
+		"red_paint": Models.mat(Color(0.5, 0.1, 0.07), 0.3, 0.65),
+		"black": Models.mat(Color(0.06, 0.06, 0.06), 0.4, 0.7),
+		"crate": Models.panel_mat(Color(0.3, 0.33, 0.22), 0.2, 0.8, 1.0),
+		"white": Models.mat(Color(0.62, 0.62, 0.58), 0.15, 0.55),
+		"cloth": Models.mat(Color(0.33, 0.34, 0.3), 0.0, 0.95),
+		"rubber": Models.mat(Color(0.05, 0.05, 0.05), 0.0, 0.8),
+		"stain": Models.mat(Color(0.08, 0.1, 0.06), 0.1, 0.35),
+		"glass": Models.glass(Color(0.55, 0.7, 0.68, 0.22)),
+		"liquid": Models.emissive(Color(0.3, 0.95, 0.4), 1.1, Color(0.06, 0.2, 0.08)),
+		"dead_glass": Models.mat(Color(0.05, 0.07, 0.09), 0.6, 0.15),
+		"amber": Models.emissive(Color(1.0, 0.55, 0.15), 2.5),
+		"red": Models.emissive(Color(1.0, 0.12, 0.06), 3.0),
+		"screen": Models.emissive(Color(0.25, 0.7, 0.55), 0.7, Color(0.02, 0.03, 0.03)),
+		"goo": Alien.organic(Color(0.16, 0.07, 0.18), Color(0.6, 1.0, 0.25), 1.2, 5.0),
+	}
+
+
+## A tiling outpost surface (res://assets/textures/<texture>_*, made by tools/blender/outpost.py):
+## painted wall panels, tread plate or grating, mapped from three sides in the station's frame,
+## `scale` tiles a metre, tinted `tint`. `deck_seams` lines the wall panels' seams up with the deck.
+static func surface_mat(texture: String, tint: Color, scale: float, deck_seams: bool) -> ORMMaterial3D:
+	var key := "%s|%s|%.2f|%s" % [texture, tint.to_html(), scale, deck_seams]
+	if _surfaces.has(key):
+		return _surfaces[key]
+	var m := ORMMaterial3D.new()
+	m.albedo_color = tint
+	m.albedo_texture = load("res://assets/textures/%s_albedo.png" % texture)
+	m.orm_texture = load("res://assets/textures/%s_orm.png" % texture)
+	m.roughness = 1.0
+	m.metallic = 1.0
+	m.ao_enabled = true
+	m.normal_enabled = true
+	m.normal_texture = load("res://assets/textures/%s_normal.png" % texture)
+	m.uv1_triplanar = true
+	m.uv1_triplanar_sharpness = 8.0
+	m.uv1_scale = Vector3.ONE * scale
+	if deck_seams:
+		m.uv1_offset = Vector3(0, -StationBuilder.DECK_Y * scale, 0)
+	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+	_surfaces[key] = m
+	return m
+
+
+static var _surfaces: Dictionary = {}
 
 
 static func _shape(body: StaticBody3D, pos: Vector3, size: Vector3, yaw := 0.0) -> void:
@@ -400,7 +301,7 @@ static func _growth(root: Node3D, pos: Vector3, normal: Vector3, m: Dictionary, 
 		root.add_child(mi)
 
 
-# --- Parts -------------------------------------------------------------------------------------
+# --- Hangar ------------------------------------------------------------------------------------
 
 ## The landing pad: faded markings, grime and dead landing lights.
 static func _build_pad(root: Derelict, b: Models.Batch, m: Dictionary, rng: RandomNumberGenerator) -> void:
@@ -454,16 +355,18 @@ static func _build_facade(root: Derelict, b: Models.Batch, body: StaticBody3D, d
 	var y1 := maxf(HANGAR_ROOF, cmax.y) + 3.0
 	var z0 := FACADE_Z - FACADE_T * 0.5
 	var z1 := FACADE_Z + FACADE_T * 0.5
-	var dw := DOOR_W * 0.5
+	var dw := OutpostLayout.DOOR_W * 0.5
+	var dh := OutpostLayout.DOOR_H
 	var deck := StationBuilder.DECK_Y
 	_block(b, body, Vector3(-hx, y0, z0), Vector3(-dw, y1, z1), m["wall"])
 	_block(b, body, Vector3(dw, y0, z0), Vector3(hx, y1, z1), m["wall"])
 	_block(b, body, Vector3(-dw, y0, z0), Vector3(dw, deck, z1), m["wall"])
-	_block(b, body, Vector3(-dw, deck + DOOR_H, z0), Vector3(dw, y1, z1), m["wall"])
+	_block(b, body, Vector3(-dw, deck + dh, z0), Vector3(dw, y1, z1), m["wall"])
 	var fz := z0 - 0.02
 	# Ribs, a dead window band and cracked panels.
 	for x: float in [-18.0, -10.0, 10.0, 18.0]:
-		b.box(Vector3(x, 7.0, fz - 0.25), Vector3(0.9, 18.0, 0.5), m["mid"])
+		b.box(Vector3(x, 7.0, fz - 0.25), Vector3(0.9, 18.0, 0.5), m["olive"])
+		b.box(Vector3(x, 7.0, fz - 0.52), Vector3(0.3, 18.0, 0.06), m["bronze"])
 	for side: float in [-1.0, 1.0]:
 		b.box(Vector3(side * 14.0, 9.5, fz), Vector3(6.5, 2.0, 0.05), m["dead_glass"])
 		b.box(Vector3(side * 5.5, 6.5, fz), Vector3(3.5, 1.2, 0.05), m["dead_glass"])
@@ -473,17 +376,17 @@ static func _build_facade(root: Derelict, b: Models.Batch, body: StaticBody3D, d
 				Vector3(0, 0, rng.randf_range(-12.0, 12.0)))
 	# Door frame with hazard stripes, a jammed door panel and a blinking warning light.
 	for side: float in [-1.0, 1.0]:
-		b.box(Vector3(side * (dw + 0.25), deck + DOOR_H * 0.5, fz - 0.05), Vector3(0.5, DOOR_H, 0.12), m["black"])
+		b.box(Vector3(side * (dw + 0.25), deck + dh * 0.5, fz - 0.05), Vector3(0.5, dh, 0.12), m["black"])
 		for i in 4:
-			b.box(Vector3(side * (dw + 0.25), deck + 0.4 + i * 0.75, fz - 0.12), Vector3(0.52, 0.28, 0.02), m["yellow"], Vector3(0, 0, 35))
-	b.box(Vector3(0, deck + DOOR_H + 0.25, fz - 0.05), Vector3(DOOR_W + 1.0, 0.5, 0.12), m["black"])
-	_solid(b, body, Vector3(-dw - 0.05, deck + DOOR_H * 0.5, z1 + 0.15), Vector3(0.9, DOOR_H, 0.2), m["mid"])
-	Models.sphere(root, Vector3(0, deck + DOOR_H + 0.75, fz - 0.15), 0.22, Models.blink(Color(1.0, 0.15, 0.05), 0.8, 0.0, 0.3))
+			b.box(Vector3(side * (dw + 0.25), deck + 0.4 + i * 0.7, fz - 0.12), Vector3(0.52, 0.28, 0.02), m["yellow"], Vector3(0, 0, 35))
+	b.box(Vector3(0, deck + dh + 0.25, fz - 0.05), Vector3(OutpostLayout.DOOR_W + 1.0, 0.5, 0.12), m["black"])
+	_solid(b, body, Vector3(-dw - 0.05, deck + dh * 0.5, z1 + 0.15), Vector3(0.9, dh, 0.2), m["mid"])
+	Models.sphere(root, Vector3(0, deck + dh + 0.75, fz - 0.15), 0.22, Models.blink(Color(1.0, 0.15, 0.05), 0.8, 0.0, 0.3))
 	# Name board and warnings.
 	b.box(Vector3(0, 13.0, fz - 0.1), Vector3(16.0, 2.2, 0.2), m["dark"])
 	_label(root, str(d["name"]), Vector3(0, 13.0, fz - 0.25), 150, 0.011, Color(0.85, 0.55, 0.25))
 	_label(root, "ABANDONED  -  NO SIGNAL", Vector3(0, 11.4, fz - 0.25), 64, 0.01, Color(0.85, 0.3, 0.25))
-	_label(root, "QUARANTINE", Vector3(0, deck + DOOR_H + 1.5, fz - 0.15), 48, 0.008, Color(1.0, 0.85, 0.3))
+	_label(root, "QUARANTINE", Vector3(0, deck + dh + 1.5, fz - 0.15), 48, 0.008, Color(1.0, 0.85, 0.3))
 	# Growth creeping out of the doorway.
 	_growth(root, Vector3(dw + 0.9, deck + 2.6, fz - 0.1), Vector3(0, 0, -1), m, rng, 0.8)
 	_growth(root, Vector3(-hx + 6.0, rng.randf_range(2.0, 8.0), fz - 0.1), Vector3(0, 0, -1), m, rng, 1.4)
@@ -500,11 +403,12 @@ static func _build_facade(root: Derelict, b: Models.Batch, body: StaticBody3D, d
 		flood.spot_attenuation = 0.8
 		flood.light_energy = 3.0
 		flood.light_color = Color(1.0, 0.82, 0.6)
+		flood.light_projector = Models.light_cookie("flood")
 		ShipBuilder.configure_shadow(flood)
 		if side > 0.0:
 			root.add_flicker(flood, rng.randf_range(0.12, 0.25), rng.randf())
 		b.box(housing + Vector3(0, -0.31, -0.2), Vector3(1.3, 0.04, 0.6), m["amber"])
-	_omni(root, Vector3(0, deck + DOOR_H + 0.9, fz - 1.0), Color(1.0, 0.2, 0.1), 1.2, 9.0, true, rng)
+	_omni(root, Vector3(0, deck + dh + 0.9, fz - 1.0), Color(1.0, 0.2, 0.1), 1.2, 9.0, true, rng)
 
 
 ## The pier from the cargo ramp to the door; one of its railings has fallen off.
@@ -518,7 +422,7 @@ static func _build_pier(root: Derelict, b: Models.Batch, m: Dictionary) -> void:
 	var z1 := FACADE_Z - FACADE_T * 0.5
 	var length := z1 - z0
 	var zc := (z0 + z1) * 0.5
-	_solid(b, body, Vector3(0, deck - 0.15, zc), Vector3(PIER_HALF_W * 2.0, 0.3, length), m["floor"])
+	_solid(b, body, Vector3(0, deck - 0.15, zc), Vector3(PIER_HALF_W * 2.0, 0.3, length), m["grate"])
 	b.box(Vector3(-PIER_HALF_W + 0.15, deck + 0.01, zc), Vector3(0.12, 0.02, length), m["yellow"])
 	var x := PIER_HALF_W - 0.05
 	_shape(body, Vector3(x, deck + 0.6, zc + 0.15), Vector3(0.08, 1.2, length - 0.3))
@@ -532,153 +436,594 @@ static func _build_pier(root: Derelict, b: Models.Batch, m: Dictionary) -> void:
 		b.box(Vector3(xs, (deck - 0.3 + HANGAR_FLOOR - 1.0) * 0.5, zc + 0.6), Vector3(0.45, deck - 0.3 - HANGAR_FLOOR + 1.0, 0.45), m["mid"])
 
 
-## A room: floor, ceiling, walls with doorways, furniture, a (failing) light and its name.
-static func _build_room(root: Derelict, b: Models.Batch, body: StaticBody3D, room: Dictionary, m: Dictionary,
-		rng: RandomNumberGenerator, vault: bool) -> void:
-	var c: Vector2 = room["c"]
-	var size: Vector2 = room["size"]
+# --- The complex -------------------------------------------------------------------------------
+
+## True when nothing separates 4-neighbouring cells a and b: the same room, or linked corridor.
+static func _open_edge(layout: Dictionary, a: Vector2i, b: Vector2i) -> bool:
+	if not OutpostLayout.inside(a) or not OutpostLayout.inside(b):
+		return false
+	var kind: PackedByteArray = layout["kind"]
+	var owner: PackedInt32Array = layout["owner"]
+	var ia := OutpostLayout.idx(a)
+	var ib := OutpostLayout.idx(b)
+	if kind[ia] == OutpostLayout.ROOM and kind[ib] == OutpostLayout.ROOM:
+		return owner[ia] == owner[ib]
+	if kind[ia] == OutpostLayout.HALL and kind[ib] == OutpostLayout.HALL:
+		return (layout["links"] as Dictionary).has(OutpostLayout.edge_key(a, b))
+	return false
+
+
+static func _walkable(layout: Dictionary, c: Vector2i) -> bool:
+	return OutpostLayout.inside(c) and (layout["kind"] as PackedByteArray)[OutpostLayout.idx(c)] != OutpostLayout.ROCK
+
+
+## The door between 4-neighbouring cells, or -1.
+static func _door_between(layout: Dictionary, a: Vector2i, b: Vector2i) -> int:
+	if not OutpostLayout.inside(a) or not OutpostLayout.inside(b):
+		return -1
+	return int((layout["door_at"] as Dictionary).get(OutpostLayout.edge_key(a, b), -1))
+
+
+# --- Walls, for the aliens' moves ------------------------------------------------------------------
+
+## True when something's middle may go from station-local point a to b (a short step): within one
+## cell, or into a neighbouring one it is open to (the same room, a linked corridor, or through an
+## open doorway between its jambs; a shut door is a wall). `doors`: the doors' states (Derelict).
+## On and off the grid (the pier) only by the front door; out of rock always, never into it.
+static func step_clear(layout: Dictionary, doors: PackedByteArray, a: Vector3, b: Vector3) -> bool:
+	var ca := OutpostLayout.cell_at(a)
+	var cb := OutpostLayout.cell_at(b)
+	if ca == cb:
+		return true
+	var on_a := OutpostLayout.inside(ca)
+	var on_b := OutpostLayout.inside(cb)
+	if not on_a and not on_b:
+		return true
+	if on_a and not _walkable(layout, ca):
+		return true
+	if on_b and not _walkable(layout, cb):
+		return false
+	var mid := (a + b) * 0.5
+	var d := cb - ca
+	if absi(d.x) + absi(d.y) == 1:
+		return _side_open(layout, doors, ca, cb, mid, 0.0)
+	if absi(d.x) == 1 and absi(d.y) == 1:
+		for m: Vector2i in [Vector2i(cb.x, ca.y), Vector2i(ca.x, cb.y)]:
+			if _walkable(layout, m) and _side_open(layout, doors, ca, m, mid, 0.0) and _side_open(layout, doors, m, cb, mid, 0.0):
+				return true
+	return false
+
+
+## Station-local point p moved off the walls of its cell, the jambs of its doorways and the ends of
+## walls at its corners, to at least `margin` from their faces: where something that thick may be.
+static func keep_off_walls(layout: Dictionary, doors: PackedByteArray, p: Vector3, margin: float) -> Vector3:
+	var c := OutpostLayout.cell_at(p)
+	if not _walkable(layout, c):
+		return p
+	var centre := OutpostLayout.cell_pos(c)
+	var reach := OutpostLayout.CELL * 0.5 - OutpostLayout.WALL_T * 0.5 - margin
+	var out := p
+	for dir: Vector2i in OutpostLayout.DIRS:
+		var off := (p.x - centre.x) * dir.x + (p.z - centre.z) * dir.y
+		if off <= reach or _side_open(layout, doors, c, c + dir, p, margin):
+			continue
+		if dir.x != 0:
+			out.x = centre.x + dir.x * reach
+		else:
+			out.z = centre.z + dir.y * reach
+	for dx: int in [-1, 1]:
+		for dz: int in [-1, 1]:
+			var ox := (out.x - centre.x) * dx
+			var oz := (out.z - centre.z) * dz
+			if ox <= reach or oz <= reach:
+				continue
+			var diag := c + Vector2i(dx, dz)
+			if _walkable(layout, diag) and _open_edge(layout, c + Vector2i(dx, 0), diag) and _open_edge(layout, c + Vector2i(0, dz), diag):
+				continue
+			# The end of a wall at this corner: out of its way the shorter way.
+			if ox < oz:
+				out.x = centre.x + dx * reach
+			else:
+				out.z = centre.z + dz * reach
+	return out
+
+
+## Whether something `margin` thick at station-local point p may cross from cell c into its
+## 4-neighbour n: they are open to each other, or p is within an open doorway between them.
+static func _side_open(layout: Dictionary, doors: PackedByteArray, c: Vector2i, n: Vector2i, p: Vector3, margin: float) -> bool:
+	if _open_edge(layout, c, n):
+		return true
+	var front := Vector2i(OutpostLayout.MID, 0)
+	var pier := Vector2i(OutpostLayout.MID, -1)
+	if (c == front and n == pier) or (c == pier and n == front):
+		return absf(p.x) < OutpostLayout.DOOR_W * 0.5 - margin
+	var di := _door_between(layout, c, n)
+	if di < 0 or not Derelict.door_passable(layout["doors"][di], doors, di):
+		return false
+	var dd: Dictionary = layout["doors"][di]
+	var across := (dd["normal"] as Vector3).cross(Vector3.UP)
+	return absf((p - (dd["pos"] as Vector3)).dot(across)) < OutpostLayout.DOOR_W * 0.5 - margin
+
+
+## Floors, ceilings and walls: every cell's floor and ceiling, and a wall on every edge between a
+## walkable cell and anything it isn't open to (rock, another room, a corridor it isn't linked to),
+## with doorways cut where the doors are. Runs of equal pieces are merged.
+static func _build_shell(b: Models.Batch, body: StaticBody3D, layout: Dictionary, m: Dictionary) -> void:
+	var kind: PackedByteArray = layout["kind"]
 	var deck := StationBuilder.DECK_Y
-	_solid(b, body, Vector3(c.x, deck - 0.15, c.y), Vector3(size.x + WALL_T, 0.3, size.y + WALL_T), m["floor"])
-	_solid(b, body, Vector3(c.x, deck + ROOM_H + 0.15, c.y), Vector3(size.x + WALL_T, 0.3, size.y + WALL_T), m["ceiling"])
-	for side in 4:
-		_room_wall(b, body, room, side, m)
+	var cell := OutpostLayout.CELL
+	var gx := OutpostLayout.GX
+	var gz := OutpostLayout.GZ
+	# Floors and ceilings, merged along each row.
+	for j in gz:
+		var i := 0
+		while i < gx:
+			var c := Vector2i(i, j)
+			if kind[OutpostLayout.idx(c)] == OutpostLayout.ROCK:
+				i += 1
+				continue
+			var k := kind[OutpostLayout.idx(c)]
+			var h := OutpostLayout.ceiling(layout, c)
+			var e := i
+			while e + 1 < gx and kind[OutpostLayout.idx(Vector2i(e + 1, j))] == k and is_equal_approx(OutpostLayout.ceiling(layout, Vector2i(e + 1, j)), h):
+				e += 1
+			var p0 := OutpostLayout.cell_pos(Vector2i(i, j))
+			var p1 := OutpostLayout.cell_pos(Vector2i(e, j))
+			var mid := (p0 + p1) * 0.5
+			var size := Vector3(p1.x - p0.x + cell, 0.3, cell)
+			var hall := k == OutpostLayout.HALL
+			_solid(b, body, Vector3(mid.x, deck - 0.15, mid.z), size, m["grate"] if hall else m["floor"])
+			_solid(b, body, Vector3(mid.x, deck + h + 0.15, mid.z), size, m["ceiling"])
+			i = e + 1
+	# Walls along x (between rows j and j + 1) and along z (between columns i and i + 1).
+	for axis in 2:
+		var lines := gz if axis == 0 else gx
+		var along_n := gx if axis == 0 else gz
+		for line in range(0 if axis == 0 else -1, lines):
+			var run_start := -1
+			var run_h := 0.0
+			for t in along_n + 1:
+				var h := 0.0
+				var door := -1
+				if t < along_n:
+					var a := Vector2i(t, line) if axis == 0 else Vector2i(line, t)
+					var e := a + (Vector2i(0, 1) if axis == 0 else Vector2i(1, 0))
+					if (_walkable(layout, a) or _walkable(layout, e)) and not _open_edge(layout, a, e):
+						h = maxf(OutpostLayout.ceiling(layout, a), OutpostLayout.ceiling(layout, e))
+						door = _door_between(layout, a, e)
+						if door >= 0:
+							_doorway_wall(b, body, a, e, h, m)
+							h = 0.0
+				if run_start >= 0 and (h <= 0.0 or not is_equal_approx(h, run_h)):
+					_wall_run(b, body, axis, line, run_start, t - 1, run_h, m)
+					run_start = -1
+				if h > 0.0 and run_start < 0:
+					run_start = t
+					run_h = h
+
+
+## A merged wall from cell `t0` to `t1` along a grid line.
+static func _wall_run(b: Models.Batch, body: StaticBody3D, axis: int, line: int, t0: int, t1: int, h: float, m: Dictionary) -> void:
+	var cell := OutpostLayout.CELL
+	var deck := StationBuilder.DECK_Y
+	var wt := OutpostLayout.WALL_T
+	if axis == 0:
+		var a := OutpostLayout.cell_pos(Vector2i(t0, line))
+		var e := OutpostLayout.cell_pos(Vector2i(t1, line))
+		var z := a.z + cell * 0.5
+		_block(b, body, Vector3(a.x - cell * 0.5 - wt * 0.5, deck, z - wt * 0.5), Vector3(e.x + cell * 0.5 + wt * 0.5, deck + h, z + wt * 0.5), m["wall"])
+	else:
+		var a := OutpostLayout.cell_pos(Vector2i(line, t0))
+		var e := OutpostLayout.cell_pos(Vector2i(line, t1))
+		var x := a.x + cell * 0.5
+		_block(b, body, Vector3(x - wt * 0.5, deck, a.z - cell * 0.5 - wt * 0.5), Vector3(x + wt * 0.5, deck + h, e.z + cell * 0.5 + wt * 0.5), m["wall"])
+
+
+## The wall on a doorway's edge: a piece either side of the opening and a lintel over it.
+static func _doorway_wall(b: Models.Batch, body: StaticBody3D, a: Vector2i, e: Vector2i, h: float, m: Dictionary) -> void:
+	var cell := OutpostLayout.CELL
+	var deck := StationBuilder.DECK_Y
+	var wt := OutpostLayout.WALL_T
+	var dw := OutpostLayout.DOOR_W * 0.5
+	var mid := (OutpostLayout.cell_pos(a) + OutpostLayout.cell_pos(e)) * 0.5
+	var along_x := a.y != e.y
+	var t := Vector3(1, 0, 0) if along_x else Vector3(0, 0, 1)
+	var n := Vector3(0, 0, 1) if along_x else Vector3(1, 0, 0)
+	for side: float in [-1.0, 1.0]:
+		var c0 := mid + t * side * dw
+		var c1 := mid + t * side * (cell * 0.5 + wt * 0.5)
+		var lo := Vector3(minf(c0.x, c1.x), deck, minf(c0.z, c1.z)) - n * wt * 0.5
+		var hi := Vector3(maxf(c0.x, c1.x), deck + h, maxf(c0.z, c1.z)) + n * wt * 0.5
+		_block(b, body, lo, hi, m["wall"])
+	var l0 := mid - t * dw - n * wt * 0.5
+	var l1 := mid + t * dw + n * wt * 0.5
+	_block(b, body, Vector3(l0.x, deck + OutpostLayout.DOOR_H, l0.z), Vector3(l1.x, deck + h, l1.z), m["wall"])
+
+
+## Which sides of a corridor cell are open (to a linked corridor cell or through a doorway): one bit
+## per OutpostLayout.DIRS entry.
+static func _hall_opens(layout: Dictionary, c: Vector2i) -> int:
+	var bits := 0
+	for d in 4:
+		var n: Vector2i = c + OutpostLayout.DIRS[d]
+		if _open_edge(layout, c, n) or _door_between(layout, c, n) >= 0:
+			bits |= 1 << d
+	if c == Vector2i(OutpostLayout.MID, 0):
+		bits |= 1 << 3
+	return bits
+
+
+## The corridors: straight runs get octagonal frames, chamfered corners, pipes and lamps; corners
+## and junctions a frame in the ceiling and a lamp.
+static func _build_halls(root: Derelict, b: Models.Batch, layout: Dictionary, m: Dictionary, rng: RandomNumberGenerator, powered: bool) -> void:
+	var h := OutpostLayout.CORRIDOR_H
+	var w := OutpostLayout.CELL * 0.5 - OutpostLayout.WALL_T * 0.5
+	for c: Vector2i in OutpostLayout.corridor_cells(layout):
+		var bits := _hall_opens(layout, c)
+		var p := OutpostLayout.cell_pos(c)
+		var straight_x := bits == 3
+		var straight_z := bits == 12
+		if straight_x or straight_z:
+			var x := Transform3D(Basis(Vector3.UP, PI / 2.0) if straight_x else Basis.IDENTITY, p)
+			_octagon_frame(b, x, m)
+			for e: Array in _octagon_edges():
+				var a: Vector2 = e[0]
+				var f: Vector2 = e[1]
+				if a.y > 0.01 and f.y > 0.01 and absf(a.x - f.x) > 0.01 and absf(a.y - f.y) > 0.01:
+					_panel_along(b, x, a, f, OutpostLayout.CELL, m["hall_wall"])
+				elif a.y < 0.01 != (f.y < 0.01):
+					_panel_along(b, x, a, f, OutpostLayout.CELL, m["steel"])
+			# Pipes along the right-hand wall under the chamfer, a cable tray on the left.
+			var pv := h - CHAMFER_TOP - 0.2
+			b.cyl_at(x * Transform3D(Basis(Vector3.RIGHT, PI / 2.0), Vector3(w - 0.14, pv, 0)), 0.075, OutpostLayout.CELL, m["bronze"], -1.0, 8)
+			b.cyl_at(x * Transform3D(Basis(Vector3.RIGHT, PI / 2.0), Vector3(w - 0.12, pv - 0.24, 0)), 0.05, OutpostLayout.CELL, m["olive"], -1.0, 8)
+			b.box(x * Vector3(-w + 0.12, pv + 0.05, 0), Vector3(0.18, 0.06, OutpostLayout.CELL) if straight_z else Vector3(OutpostLayout.CELL, 0.06, 0.18), m["steel"])
+			for i in 3:
+				b.cyl_at(x * Transform3D(Basis(Vector3.RIGHT, PI / 2.0), Vector3(-w + 0.08 + i * 0.05, pv + 0.1, 0)), 0.022, OutpostLayout.CELL, m["rubber"], -1.0, 8)
+			# A grate down the middle of the floor and steel plates either side.
+			b.box(x * Vector3(0, 0.005, 0), Vector3(1.3, 0.012, OutpostLayout.CELL) if straight_z else Vector3(OutpostLayout.CELL, 0.012, 1.3), m["dark"])
+			if (c.x + c.y) % LAMP_EVERY == 0:
+				_hall_lamp(root, b, x * Vector3(0, h, 0.9), straight_x, m, rng, powered, c)
+			elif rng.randf() < 0.3:
+				_emergency_lamp(root, b, x * Vector3(-w + 0.02, 2.2, 0.0), x.basis * Vector3(1, 0, 0), m, rng, powered, c)
+		else:
+			# A corner or junction: a square frame in the ceiling round a lamp.
+			for i in 4:
+				var a := Vector3(-1.0, 0, -1.0).rotated(Vector3.UP, i * PI / 2.0)
+				var e := Vector3(1.0, 0, -1.0).rotated(Vector3.UP, i * PI / 2.0)
+				b.beam(p + a * w + Vector3(0, h - 0.12, 0), p + e * w + Vector3(0, h - 0.12, 0), FRAME_T, 0.24, m["bronze"])
+			for d in 4:
+				if bits & (1 << d) != 0:
+					continue
+				# A closed side: a ribbed bulkhead panel on the wall.
+				var dv := Vector3(OutpostLayout.DIRS[d].x, 0, OutpostLayout.DIRS[d].y)
+				var wx := Transform3D(Basis.looking_at(dv, Vector3.UP), p + dv * (w - 0.04))
+				for r in 5:
+					b.box(wx * Vector3(0, 0.45 + r * 0.55, 0), Vector3(2.2, 0.08, 0.08), m["steel"])
+			_hall_lamp(root, b, p + Vector3(0, h, 0), false, m, rng, powered, c)
+
+
+## The octagon a corridor's frames follow (across, up), corridor along local z: [from, to] of each
+## side but the floor.
+static func _octagon_edges() -> Array:
+	var w := OutpostLayout.CELL * 0.5 - OutpostLayout.WALL_T * 0.5
+	var h := OutpostLayout.CORRIDOR_H
+	var ct := CHAMFER_TOP
+	var cb := CHAMFER_BOTTOM
+	var p := [Vector2(-w, cb), Vector2(-w + cb, 0), Vector2(w - cb, 0), Vector2(w, cb), Vector2(w, h - ct), Vector2(w - ct, h),
+		Vector2(-w + ct, h), Vector2(-w, h - ct)]
+	return [[p[0], p[1]], [p[2], p[3]], [p[3], p[4]], [p[4], p[5]], [p[5], p[6]], [p[6], p[7]], [p[7], p[0]]]
+
+
+## An octagonal frame round a corridor at local z = 0 of `x`: heavy bronze-edged beams on every side
+## but the floor, with a threshold plate across it.
+static func _octagon_frame(b: Models.Batch, x: Transform3D, m: Dictionary) -> void:
+	var centre := Vector2(0, OutpostLayout.CORRIDOR_H * 0.5)
+	for e: Array in _octagon_edges():
+		var a: Vector2 = e[0]
+		var f: Vector2 = e[1]
+		var dir := (f - a).normalized()
+		var inward := Vector2(-dir.y, dir.x)
+		if inward.dot(centre - (a + f) * 0.5) < 0.0:
+			inward = -inward
+		var mid := (a + f) * 0.5 + inward * FRAME_T * 0.5
+		var basis := Basis(Vector3(0, 0, 1), atan2(dir.y, dir.x))
+		b.box_at(x * Transform3D(basis, Vector3(mid.x, mid.y, 0)), Vector3(a.distance_to(f) + 0.12, FRAME_T, FRAME_D), m["olive"])
+		var edge := (a + f) * 0.5 + inward * (FRAME_T + 0.02)
+		b.box_at(x * Transform3D(basis, Vector3(edge.x, edge.y, 0)), Vector3(a.distance_to(f) + 0.1, 0.05, FRAME_D + 0.06), m["bronze"])
+	var w := OutpostLayout.CELL * 0.5 - OutpostLayout.WALL_T * 0.5
+	b.box(x * Vector3(0, 0.012, 0), Vector3(2.0 * (w - CHAMFER_BOTTOM), 0.025, FRAME_D) if x.basis.z.z != 0.0 \
+		else Vector3(FRAME_D, 0.025, 2.0 * (w - CHAMFER_BOTTOM)), m["yellow"])
+	# Bolts on the wall beams.
+	for side: float in [-1.0, 1.0]:
+		for y: float in [0.8, 1.6, 2.4]:
+			b.cyl_at(x * Transform3D(Basis(Vector3(0, 0, 1), PI / 2.0), Vector3(side * (w - FRAME_T - 0.02), y, 0.0)), 0.035, 0.05, m["bronze"], -1.0, 8)
+
+
+## A flat panel along the corridor over the octagon side a-b (a chamfer), `length` long.
+static func _panel_along(b: Models.Batch, x: Transform3D, a: Vector2, e: Vector2, length: float, mat: Material) -> void:
+	var dir := (e - a).normalized()
+	var mid := (a + e) * 0.5
+	b.box_at(x * Transform3D(Basis(Vector3(0, 0, 1), atan2(dir.y, dir.x)), Vector3(mid.x, mid.y, 0)), Vector3(a.distance_to(e), 0.04, length), mat)
+
+
+## A caged lamp on a corridor's ceiling (`at`: the ceiling point). With a generator it waits for its
+## power; without one it is one of the failing lamps (some dead, some flickering).
+static func _hall_lamp(root: Derelict, b: Models.Batch, at: Vector3, across_x: bool, m: Dictionary, rng: RandomNumberGenerator,
+		powered: bool, c: Vector2i) -> void:
+	var size := Vector3(0.3, 0.12, 0.6) if across_x else Vector3(0.6, 0.12, 0.3)
+	b.box(at + Vector3(0, -0.06, 0), size + Vector3(0.08, 0, 0.08), m["steel"])
+	for i in 3:
+		var off := (i - 1) * 0.12
+		b.box(at + Vector3(off if across_x else 0.0, -0.17, 0.0 if across_x else off), Vector3(0.025, 0.08, size.z) if across_x else Vector3(size.x, 0.08, 0.025), m["dark"])
+	var circuit := Derelict.POWER if powered else Derelict.ALWAYS
+	if rng.randf() < (0.12 if powered else 0.3):
+		circuit = Derelict.DEAD
+	root.add_lamp(at + Vector3(0, -0.14, 0), size - Vector3(0.06, 0.04, 0.06), LAMP_COLOR, rng.randf_range(1.0, 1.35), 6.5, circuit,
+		c, rng.randf() < (0.2 if powered else 0.45), rng)
+	if powered and rng.randf() < 0.35:
+		_emergency_lamp(root, b, at + Vector3(0, -0.25, 0), Vector3.DOWN, m, rng, powered, c)
+
+
+## A small red emergency lamp on a surface (`facing`: out of it). With a generator it goes out once
+## the power is back.
+static func _emergency_lamp(root: Derelict, b: Models.Batch, at: Vector3, facing: Vector3, m: Dictionary, rng: RandomNumberGenerator,
+		powered: bool, c: Vector2i) -> void:
+	b.box(at, Vector3(0.22, 0.14, 0.22), m["dark"])
+	root.add_lamp(at + facing * 0.1, Vector3(0.14, 0.08, 0.14), EMERGENCY_COLOR, 0.55, 4.5,
+		Derelict.EMERGENCY if powered else Derelict.ALWAYS, c, rng.randf() < 0.3, rng)
+
+
+## A room: ribbed walls with pilasters, beams under the ceiling, lamps, its furniture, signs over its
+## doorways (on the corridor side) and a little debris and alien growth.
+static func _build_room(root: Derelict, b: Models.Batch, body: StaticBody3D, layout: Dictionary, ri: int, m: Dictionary,
+		rng: RandomNumberGenerator, powered: bool, out: Dictionary) -> void:
+	var room: Dictionary = layout["rooms"][ri]
+	var h := float(room["h"])
+	var deck := StationBuilder.DECK_Y
+	var cell := OutpostLayout.CELL
+	var cells: Array = room["cells"]
+	# Ribbed lower panels and a cornice along each stretch of wall, pilasters where they meet.
+	var pilasters := {}
+	for s: Dictionary in OutpostLayout.wall_slots(layout, ri):
+		var inward: Vector3 = s["inward"]
+		var along := Vector3(inward.z, 0, -inward.x)
+		var p: Vector3 = s["pos"]
+		for r in 4:
+			b.box(p + inward * 0.03 + Vector3(0, 0.2 + r * 0.26, 0), _along_size(along, cell - 0.3, 0.07, 0.06), m["olive"])
+		b.box(p + inward * 0.04 + Vector3(0, 1.22, 0), _along_size(along, cell - 0.3, 0.06, 0.08), m["bronze"])
+		b.box(p + inward * 0.06 + Vector3(0, h - 0.3, 0), _along_size(along, cell, 0.22, 0.12), m["steel"])
+		for side: float in [-1.0, 1.0]:
+			var q := p + along * side * cell * 0.5
+			var key := Vector2i(roundi(q.x * 10.0), roundi(q.z * 10.0))
+			if pilasters.has(key):
+				continue
+			pilasters[key] = true
+			b.box(q + inward * 0.09 + Vector3(0, h * 0.5, 0), Vector3(0.3, h, 0.3) if absf(inward.x) < 0.5 else Vector3(0.3, h, 0.3), m["olive"])
+			b.box(q + inward * 0.25 + Vector3(0, h * 0.5, 0), _along_size(along, 0.12, h, 0.04), m["bronze"])
+	# Beams under the ceiling across every cell boundary along z inside the room.
+	for c: Vector2i in cells:
+		var n := c + Vector2i(0, 1)
+		if n in cells:
+			var p := OutpostLayout.cell_pos(c) + Vector3(0, h - 0.2, cell * 0.5)
+			b.box(p, Vector3(cell + 0.02, 0.4, 0.3), m["olive"])
+			b.box(p + Vector3(0, -0.21, 0), Vector3(cell + 0.02, 0.04, 0.34), m["bronze"])
+	# Lamps: up to three over the core, spread out; one gets a light.
+	var core: Rect2i = room["core"]
+	var spots: Array[Vector2i] = []
+	for i in core.size.x:
+		for j in core.size.y:
+			if (i + j) % 2 == 0 and (i % 2 == 0):
+				spots.append(core.position + Vector2i(i, j))
+	OutpostLayout._shuffle(spots, rng)
+	var lamps := mini(spots.size(), 2 + (1 if core.get_area() > 12 else 0))
+	for i in lamps:
+		var lp := OutpostLayout.cell_pos(spots[i]) + Vector3(0, h, 0)
+		_room_lamp(root, b, lp, m, rng, powered, spots[i], str(room["theme"]) == "generator")
+	if powered:
+		# A dim emergency lamp by the room's first doorway, so it can be found in the dark.
+		var dd: Dictionary = layout["doors"][(room["doors"] as Array)[0]]
+		var ep := DerelictBuilder.door_inside(dd, 0.25) + Vector3(0, OutpostLayout.DOOR_H + 0.35, 0)
+		_emergency_lamp(root, b, ep, -(dd["normal"] as Vector3), m, rng, powered, dd["cell"])
+	# Furniture.
 	for p: Dictionary in room["props"]:
-		_prop(root, b, body, p, m, rng)
-	# Ceiling lamp: cold, warm, red emergency light or dead; some of them flicker.
-	var lamp := Vector3(c.x, deck + ROOM_H - 0.05, c.y)
-	var roll := rng.randf()
-	var col := Color(0.8, 0.88, 1.0) if roll < 0.35 else (Color(1.0, 0.78, 0.5) if roll < 0.65 else Color(1.0, 0.22, 0.12))
-	var dead := rng.randf() < 0.15 and not vault
-	b.box(lamp, Vector3(2.2, 0.08, 0.5), m["dark"] if dead else Models.emissive(col, 2.0))
-	_omni(root, lamp + Vector3(0, -0.5, 0), col, 0.15 if dead else rng.randf_range(0.9, 1.4),
-		maxf(size.x, size.y) * 0.95, not dead and rng.randf() < 0.45, rng)
-	if vault:
-		# The vault is lit by a glowing alien hive on the back wall.
-		var back := Vector3(c.x, deck + 1.5, _z1(room) - WALL_T * 0.5 - 0.05)
-		_growth(root, back, Vector3(0, 0, -1), m, rng, 1.6)
-		_omni(root, back + Vector3(0, 0.5, -1.5), Color(0.55, 1.0, 0.3), 1.0, 7.0)
-	# The room's name over its first doorway.
-	var doors: Array = room["doors"]
-	if not doors.is_empty():
-		var door: Dictionary = doors[0]
-		var side := int(door["side"])
-		var inward: Vector3 = _wall_line(room, side)[1]
-		var p := _wall_point(room, side, float(door["at"]), WALL_T * 0.5 + 0.03) + Vector3(0, DOOR_H + 0.45, 0)
-		_label(root, str(room["name"]), p, 40, 0.006, Color(0.9, 0.8, 0.55), atan2(inward.x, inward.z))
+		OutpostProps.build(root, b, body, p, m, out)
+	# Signs over the doorways (above their frames), on the corridor side.
+	for di: int in room["doors"]:
+		var dd: Dictionary = layout["doors"][di]
+		var n: Vector3 = dd["normal"]
+		var sp := (dd["pos"] as Vector3) + n * (OutpostLayout.WALL_T * 0.5 + 0.04) + Vector3(0, OutpostLayout.DOOR_H + 0.47, 0)
+		b.box(sp - n * 0.015, _along_size(Vector3(n.z, 0, -n.x), 1.3, 0.2, 0.03), m["dark"])
+		_label(root, str(room["name"]), sp + n * 0.004, 32, 0.0042, Color(0.92, 0.72, 0.38), atan2(n.x, n.z))
 	# Debris on the floor and alien growth in a corner.
+	var free := OutpostLayout.free_cells(room)
 	for i in rng.randi_range(2, 5):
-		var p := Vector3(c.x + rng.randf_range(-0.4, 0.4) * size.x, deck + 0.06, c.y + rng.randf_range(-0.4, 0.4) * size.y)
+		var c: Vector2i = free[rng.randi() % free.size()] if not free.is_empty() else cells[0]
+		var p := OutpostLayout.cell_pos(c) + Vector3(rng.randf_range(-1.0, 1.0), 0.06, rng.randf_range(-1.0, 1.0))
 		b.box(p, Vector3(rng.randf_range(0.2, 0.7), 0.1, rng.randf_range(0.2, 0.9)), m["mid"] if i % 2 == 0 else m["rust"],
 			Vector3(0, rng.randf_range(0, 180), rng.randf_range(-8, 8)))
-	if rng.randf() < 0.55 or vault:
-		var corner := Vector3(_x0(room) + 0.4 if rng.randf() < 0.5 else _x1(room) - 0.4, deck + 0.05,
-			_z0(room) + 0.4 if rng.randf() < 0.5 else _z1(room) - 0.4)
-		_growth(root, corner, Vector3.UP, m, rng)
+	if rng.randf() < 0.5 or str(room["theme"]) == "vault":
+		var slots := OutpostLayout.wall_slots(layout, ri)
+		var s: Dictionary = slots[rng.randi() % slots.size()]
+		_growth(root, (s["pos"] as Vector3) + Vector3(0, rng.randf_range(0.3, 2.5), 0), s["inward"], m, rng, 1.1)
 
 
-## One wall of a room with its doorways cut out (a lintel above each one).
-static func _room_wall(b: Models.Batch, body: StaticBody3D, room: Dictionary, side: int, m: Dictionary) -> void:
-	var horizontal := side <= Side.BACK
-	var fixed := float(_wall_line(room, side)[0])
-	var c: Vector2 = room["c"]
-	var size: Vector2 = room["size"]
-	var a0 := c.x - size.x * 0.5 - WALL_T * 0.5 if horizontal else c.y - size.y * 0.5 + WALL_T * 0.5
-	var a1 := c.x + size.x * 0.5 + WALL_T * 0.5 if horizontal else c.y + size.y * 0.5 - WALL_T * 0.5
-	var gaps: Array = []
-	for door: Dictionary in room["doors"]:
-		if int(door["side"]) == side:
-			gaps.append(float(door["at"]))
-	gaps.sort()
+## A box `length` long along `along` (x or z), `height` tall and `depth` deep across it.
+static func _along_size(along: Vector3, length: float, height: float, depth: float) -> Vector3:
+	return Vector3(length, height, depth) if absf(along.x) > 0.5 else Vector3(depth, height, length)
+
+
+## A hanging industrial lamp over a room (`at`: the ceiling point).
+static func _room_lamp(root: Derelict, b: Models.Batch, at: Vector3, m: Dictionary, rng: RandomNumberGenerator, powered: bool,
+		c: Vector2i, emergency_too: bool) -> void:
+	var drop := 0.9
+	b.box(at + Vector3(0, -drop * 0.5, 0), Vector3(0.04, drop, 0.04), m["dark"])
+	b.cyl_at(Transform3D(Basis.IDENTITY, at + Vector3(0, -drop - 0.12, 0)), 0.45, 0.3, m["olive"], 0.12, 12)
+	var circuit := Derelict.POWER if powered else Derelict.ALWAYS
+	if rng.randf() < (0.1 if powered else 0.25):
+		circuit = Derelict.DEAD
+	root.add_lamp(at + Vector3(0, -drop - 0.28, 0), Vector3(0.36, 0.06, 0.36), LAMP_COLOR, rng.randf_range(2.2, 2.8), 10.5, circuit, c,
+		rng.randf() < (0.2 if powered else 0.45), rng)
+	if emergency_too:
+		root.add_lamp(at + Vector3(0.6, -0.1, 0), Vector3(0.18, 0.08, 0.18), EMERGENCY_COLOR, 0.8, 7.0, Derelict.ALWAYS, c, true, rng)
+
+
+## Doorways: a heavy frame on both faces of every doorway; sealed doors get their door (sliding up
+## into the wall), a lamp over it on the corridor side, and a keypad lock its keypad and lockdown
+## shutter. Some open doorways have a door jammed half way up.
+static func _build_doors(root: Derelict, b: Models.Batch, layout: Dictionary, m: Dictionary, rng: RandomNumberGenerator) -> void:
+	var doors: Array = layout["doors"]
 	var deck := StationBuilder.DECK_Y
-	var cur := a0
-	var inward: Vector3 = _wall_line(room, side)[1]
-	for at: float in gaps:
-		_wall_piece(b, body, horizontal, fixed, cur, at - DOOR_W * 0.5, deck, deck + ROOM_H, m["inner"])
-		_skirting(b, horizontal, fixed, cur, at - DOOR_W * 0.5 - 0.08, inward, m)
-		_wall_piece(b, body, horizontal, fixed, at - DOOR_W * 0.5, at + DOOR_W * 0.5, deck + DOOR_H, deck + ROOM_H, m["inner"])
-		# Door frame.
-		for e: float in [at - DOOR_W * 0.5, at + DOOR_W * 0.5]:
-			var fp := Vector3(e, deck + DOOR_H * 0.5, fixed) if horizontal else Vector3(fixed, deck + DOOR_H * 0.5, e)
-			b.box(fp + inward * (WALL_T * 0.5 + 0.02), Vector3(0.16, DOOR_H, 0.04) if horizontal else Vector3(0.04, DOOR_H, 0.16), m["dark"])
-		cur = at + DOOR_W * 0.5
-	_wall_piece(b, body, horizontal, fixed, cur, a1, deck, deck + ROOM_H, m["inner"])
-	_skirting(b, horizontal, fixed, cur + (0.08 if cur > a0 else 0.0), a1, inward, m)
+	var dw := OutpostLayout.DOOR_W * 0.5
+	var dh := OutpostLayout.DOOR_H
+	for di in range(1, doors.size()):
+		var d: Dictionary = doors[di]
+		var n: Vector3 = d["normal"]
+		var t := Vector3(n.z, 0, -n.x)
+		var pos: Vector3 = d["pos"]
+		var yaw := atan2(n.x, n.z)
+		for face: float in [-1.0, 1.0]:
+			var fp := pos + n * face * (OutpostLayout.WALL_T * 0.5 + 0.06)
+			var x := Transform3D(Basis(Vector3.UP, yaw if face > 0.0 else yaw + PI), fp)
+			for side: float in [-1.0, 1.0]:
+				b.box(x * Vector3(side * (dw + 0.14), dh * 0.5, 0), Vector3(0.3, dh, 0.14), m["gunmetal"])
+				b.box(x * Vector3(side * (dw + 0.02), dh * 0.5, 0.05), Vector3(0.06, dh - 0.1, 0.06), m["bronze"])
+				for y: float in [0.5, 1.4, 2.3]:
+					b.cyl_at(x * Transform3D(Basis(Vector3.RIGHT, PI / 2.0), Vector3(side * (dw + 0.2), y, 0.08)), 0.035, 0.05, m["bronze"], -1.0, 8)
+			b.box(x * Vector3(0, dh + 0.17, 0), Vector3(OutpostLayout.DOOR_W + 0.88, 0.34, 0.16), m["gunmetal"])
+			for i in 7:
+				b.box(x * Vector3(-dw - 0.2 + i * (OutpostLayout.DOOR_W + 0.4) / 6.0, dh + 0.17, 0.09), Vector3(0.16, 0.26, 0.01), m["yellow"] if i % 2 == 0 else m["black"],
+					Vector3(0, rad_to_deg(yaw if face > 0.0 else yaw + PI), 30))
+		var kind := str(d["kind"])
+		if kind == "open":
+			if rng.randf() < 0.22:
+				# A door jammed most of the way up.
+				var stuck := rng.randf_range(0.78, 0.9)
+				_door_slab(b, Transform3D(Basis(Vector3.UP, yaw), pos + Vector3(0, dh * stuck, 0)), m)
+			continue
+		var slab := Node3D.new()
+		slab.transform = Transform3D(Basis(Vector3.UP, yaw), pos)
+		root.add_child(slab)
+		var sb := Models.Batch.new()
+		_door_slab(sb, Transform3D.IDENTITY, m)
+		sb.commit(slab, "Door")
+		var sbody := StaticBody3D.new()
+		sbody.collision_layer = Game.LAYER_CAVE | Game.LAYER_STATION
+		sbody.collision_mask = 0
+		var cs := CollisionShape3D.new()
+		var shape := BoxShape3D.new()
+		shape.size = Vector3(OutpostLayout.DOOR_W + 0.1, dh, 0.3)
+		cs.shape = shape
+		cs.position = Vector3(0, dh * 0.5, 0)
+		sbody.add_child(cs)
+		sbody.transform = Transform3D(Basis(Vector3.UP, yaw), pos)
+		root.add_child(sbody)
+		# The status lamp over the door, on the corridor side.
+		var lamp_mat := StandardMaterial3D.new()
+		lamp_mat.albedo_color = Color(0.1, 0.02, 0.02)
+		lamp_mat.emission_enabled = true
+		lamp_mat.emission = Color(1.0, 0.1, 0.05)
+		lamp_mat.emission_energy_multiplier = 3.0
+		var lp := pos + n * (OutpostLayout.WALL_T * 0.5 + 0.2) + Vector3(0, dh + 0.62, 0) + t * 0.85
+		b.box(lp - n * 0.08, Vector3(0.24, 0.24, 0.16) if absf(n.x) < 0.5 else Vector3(0.16, 0.24, 0.24), m["dark"])
+		Models.sphere(root, lp, 0.08, lamp_mat)
+		var rec := {"slab": slab, "body": sbody, "shape": cs, "lamp": lamp_mat, "pos": pos, "normal": n}
+		if kind == "power":
+			_label(slab, "NO POWER", Vector3(0, 1.75, SLAB_T * 0.5 + 0.035), 44, 0.006, Color(1.0, 0.75, 0.25), 0.0)
+		else:
+			_lockdown_gear(root, b, d, rec, m)
+			var panel := HackPanel.new()
+			root.add_child(panel)
+			panel.transform = _keypad_spot(layout, d)
+			panel.build(d, di, m)
+			rec["panel"] = panel
+		root.add_door(di, rec)
 
 
-## A grimy skirting band along the inside of a wall piece from `a` to `e` (it stops at the door
-## frames instead of running across the doorways).
-static func _skirting(b: Models.Batch, horizontal: bool, fixed: float, a: float, e: float, inward: Vector3, m: Dictionary) -> void:
-	if e - a < 0.05:
-		return
-	var mid := (a + e) * 0.5
-	var band := Vector3(mid, StationBuilder.DECK_Y + 0.25, fixed) if horizontal else Vector3(fixed, StationBuilder.DECK_Y + 0.25, mid)
-	b.box(band + inward * (WALL_T * 0.5 + 0.01), Vector3(e - a, 0.5, 0.02) if horizontal else Vector3(0.02, 0.5, e - a), m["mid"])
-
-
-static func _wall_piece(b: Models.Batch, body: StaticBody3D, horizontal: bool, fixed: float, a: float, e: float, y0: float, y1: float, mat: Material) -> void:
-	if e - a < 0.02:
-		return
-	var mid := (a + e) * 0.5
-	if horizontal:
-		_solid(b, body, Vector3(mid, (y0 + y1) * 0.5, fixed), Vector3(e - a, y1 - y0, WALL_T), mat)
-	else:
-		_solid(b, body, Vector3(fixed, (y0 + y1) * 0.5, mid), Vector3(WALL_T, y1 - y0, e - a), mat)
-
-
-## A corridor between two doorways: floor, ceiling, walls and a red emergency light.
-static func _build_corridor(root: Derelict, b: Models.Batch, body: StaticBody3D, cor: Dictionary, m: Dictionary) -> void:
-	var a: Vector3 = cor["from"]
-	var e: Vector3 = cor["to"]
-	var length := a.distance_to(e)
-	if length < 0.05:
-		return
-	var along_x := int(cor["axis"]) == 0
-	var mid := (a + e) * 0.5
-	var deck := StationBuilder.DECK_Y
-	var across := DOOR_W + WALL_T * 2.0
-	var floor_size := Vector3(length, 0.3, across) if along_x else Vector3(across, 0.3, length)
-	_solid(b, body, Vector3(mid.x, deck - 0.15, mid.z), floor_size, m["floor"])
-	_solid(b, body, Vector3(mid.x, deck + DOOR_H + 0.15, mid.z), floor_size, m["ceiling"])
+## A door's slab (frame `x` at the doorway's middle on the floor, facing out): ribbed steel with
+## chevrons along its bottom edge.
+static func _door_slab(b: Models.Batch, x: Transform3D, m: Dictionary) -> void:
+	var w := OutpostLayout.DOOR_W + 0.1
+	var dh := OutpostLayout.DOOR_H
+	b.box(x * Vector3(0, dh * 0.5, 0), Vector3(w, dh, SLAB_T), m["gunmetal"])
 	for side: float in [-1.0, 1.0]:
-		var off := side * (DOOR_W + WALL_T) * 0.5
-		var pos := Vector3(mid.x, deck + DOOR_H * 0.5, mid.z + off) if along_x else Vector3(mid.x + off, deck + DOOR_H * 0.5, mid.z)
-		_solid(b, body, pos, Vector3(length, DOOR_H, WALL_T) if along_x else Vector3(WALL_T, DOOR_H, length), m["wall"])
-	b.box(Vector3(mid.x, deck + DOOR_H - 0.03, mid.z), Vector3(0.4, 0.05, 0.4), m["red"])
-	_omni(root, Vector3(mid.x, deck + DOOR_H - 0.4, mid.z), Color(1.0, 0.18, 0.1), 0.6, 4.5)
+		for r in 6:
+			b.box(x * Vector3(0, 0.5 + r * 0.38, side * (SLAB_T * 0.5 + 0.015)), Vector3(w - 0.3, 0.1, 0.03), m["olive"])
+		for i in 5:
+			b.box(x * Vector3(-w * 0.4 + i * w * 0.2, 0.16, side * (SLAB_T * 0.5 + 0.01)), Vector3(0.22, 0.24, 0.02), m["yellow"] if i % 2 == 0 else m["black"],
+				Vector3(0, 0, 35))
+		b.box(x * Vector3(0, dh * 0.5, side * (SLAB_T * 0.5 + 0.02)), Vector3(0.06, dh - 0.4, 0.02), m["bronze"])
 
 
-## Furniture against a wall (solid, so the crew walks around it).
-static func _prop(root: Derelict, b: Models.Batch, body: StaticBody3D, p: Dictionary, m: Dictionary, rng: RandomNumberGenerator) -> void:
-	var size: Vector3 = p["size"]
-	var yaw: float = p["yaw"]
-	var pos: Vector3 = p["pos"]
-	var basis := Basis(Vector3.UP, yaw)
-	var center := pos + Vector3(0, size.y * 0.5, 0)
-	_shape(body, center, Vector3(size.x, size.y, size.z), yaw)
-	var deg := Vector3(0, rad_to_deg(yaw), 0)
-	match str(p["kind"]):
-		"shelf":
-			for i in 3:
-				b.box(pos + basis * Vector3(0, 0.3 + i * 0.95, 0), Vector3(size.x, 0.06, size.z), m["mid"], deg)
-			for sx: float in [-1.0, 1.0]:
-				b.box(pos + basis * Vector3(sx * size.x * 0.48, size.y * 0.5, 0), Vector3(0.06, size.y, size.z), m["dark"], deg)
-			for i in rng.randi_range(1, 4):
-				b.box(pos + basis * Vector3(rng.randf_range(-0.6, 0.6), 0.55 + (i % 3) * 0.95, 0), Vector3(0.45, 0.4, 0.5), m["crate"],
-					deg + Vector3(0, rng.randf_range(-20, 20), 0))
-		"console":
-			b.box(center, size, m["dark"], deg)
-			var screen: Material = m["screen"] if rng.randf() < 0.4 else m["dead_glass"]
-			b.box(pos + basis * Vector3(0, size.y + 0.25, size.z * 0.3), Vector3(size.x * 0.8, 0.45, 0.05), screen, deg + Vector3(-15, 0, 0))
-		"locker":
-			b.box(center, size, m["mid"] if rng.randf() < 0.6 else m["rust"], deg)
-			b.box(pos + basis * Vector3(0, size.y * 0.6, -size.z * 0.5 - 0.01), Vector3(0.05, 0.3, 0.02), m["dark"], deg)
-		"crates":
-			b.box(pos + basis * Vector3(-0.35, 0.4, 0), Vector3(0.8, 0.8, 0.8), m["crate"], deg + Vector3(0, rng.randf_range(-10, 10), 0))
-			b.box(pos + basis * Vector3(0.4, 0.35, 0.05), Vector3(0.7, 0.7, 0.7), m["crate"], deg + Vector3(0, rng.randf_range(-15, 15), 0))
-			b.box(pos + basis * Vector3(-0.2, 1.05, 0), Vector3(0.6, 0.55, 0.6), m["crate"], deg + Vector3(0, rng.randf_range(-25, 25), 0))
-		"bunk":
-			for y: float in [0.45, 1.3]:
-				b.box(pos + basis * Vector3(0, y, 0), Vector3(size.x, 0.12, size.z), m["mid"], deg)
-				b.box(pos + basis * Vector3(0, y + 0.1, 0), Vector3(size.x - 0.1, 0.1, size.z - 0.1), m["rust"], deg)
-			for sx: float in [-1.0, 1.0]:
-				b.box(pos + basis * Vector3(sx * size.x * 0.47, size.y * 0.5, 0), Vector3(0.06, size.y, size.z), m["dark"], deg)
+## A keypad lock's lockdown gear on the corridor side: the shutter (hidden up in the ceiling until
+## it drops), its guide rails and housing, and the red alarm light that flashes in a lockdown.
+static func _lockdown_gear(root: Derelict, b: Models.Batch, d: Dictionary, rec: Dictionary, m: Dictionary) -> void:
+	var n: Vector3 = d["normal"]
+	var pos: Vector3 = d["pos"]
+	var yaw := atan2(n.x, n.z)
+	var dh := OutpostLayout.DOOR_H
+	var sw := OutpostLayout.DOOR_W + 0.6
+	var x := Transform3D(Basis(Vector3.UP, yaw), pos + n * SHUTTER_OUT)
+	for side: float in [-1.0, 1.0]:
+		b.box(x * Vector3(side * (sw * 0.5 + 0.06), dh * 0.5 + 0.2, 0), Vector3(0.12, dh + 0.4, 0.3), m["steel"])
+	b.box(x * Vector3(0, OutpostLayout.CORRIDOR_H - 0.12, 0), Vector3(sw + 0.3, 0.24, 0.36), m["gunmetal"])
+	var shutter := Node3D.new()
+	shutter.transform = x
+	root.add_child(shutter)
+	var sb := Models.Batch.new()
+	sb.box(Vector3(0, (dh + 0.25) * 0.5, 0), Vector3(sw, dh + 0.25, 0.22), m["gunmetal"])
+	for r in 7:
+		sb.box(Vector3(0, 0.3 + r * 0.42, 0.12), Vector3(sw - 0.2, 0.16, 0.04), m["steel"])
+	for i in 6:
+		sb.box(Vector3(-sw * 0.42 + i * sw * 0.168, 0.18, 0.12), Vector3(0.26, 0.3, 0.02), m["yellow"] if i % 2 == 0 else m["black"], Vector3(0, 0, 35))
+	sb.commit(shutter, "Shutter")
+	var sbody := StaticBody3D.new()
+	sbody.collision_layer = Game.LAYER_CAVE | Game.LAYER_STATION
+	sbody.collision_mask = 0
+	var cs := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = Vector3(sw, dh + 0.25, 0.3)
+	cs.shape = shape
+	cs.position = Vector3(0, (dh + 0.25) * 0.5, 0)
+	cs.disabled = true
+	sbody.add_child(cs)
+	sbody.transform = x
+	root.add_child(sbody)
+	var alarm := OmniLight3D.new()
+	alarm.light_color = Color(1.0, 0.08, 0.04)
+	alarm.light_energy = 0.0
+	alarm.omni_range = 9.0
+	alarm.position = pos + n * 1.6 + Vector3(0, 2.6, 0)
+	alarm.visible = false
+	root.add_child(alarm)
+	rec["shutter"] = shutter
+	rec["shutter_rest"] = x
+	rec["shutter_shape"] = cs
+	rec["alarm"] = alarm
+
+
+## Where a keypad lock's keypad hangs (facing into the corridor): on the wall carrying on beside the
+## doorway, or failing that on a side wall of the corridor cell in front of it, near the door.
+static func _keypad_spot(layout: Dictionary, d: Dictionary) -> Transform3D:
+	var cell: Vector2i = d["cell"]
+	var out: Vector2i = d["out"]
+	var dn: Vector2i = out - cell
+	var n := Vector3(dn.x, 0, dn.y)
+	var tv := Vector2i(dn.y, -dn.x)
+	var t := Vector3(tv.x, 0, tv.y)
+	var face := OutpostLayout.CELL * 0.5 - OutpostLayout.WALL_T * 0.5
+	var y := StationBuilder.DECK_Y + 1.25
+	for s: int in [1, -1]:
+		var o2: Vector2i = out + tv * s
+		var c2: Vector2i = cell + tv * s
+		if _walkable(layout, o2) and _open_edge(layout, out, o2) and not _open_edge(layout, c2, o2) and _door_between(layout, c2, o2) < 0:
+			var p := (d["pos"] as Vector3) + t * s * (OutpostLayout.CELL * 0.5 + 0.55) + n * (OutpostLayout.WALL_T * 0.5 + 0.02)
+			return Transform3D(Basis(Vector3.UP, atan2(n.x, n.z)), Vector3(p.x, y, p.z))
+	for s: int in [1, -1]:
+		var o2: Vector2i = out + tv * s
+		if not _open_edge(layout, out, o2) and _door_between(layout, out, o2) < 0:
+			var inward := -t * s
+			var p := OutpostLayout.cell_pos(out) + t * s * face - n * (OutpostLayout.CELL * 0.5 - 0.75)
+			return Transform3D(Basis(Vector3.UP, atan2(inward.x, inward.z)), Vector3(p.x, y, p.z))
+	var p := (d["pos"] as Vector3) + n * 1.2 + t * 1.0
+	return Transform3D(Basis(Vector3.UP, atan2(-t.x, -t.z)), Vector3(p.x, y, p.z))

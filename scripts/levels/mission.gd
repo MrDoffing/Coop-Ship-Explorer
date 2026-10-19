@@ -15,9 +15,19 @@ const BEHIND := 90.0
 const DESPAWN_BEHIND := 160.0
 const MAX_ALIENS := 34
 ## Ambushes by hostility stage (Mothership.hostility_stage()): seconds between them (none while the
-## aliens are docile) and the size of a pack before the depth and crew bonus.
+## aliens are docile) and the size of a pack before the depth and crew bonus. The ship's motion
+## tracker picks every ambush up AMBUSH_WARNING seconds before it arrives, so the crew is warned.
 const AMBUSH_INTERVAL := [0.0, 42.0, 28.0, 16.0]
 const AMBUSH_PACK := [0, 1, 2, 3]
+const AMBUSH_WARNING := 6.0
+## Surging (the hostility meter is full): the alarm goes off and the aliens keep coming in ones and
+## twos, the first SURGE_FIRST seconds after the alarm (time to react and open the throttle), then
+## every SURGE_GAP_START seconds, closing in to every SURGE_GAP_END seconds over SURGE_RAMP
+## seconds. It lasts until the ship docks at a waystation.
+const SURGE_FIRST := 10.0
+const SURGE_GAP_START := 9.0
+const SURGE_GAP_END := 2.0
+const SURGE_RAMP := 40.0
 
 var mission_seed := 0
 var stats: Dictionary = {}
@@ -45,6 +55,10 @@ var pickup_spawner: MultiplayerSpawner
 var local_ready := false
 var started := false
 var ending := false
+## A test dive ("outpost": landed at an abandoned station with every hand weapon; see
+## _start_outpost_test()), and the station it lands at.
+var test := ""
+var _test_k := -1
 var kills := 0
 var nests_destroyed := 0
 var warned_critters := false
@@ -58,6 +72,12 @@ var _seq := 0
 var _director_t := 45.0
 ## The hostility stage the crew was last told about.
 var _hostility_stage := 0
+## The ambush the motion tracker has picked up ({"ahead": bool}; empty: none yet). It arrives when
+## _director_t runs out.
+var _ambush: Dictionary = {}
+## Seconds the hostility has been surging (while flying), and until the next aliens arrive.
+var _surge_t := 0.0
+var _surge_next := 0.0
 var _defense_t := 0.0
 var _shake := 0.0
 var _env: Environment
@@ -68,6 +88,7 @@ func setup(data: Dictionary) -> void:
 	mission_seed = int(data.get("seed", 1))
 	stats = data.get("stats", Game.ship_stats())
 	best_depth = int(data.get("best", 0))
+	test = str(data.get("test", ""))
 
 
 func _ready() -> void:
@@ -184,9 +205,8 @@ func _process(_delta: float) -> void:
 	var cam := get_viewport().get_camera_3d()
 	if cam and _dust:
 		_dust.global_position = cam.global_position
-		# No drifting cave dust inside the pressurised ship.
-		_dust.visible = not (local_player and local_player.alive and local_player.station == "" and ship
-				and ship.is_aboard(local_player.position))
+		# No drifting cave dust inside the pressurised ship (walking about, or in the cockpit).
+		_dust.visible = not (local_player and local_player.alive and ship and ship.is_aboard(ship.to_local(cam.global_position)))
 
 
 func set_local_player(p: CrewMember) -> void:
@@ -311,10 +331,24 @@ func spawn_pickup(kind: String, pos: Vector3, vel: Vector3, value: int, fuel: fl
 # --- Server flow -------------------------------------------------------------------------------
 
 func _server_start() -> void:
-	for n in range(-1, 5):
+	var start := Vector3(0, -1.0, 0)
+	var yaw := 0.0
+	if test == "outpost":
+		# The outpost test starts on the first abandoned station's pad.
+		for k in 16:
+			var d := cave.derelict(k)
+			if not d.is_empty():
+				_test_k = k
+				var xf: Transform3D = d["xform"]
+				start = xf * Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+				yaw = atan2(xf.basis.z.x, xf.basis.z.z)
+				break
+	var n0 := int(floor(-start.z / CaveGen.CHUNK_LEN))
+	for n in range(n0 - 1, n0 + 5):
 		_ensure_chunk(n)
 	var ship_id := str(stats.get("ship", "prospector"))
-	ship_spawner.spawn({"t": "ship", "ship": ship_id, "stats": stats, "pos": Vector3(0, -1.0, 0)})
+	ship_spawner.spawn({"t": "ship", "ship": ship_id, "stats": stats, "pos": start})
+	ship.rotation.y = yaw
 	if Game.cheats_allowed() and Game.cheat_dive_credits > 0:
 		ship.credits = Game.cheat_dive_credits
 	var layout := ShipTypes.get_type(ship_id)
@@ -377,6 +411,9 @@ func _physics_process(delta: float) -> void:
 		if local_ready:
 			started = true
 			ship.frozen = false
+			if _test_k >= 0:
+				_start_outpost_test()
+				return
 			ship.notify.rpc("Systems online. Take the pilot seat and dive!", 0)
 			if Game.cheats_allowed() and Game.cheat_dive_credits > 0:
 				ship.notify.rpc("Cheat: this dive starts with %d credits" % Game.cheat_dive_credits, 1)
@@ -388,6 +425,32 @@ func _physics_process(delta: float) -> void:
 	_station_defense(delta)
 	_despawn_far()
 	_derelict_hint()
+
+
+## Server: the outpost test. The ship settles on the abandoned station's pad at once (its aliens and
+## salvage set out as on any landing), a crate of every hand weapon but the one everybody starts
+## with stands along the pier (in two rows, either side of the walk), and the host's own crew
+## member stands on the pier facing the station's door.
+func _start_outpost_test() -> void:
+	var d := cave.derelict(_test_k)
+	ship.land_for_test(d)
+	var deck := StationBuilder.DECK_Y - StationBuilder.LAND_HEIGHT
+	var i := 0
+	for w: String in CrewWeapons.ORDER:
+		if w == CrewWeapons.DEFAULT:
+			continue
+		var x := -1.3 if i % 2 == 0 else 1.3
+		var z := StationBuilder.PIER_START + 0.4 + floorf(i * 0.5) * 1.05
+		ship.spawn_crate(RunItems.crew_weapon_item(w), Vector3(x, deck + SupplyCrate.SIZE.y * 0.5, z), 0.0)
+		i += 1
+	if local_player:
+		local_player.position = Vector3(0.0, deck + 0.05, StationBuilder.PIER_START + 0.3)
+		local_player.velocity = Vector3.ZERO
+		local_player.look_yaw = PI
+		local_player.look_pitch = -0.15
+		local_player.reset_physics_interpolation()
+	ship.notify.rpc("Outpost test at %s: a crate of every hand weapon on the pier (look at one, F to swap)" % d["name"], 0)
+	ship.notify.rpc("A test dive: it leaves your save alone", 1)
 
 
 ## Tell the crew once about each abandoned station ahead.
@@ -633,40 +696,106 @@ func dmg_mult(d: float) -> float:
 
 
 ## Ambient threats: packs of aliens ambush the ship from ahead or behind, more often and in bigger
-## packs the higher the hostility (none while the aliens are docile).
+## packs the higher the hostility (none while the aliens are docile). The motion tracker warns the
+## crew AMBUSH_WARNING seconds before each one. Once the hostility surges they come continuously
+## (see _surge).
 func _director(delta: float) -> void:
 	var stage := ship.hostility_stage()
 	if stage != _hostility_stage:
-		if stage > _hostility_stage:
+		if stage == 4:
+			ship.notify.rpc("HOSTILITY SURGING - the swarm is coming! Full thrust for the next waystation!", 2)
+			ship.surge_alarm.rpc()
+			_surge_t = 0.0
+			_surge_next = SURGE_FIRST
+			_ambush = {}
+		elif stage > _hostility_stage:
 			ship.notify.rpc("Hostility rising: %s - %s" % [Mothership.HOSTILITY_STAGES[stage],
-				["", "ambushes are coming", "bigger ambushes, more often", "the aliens are swarming - keep moving!"][stage]], 1 if stage < 3 else 2)
+				["", "ambushes are coming", "bigger ambushes, more often", "large packs, often - keep moving!"][stage]], 1)
 			# The next ambush comes sooner at a higher stage.
 			_director_t = minf(_director_t, randf_range(6.0, 14.0) if _hostility_stage == 0 else float(AMBUSH_INTERVAL[stage]) * 0.5)
 		else:
 			ship.notify.rpc("Hostility reset - the aliens have lost the trail", 0)
 		_hostility_stage = stage
 	if ship.landing != Mothership.Dock.FLYING:
-		# Docked: a breather, and some quiet after leaving the station.
+		# Docked: a breather, and some quiet after leaving the station. An ambush the tracker had
+		# picked up loses the ship.
 		_director_t = maxf(_director_t, 12.0)
+		_ambush = {}
+		return
+	if not ship.alive:
+		return
+	if stage == 4:
+		_surge(delta)
 		return
 	if stage <= 0:
 		return
 	_director_t -= delta
-	if _director_t > 0.0 or not ship.alive:
+	if _ambush.is_empty():
+		if _director_t > AMBUSH_WARNING:
+			return
+		# The tracker picks the pack up while it closes in: warn the crew, then send it.
+		var from_ahead := _ambush_side(randf() < 0.7)
+		if from_ahead < 0:
+			_director_t = AMBUSH_WARNING + 8.0
+			return
+		_ambush = {"ahead": from_ahead == 1}
+		_director_t = maxf(_director_t, AMBUSH_WARNING)
+		ship.ambush_warning.rpc(from_ahead == 1, _director_t)
 		return
+	if _director_t > 0.0:
+		return
+	var ahead := bool(_ambush["ahead"])
+	_ambush = {}
 	var diff := difficulty()
 	_director_t = float(AMBUSH_INTERVAL[stage]) * randf_range(0.85, 1.2) / sqrt(maxf(diff, 0.5))
-	var s := -ship.global_position.z
-	var ahead := randf() < 0.7
-	var sp := s + (randf_range(90.0, 130.0) if ahead else -randf_range(60.0, 80.0))
-	# Bulkheads seal the tunnel: never spawn behind the last waystation or near the next one.
+	var sp := _ambush_s(ahead)
+	if sp >= 0.0:
+		_spawn_pack(mini(int(AMBUSH_PACK[stage]) + int(randf() * diff * (0.5 + 0.5 * stage)), 8), sp)
+
+
+## The hostility is surging: the aliens keep coming in ones and twos, from ahead and astern alike,
+## slowly at first so the crew can react to the alarm, then faster and faster.
+func _surge(delta: float) -> void:
+	_surge_t += delta
+	_surge_next -= delta
+	if _surge_next > 0.0:
+		return
+	var ramp := smoothstep(0.0, SURGE_RAMP, _surge_t - SURGE_FIRST)
+	_surge_next = lerpf(SURGE_GAP_START, SURGE_GAP_END, ramp) * randf_range(0.8, 1.2)
+	var side := _ambush_side(randf() < 0.5)
+	if side < 0:
+		_surge_next = minf(_surge_next, 3.0)
+		return
+	var sp := _ambush_s(side == 1)
+	if sp >= 0.0:
+		_spawn_pack(1 + (1 if randf() < ramp * 0.7 else 0), sp)
+
+
+## Which way a pack can come from, preferring `ahead`: 1 ahead, 0 astern, -1 neither (a waystation
+## is too close both ways). Near a waystation they come from the other side instead.
+func _ambush_side(ahead: bool) -> int:
+	for a: bool in [ahead, not ahead]:
+		if _ambush_s(a) >= 0.0:
+			return 1 if a else 0
+	return -1
+
+
+## Where along the tunnel a pack attacking from ahead or astern appears, or -1 when that is too
+## close to a waystation: bulkheads seal the tunnel, so never behind the last one or near the next.
+func _ambush_s(ahead: bool) -> float:
+	var sp := -ship.global_position.z + (randf_range(90.0, 130.0) if ahead else -randf_range(60.0, 80.0))
 	var behind: Dictionary = cave.station(ship.gate_k) if ship.gate_k >= 0 else {}
 	if cave.near_station(sp, 140.0) or (not behind.is_empty() and sp < float(behind["s_exit"]) + 40.0):
-		_director_t = 8.0
-		return
+		return -1.0
+	return sp
+
+
+## A pack of `count` aliens round tunnel position sp: spitters, critters and (past the first stretch)
+## infiltrators.
+func _spawn_pack(count: int, sp: float) -> void:
+	var s := -ship.global_position.z
 	var c := cave.center3(sp)
-	var pack := int(AMBUSH_PACK[stage]) + int(randf() * diff * (0.5 + 0.5 * stage))
-	for k in mini(pack, 8):
+	for k in count:
 		var r := randf()
 		var kind := Alien.Kind.SPITTER
 		if r < 0.4:
@@ -745,6 +874,10 @@ func dive_rp() -> Dictionary:
 
 func _finish(destroyed: bool) -> void:
 	if not is_inside_tree():
+		return
+	if test != "":
+		# A test dive leaves the save alone.
+		Game.main.return_to_homebase()
 		return
 	var depth := int(ship.depth) if ship else 0
 	var rp := dive_rp()
@@ -830,6 +963,26 @@ func fx_event(kind: String, pos: Vector3, arg: Variant) -> void:
 		"claw":
 			Fx.sparks(pos, Color(1.0, 0.2, 0.2), 8, 4.0, 0.04, 0.3)
 			Sfx.play("scratch", pos, -2.0)
+		# The abandoned stations' aliens.
+		"stalker_shriek":
+			# (arg 1: hurt and fleeing.)
+			Sfx.play("stalker_shriek", pos, 2.0, 1.25 if int(arg) == 1 else 1.0)
+		"barnacle_grab":
+			Sfx.play("barnacle_grab", pos, -2.0)
+			Fx.sparks(pos, Color(1.0, 0.45, 0.3), 10, 3.0, 0.04, 0.4)
+		"barnacle_chew":
+			Sfx.play("barnacle_chew", pos, -6.0)
+			Fx.sparks(pos, Color(0.9, 0.15, 0.1), 5, 2.0, 0.03, 0.3)
+		"crawler_leap":
+			Sfx.play("crawler_leap", pos, -4.0)
+		"hive_birth":
+			Sfx.play("egg_burst", pos, -8.0, 1.7)
+			Fx.sparks(pos, Color(0.9, 0.8, 0.4), 12, 3.0, 0.04, 0.5)
+		"spider_hiss":
+			Sfx.play("spider_hiss", pos, -4.0)
+		"spider_spit":
+			Fx.flash(pos, Color(0.6, 1.0, 0.2), 2.0, 4.0, 0.08)
+			Sfx.play("spit", pos, -5.0, 1.5)
 		"station_zap":
 			var from: Vector3 = arg
 			Fx.tracer(from, pos, Color(1.0, 0.5, 0.25), 0.14, 0.14)

@@ -67,7 +67,7 @@ static func _mats(t: Dictionary) -> Dictionary:
 	var paint: Color = t["paint"]
 	var accent: Color = t["accent"]
 	return {
-		"hull": Models.panel_mat(paint, 0.25, 0.5, 0.25),
+		"hull": Models.hull_plating(paint),
 		"paint": Models.panel_mat(paint.darkened(0.12), 0.3, 0.5, 0.6),
 		"dark": Models.mat(Color(0.14, 0.15, 0.18), 0.6, 0.5),
 		"mid": Models.mat(Color(0.32, 0.34, 0.38), 0.6, 0.45),
@@ -95,12 +95,21 @@ static func build_exterior(root: Node3D, type_id: String) -> Dictionary:
 	var parts := {}
 	var sections: Array = t["sections"]
 	var chamfer := float(t["chamfer"])
-	var hull := MeshInstance3D.new()
-	hull.name = "Hull"
-	hull.mesh = Models.loft(sections, chamfer, false)
-	hull.material_override = m["hull"]
-	root.add_child(hull)
-	_rear_cap(root, sections, chamfer, m["hull"])
+	# A ship with a Blender-made model (ShipTypes "asset", see tools/blender) has its hull, chin and
+	# fittings in it, lofted through the same sections; the others are built here.
+	var asset := str(t.get("asset", ""))
+	if asset != "":
+		Models.asset_mesh(root, asset, "Hull", {"Hull": m["hull"]})
+		Models.asset_mesh(root, asset, "Fittings")
+	else:
+		var hull := MeshInstance3D.new()
+		hull.name = "Hull"
+		# Open at both ends: the glazed nose is built onto the front, the cargo door's cap at the back.
+		hull.mesh = Models.loft(sections, chamfer, false, false)
+		hull.material_override = m["hull"]
+		root.add_child(hull)
+		_rear_cap(root, sections, chamfer, m["hull"])
+	_nose(root, t, m, asset == "")
 	var glow_mat := StandardMaterial3D.new()
 	glow_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	glow_mat.albedo_color = Color(0.45, 0.8, 1.0)
@@ -114,8 +123,10 @@ static func build_exterior(root: Node3D, type_id: String) -> Dictionary:
 		"dreadnought":
 			_dress_dreadnought(root, b, t, m, glow_mat)
 		_:
-			_dress_prospector(root, b, t, m, glow_mat)
-	_common_fittings(root, b, t, m)
+			_dress_prospector(root, t, glow_mat)
+	if asset == "":
+		_common_fittings(root, b, t, m)
+	_cam_housings(root, b, t, m)
 	b.commit(root)
 	# Gun pods and mining lasers.
 	var turrets := {}
@@ -139,7 +150,11 @@ static func build_exterior(root: Node3D, type_id: String) -> Dictionary:
 	parts["lights"] = _lights(root, t, m)
 	parts["legs"] = _legs(root, t, m)
 	parts["autocannons"] = _hardpoints(root, t, m)
-	_name_labels(root, t)
+	# The hull and everything fixed to it take decals; then the markings, grime and wear go on.
+	for c in root.get_children():
+		if c is GeometryInstance3D and not ((c as GeometryInstance3D).layers & Game.VIS_GLASS):
+			(c as GeometryInstance3D).layers |= Game.VIS_HULL
+	ShipMarks.build(root, t)
 	return parts
 
 
@@ -191,8 +206,294 @@ static func _common_fittings(root: Node3D, b: Models.Batch, t: Dictionary, m: Di
 	b.cyl(Vector3(col.x, cy - 0.06, col.z), 1.1, 0.12, m["dark"], Vector3.ZERO, -1.0, 20)
 	b.cyl(Vector3(col.x, cy - 0.12, col.z), 0.75, 0.04, m["cyan"], Vector3.ZERO, -1.0, 20)
 
-## Small attitude thruster block with nozzles pointing along `dirs`.
-static func _rcs(b: Models.Batch, pos: Vector3, dirs: Array, m: Dictionary) -> void:
+# --- The glazed nose and the cockpit's cameras -------------------------------------------------
+
+## The nose's glazing is divided into panes about PANE wide (m) by the bars of its frame. The main
+## frames (round every ring and along every corner) are FRAME_W wide and FRAME_D deep, the bars
+## between the panes BAR_W by BAR_D.
+const PANE := 0.95
+const FRAME_W := 0.11
+const FRAME_D := 0.075
+const BAR_W := 0.06
+const BAR_D := 0.05
+
+static var _bolt_m: CylinderMesh
+
+
+## The glazing's outline at one ring of the nose ([z, half width, half height, y centre], see
+## ShipTypes "nose"): the six corners of the hull's octagon above the sill, left to right.
+static func nose_top(ring: Array, chamfer: float, sill: float) -> PackedVector3Array:
+	var z := float(ring[0])
+	var w := float(ring[1])
+	var h := float(ring[2])
+	var yc := float(ring[3])
+	var c := 1.0 - chamfer
+	return PackedVector3Array([Vector3(-w, sill, z), Vector3(-w, yc + h * c, z), Vector3(-w * c, yc + h, z),
+		Vector3(w * c, yc + h, z), Vector3(w, yc + h * c, z), Vector3(w, sill, z)])
+
+
+## The chin's outline at one ring: the octagon below the sill, right to left.
+static func nose_bottom(ring: Array, chamfer: float, sill: float) -> PackedVector3Array:
+	var z := float(ring[0])
+	var w := float(ring[1])
+	var h := float(ring[2])
+	var yc := float(ring[3])
+	var c := 1.0 - chamfer
+	return PackedVector3Array([Vector3(w, sill, z), Vector3(w, minf(yc - h * c, sill), z), Vector3(w * c, minf(yc - h, sill), z),
+		Vector3(-w * c, minf(yc - h, sill), z), Vector3(-w, minf(yc - h * c, sill), z), Vector3(-w, sill, z)])
+
+
+## The glazed nose in front of the cockpit (ShipTypes "nose"): a greenhouse of grimy glass panes in
+## bolted steel frames above the sill, the opaque chin below it, the deck the glazing stands on
+## (seen from the cockpit) and the bulkhead plate round the cockpit's opening, seen from outside
+## through the glass. The front pane has just two uprights and a crossbar, so the view straight
+## ahead stays clear.
+static func _nose(root: Node3D, t: Dictionary, m: Dictionary, chin_too := true) -> void:
+	var rings: Array = t["nose"]
+	var chamfer := float(t["chamfer"])
+	var sill := float(t["sill"])
+	var inner: Dictionary = t["interior"]
+	var frame := Cockpit.frame_mat()
+	var bolt := Models.mat(Color(0.5, 0.49, 0.45), 0.5, 0.45)
+	var b := Models.Batch.new()
+	var glass := SurfaceTool.new()
+	glass.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var tops: Array[PackedVector3Array] = []
+	var bots: Array[PackedVector3Array] = []
+	for r: Array in rings:
+		tops.append(nose_top(r, chamfer, sill))
+		bots.append(nose_bottom(r, chamfer, sill))
+	# Outward normals of the outline's five edges (in the ring's plane) and of its six corners.
+	var yc0 := float((rings[0] as Array)[3])
+	var edge_n: Array[Vector3] = []
+	for k in 5:
+		var d := tops[0][k + 1] - tops[0][k]
+		var nrm := Vector3(d.y, -d.x, 0).normalized()
+		if nrm.dot((tops[0][k] + tops[0][k + 1]) * 0.5 - Vector3(0, yc0, tops[0][k].z)) < 0.0:
+			nrm = -nrm
+		edge_n.append(nrm)
+	var corner_n: Array[Vector3] = [edge_n[0]]
+	for k in range(1, 5):
+		corner_n.append((edge_n[k - 1] + edge_n[k]).normalized())
+	corner_n.append(edge_n[4])
+	# Panes per edge, counted on the widest ring and kept all the way forward, so the bars run
+	# straight from ring to ring (the top is divided more coarsely).
+	var counts: Array[int] = []
+	for k in 5:
+		var pane := PANE * (1.35 if k == 2 else 1.0)
+		counts.append(maxi(1, int(round(tops[0][k].distance_to(tops[0][k + 1]) / pane))))
+	var last := rings.size() - 1
+	for i in last:
+		var a := tops[i]
+		var n := tops[i + 1]
+		var axis := Vector3(0, (float(rings[i][3]) + float(rings[i + 1][3])) * 0.5, (a[0].z + n[0].z) * 0.5)
+		for k in 5:
+			Models.tri(glass, a[k], a[k + 1], n[k + 1], axis)
+			Models.tri(glass, a[k], n[k + 1], n[k], axis)
+			for j in range(1, counts[k]):
+				var f := float(j) / counts[k]
+				var p := a[k].lerp(a[k + 1], f)
+				var q := n[k].lerp(n[k + 1], f)
+				_bar(b, p, q, edge_n[k], BAR_W, BAR_D, frame)
+				_bolts_along(b, p, q, edge_n[k], BAR_D, 2, bolt)
+		for k in 6:
+			_bar(b, a[k], n[k], corner_n[k], FRAME_W, FRAME_D, frame)
+			_bolts_along(b, a[k], n[k], corner_n[k], FRAME_D, 3, bolt)
+	# The ring frames, with a bolt wherever a bar meets them.
+	for i in rings.size():
+		var a := tops[i]
+		for k in 5:
+			_bar(b, a[k], a[k + 1], edge_n[k], FRAME_W, FRAME_D, frame)
+			for j in counts[k] + 1:
+				_bolt(b, a[k].lerp(a[k + 1], float(j) / counts[k]), edge_n[k], FRAME_D, bolt)
+	# The front pane, its two uprights, the crossbar above the pilot's eye line and the sill.
+	var tip := tops[last]
+	var tip_z := tip[0].z
+	var face := PackedVector2Array()
+	for p in tip:
+		face.append(Vector2(p.x, p.y))
+	_flat(glass, face, tip_z, Vector3(0, sill + 1.0, tip_z + 1.0))
+	var tw := tip[5].x
+	for x: float in [-tw * 0.36, tw * 0.36]:
+		var lo := Vector3(x, sill, tip_z)
+		var hi := Vector3(x, tip[2].y, tip_z)
+		_bar(b, lo, hi, Vector3.FORWARD, BAR_W, BAR_D, frame)
+		_bolts_along(b, lo, hi, Vector3.FORWARD, BAR_D, 3, bolt)
+	_bar(b, Vector3(-tw, tip[1].y, tip_z), Vector3(tw, tip[1].y, tip_z), Vector3.FORWARD, BAR_W, BAR_D, frame)
+	_bar(b, tip[0], tip[5], Vector3.FORWARD, FRAME_W, FRAME_D, frame)
+	var gm := ShaderMaterial.new()
+	gm.shader = GunPod.glass_shader()
+	gm.set_shader_parameter("grime_lo", sill + 0.05)
+	gm.set_shader_parameter("grime_hi", sill + 0.7)
+	_mesh(root, "NoseGlass", glass, gm, false).layers = Game.VIS_GLASS
+	# The chin: the hull below the sill, closed at the front (in a ship's model, if it has one).
+	if chin_too:
+		var chin := SurfaceTool.new()
+		chin.begin(Mesh.PRIMITIVE_TRIANGLES)
+		for i in last:
+			var a := bots[i]
+			var n := bots[i + 1]
+			var axis := Vector3(0, sill - 0.5, (a[0].z + n[0].z) * 0.5)
+			for k in 5:
+				Models.tri(chin, a[k], a[k + 1], n[k + 1], axis)
+				Models.tri(chin, a[k], n[k + 1], n[k], axis)
+		var chin_face := PackedVector2Array()
+		for p in bots[last]:
+			chin_face.append(Vector2(p.x, p.y))
+		_flat(chin, chin_face, tip_z, Vector3(0, sill - 0.3, tip_z + 1.0))
+		_mesh(root, "Chin", chin, m["hull"], true)
+	# The deck the glazing stands on, with a hazard edge along the front pane.
+	var deck := SurfaceTool.new()
+	deck.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for i in last:
+		var below := Vector3(0, sill - 1.0, (tops[i][0].z + tops[i + 1][0].z) * 0.5)
+		Models.tri(deck, tops[i][0], tops[i][5], tops[i + 1][5], below)
+		Models.tri(deck, tops[i][0], tops[i + 1][5], tops[i + 1][0], below)
+	_mesh(root, "NoseDeck", deck, Models.panel_mat(Color(0.16, 0.17, 0.17), 0.5, 0.65, 3.0), true)
+	b.box(Vector3(0, sill + 0.006, tip_z + 0.1), Vector3(tw * 2.0 - 0.25, 0.01, 0.12), m["hazard"])
+	# The bulkhead plate round the cockpit's opening, facing forward.
+	var hw := float((inner["cockpit"] as Dictionary)["half_w"]) + WALL_T
+	var h := float(inner["height"])
+	var base := PackedVector2Array()
+	for p in tops[0]:
+		base.append(Vector2(p.x, p.y))
+	var opening := PackedVector2Array([Vector2(-hw, -0.3), Vector2(hw, -0.3), Vector2(hw, h + 0.3), Vector2(-hw, h + 0.3)])
+	var plate := SurfaceTool.new()
+	plate.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var z0 := tops[0][0].z - 0.01
+	for piece: PackedVector2Array in Geometry2D.clip_polygons(base, opening):
+		_flat(plate, piece, z0, Vector3(0, yc0, z0 + 1.0))
+	_mesh(root, "NoseBulkhead", plate, m["dark"], true)
+	b.commit(root, "NoseFrame")
+
+
+## A flat polygon (x, y) at depth z into a SurfaceTool, facing away from `behind`.
+static func _flat(st: SurfaceTool, poly: PackedVector2Array, z: float, behind: Vector3) -> void:
+	var idx := Geometry2D.triangulate_polygon(poly)
+	for j in range(0, idx.size(), 3):
+		Models.tri(st, Vector3(poly[idx[j]].x, poly[idx[j]].y, z), Vector3(poly[idx[j + 1]].x, poly[idx[j + 1]].y, z),
+			Vector3(poly[idx[j + 2]].x, poly[idx[j + 2]].y, z), behind)
+
+
+static func _mesh(root: Node3D, node_name: String, st: SurfaceTool, mat: Material, shadows: bool) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.name = node_name
+	mi.mesh = st.commit()
+	mi.material_override = mat
+	if not shadows:
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(mi)
+	return mi
+
+
+## A flat frame strip from a to c, `width` across and `depth` thick, its face turned to `normal`.
+static func _bar(b: Models.Batch, a: Vector3, c: Vector3, normal: Vector3, width: float, depth: float, mat: Material) -> void:
+	var d := c - a
+	var length := d.length()
+	if length < 0.001:
+		return
+	var z := d / length
+	var y := normal - z * normal.dot(z)
+	if y.length_squared() < 1e-6:
+		return
+	y = y.normalized()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(width, depth, length + width * 0.5)
+	b.add(bm, Transform3D(Basis(y.cross(z), y, z), (a + c) * 0.5), mat)
+
+
+## A bolt head on both faces of a strip `depth` thick at p, its faces turned to `normal`.
+static func _bolt(b: Models.Batch, p: Vector3, normal: Vector3, depth: float, mat: Material) -> void:
+	if _bolt_m == null:
+		_bolt_m = CylinderMesh.new()
+		_bolt_m.top_radius = 0.017
+		_bolt_m.bottom_radius = 0.017
+		_bolt_m.height = 0.012
+		_bolt_m.radial_segments = 6
+		_bolt_m.rings = 1
+	var y := normal.normalized()
+	var x := y.cross(Vector3.UP if absf(y.y) < 0.9 else Vector3.RIGHT).normalized()
+	var basis := Basis(x, y, x.cross(y))
+	for s: float in [1.0, -1.0]:
+		b.add(_bolt_m, Transform3D(basis, p + y * s * (depth * 0.5 + 0.004)), mat)
+
+
+## `count` bolts spaced evenly along a strip from a to c.
+static func _bolts_along(b: Models.Batch, a: Vector3, c: Vector3, normal: Vector3, depth: float, count: int, mat: Material) -> void:
+	for i in count:
+		_bolt(b, a.lerp(c, (i + 1.0) / (count + 1.0)), normal, depth, mat)
+
+
+## The cameras of the cockpit's feeds (ShipTypes "cams"): a small boxy camera on a bracket off the
+## hull, its lens looking the way the feed does, with a sun hood and a red lamp blinking while it
+## records.
+static func _cam_housings(root: Node3D, b: Models.Batch, t: Dictionary, m: Dictionary) -> void:
+	var cams: Dictionary = t.get("cams", {})
+	var lens := Basis(Vector3.RIGHT, PI / 2.0)
+	for cam: String in cams:
+		var xf := ShipTypes.cam_transform(t, cam)
+		var c: Array = cams[cam]
+		b.add(_box_mesh(Vector3(0.2, 0.17, 0.32)), xf * Transform3D(Basis.IDENTITY, Vector3(0, 0, 0.1)), m["mid"])
+		b.add(_box_mesh(Vector3(0.24, 0.02, 0.38)), xf * Transform3D(Basis.IDENTITY, Vector3(0, 0.095, 0.05)), m["dark"])
+		b.add(_cyl_mesh(0.07, 0.08), xf * Transform3D(lens, Vector3(0, 0, -0.08)), m["black"])
+		b.add(_cyl_mesh(0.052, 0.01), xf * Transform3D(lens, Vector3(0, 0, -0.121)), m["glass"])
+		Models.sphere(root, xf * Vector3(0.075, 0.055, -0.06), 0.015, Models.blink(Color(1.0, 0.15, 0.1), 0.8, 0.0, 0.5))
+		var mount: Vector3 = c[2] if c.size() > 2 else _cam_mount(t, xf.origin)
+		b.strut(xf * Vector3(0, -0.04, 0.22), mount, 0.045, m["dark"])
+		b.cyl(mount, 0.12, 0.06, m["dark"], Vector3(0, 0, 90) if absf(mount.x) > 2.0 else Vector3.ZERO)
+
+
+## The pylon a chin-mounted mining laser (station `id`) hangs from: from the turret's mount up into
+## the chin, behind the chin's front (the headlamps shine out over it), with a hazard band.
+static func _chin_mount(b: Models.Batch, t: Dictionary, id: String, m: Dictionary) -> void:
+	var p: Vector3 = (t["by_id"][id] as Dictionary)["pos"]
+	var top := float(t["sill"]) - 0.05
+	var bottom := p.y + 0.25
+	b.box(Vector3(0, (top + bottom) * 0.5, p.z + 0.82), Vector3(0.56, top - bottom, 0.6), m["mid"])
+	b.box(Vector3(0, bottom + 0.12, p.z + 0.82), Vector3(0.58, 0.08, 0.62), m["hazard"])
+
+
+## A pair of headlamps in a housing `width` wide, its lenses facing forward from `pos`.
+static func _headlamps(b: Models.Batch, pos: Vector3, width: float, m: Dictionary) -> void:
+	b.box(pos, Vector3(width, 0.26, 0.12), m["dark"])
+	for s: float in [-1.0, 1.0]:
+		b.cyl(pos + Vector3(s * width * 0.27, 0, -0.06), 0.1, 0.03, m["white"], Vector3(90, 0, 0))
+		b.cyl(pos + Vector3(s * width * 0.27, 0, -0.05), 0.12, 0.03, m["steel"], Vector3(90, 0, 0))
+	for i in 3:
+		b.box(pos + Vector3(0, -0.06 + i * 0.06, -0.065), Vector3(0.12, 0.012, 0.012), m["steel"])
+
+
+## Where a camera's bracket meets the hull: straight in from the side for a side camera, down onto
+## the roof or up into the belly for the others.
+static func _cam_mount(t: Dictionary, p: Vector3) -> Vector3:
+	var sections: Array = t["sections"]
+	if absf(p.x) > 2.0:
+		return Vector3(signf(p.x) * (hull_x_at(sections, float(t["chamfer"]), p.z, p.y) - 0.05), p.y, p.z)
+	if p.y > section_at(sections, p.z).z:
+		return Vector3(p.x, top_y(sections, p.z) - 0.05, p.z)
+	return Vector3(p.x, bottom_y(sections, p.z) + 0.05, p.z)
+
+
+static func _box_mesh(size: Vector3) -> BoxMesh:
+	var bm := BoxMesh.new()
+	bm.size = size
+	return bm
+
+
+static func _cyl_mesh(radius: float, height: float) -> CylinderMesh:
+	var cm := CylinderMesh.new()
+	cm.top_radius = radius
+	cm.bottom_radius = radius
+	cm.height = height
+	cm.radial_segments = 14
+	cm.rings = 1
+	return cm
+
+
+## Small attitude thruster block with nozzles pointing along `dirs` (recorded on `root` for the
+## soot round them, see ShipMarks).
+static func _rcs(root: Node3D, b: Models.Batch, pos: Vector3, dirs: Array, m: Dictionary) -> void:
+	_record_rcs(root, pos, dirs)
 	b.box(pos, Vector3(0.6, 0.42, 0.6), m["mid"])
 	b.box(pos + Vector3(0, 0.22, 0), Vector3(0.5, 0.04, 0.5), m["dark"])
 	for d: Vector3 in dirs:
@@ -202,6 +503,12 @@ static func _rcs(b: Models.Batch, pos: Vector3, dirs: Array, m: Dictionary) -> v
 		elif absf(d.z) > 0.5:
 			rot = Vector3(90, 0, 0)
 		b.cyl(pos + d * 0.36, 0.09, 0.16, m["black"], rot, 0.13, 8)
+
+
+static func _record_rcs(root: Node3D, pos: Vector3, dirs: Array) -> void:
+	var list: Array = root.get_meta("rcs", [])
+	list.append([pos, dirs])
+	root.set_meta("rcs", list)
 
 
 ## Row of vent slats on a surface facing `normal`: `count` slats `slat_len` long, spaced along `along`.
@@ -303,120 +610,24 @@ static func _pod_mount(b: Models.Batch, t: Dictionary, id: String, m: Dictionary
 			b.cyl(Vector3(p.x + cos(a) * (r + 0.06), base + 0.13, p.z + sin(a) * (r + 0.06)), 0.03, 0.03, m["steel"], Vector3.ZERO, -1.0, 6)
 
 
-static func _name_labels(root: Node3D, t: Dictionary) -> void:
-	var sections: Array = t["sections"]
-	var id := str(t["id"])
-	var z := 4.5
-	var y := 1.9
-	var size := 140
-	var color := Color(0.15, 0.17, 0.2)
-	match id:
-		"vanguard":
-			z = 3.5
-		"excavator":
-			# Above the gunnery window.
-			z = -4.4
-			y = 3.45
-			size = 100
-			color = Color(0.1, 0.1, 0.1)
-		"dreadnought":
-			z = 1.8
-			y = 1.9
-			size = 90
-			color = Color(0.95, 0.72, 0.25)
-	var x := side_x(sections, z) + 0.03
-	if id == "dreadnought":
-		x = 9.23  # On the armour belt.
-	for side: float in [-1.0, 1.0]:
-		var lbl := Label3D.new()
-		lbl.text = str(t["name"]).to_upper()
-		lbl.font_size = size
-		lbl.pixel_size = 0.008
-		lbl.modulate = color
-		lbl.outline_size = 0
-		lbl.position = Vector3(side * x, y, z)
-		lbl.rotation = Vector3(0, side * PI / 2.0, 0)
-		# Only from outside: the crew would see it mirrored through the windows.
-		lbl.double_sided = false
-		root.add_child(lbl)
-
-
 # --- Ship dressing -----------------------------------------------------------------------------
 
-static func _dress_prospector(root: Node3D, b: Models.Batch, t: Dictionary, m: Dictionary, glow: Material) -> void:
-	# Accent stripes and panel bands along the sides.
+## The Prospector's hull and fittings are its model (tools/blender/prospector.py); this adds what
+## moves or blinks: the engines' glow, the antenna tips and the stern strobes.
+static func _dress_prospector(root: Node3D, t: Dictionary, glow: Material) -> void:
+	var sections: Array = t["sections"]
+	# Its thruster blocks (in the model).
 	for side: float in [-1.0, 1.0]:
-		b.box(Vector3(side * 7.42, 3.15, 0.5), Vector3(0.08, 0.32, 12.0), m["accent"])
-		b.box(Vector3(side * 7.42, 0.2, 0.5), Vector3(0.08, 0.14, 12.0), m["dark"])
-		_portholes(b, side * 7.38, 2.62, 1.6, 6.8, 5, m)
-		_vents(b, Vector3(side * 7.0, 1.2, 9.4), Vector3(side, 0, 0), Vector3(0, 0, 1), 6, 0.9, m)
-		# Raised plates on the shoulders.
-		b.box(Vector3(side * 4.2, 4.77, -1.2), Vector3(1.6, 0.05, 3.0), m["paint"])
-		b.box(Vector3(side * 4.4, 4.77, 8.4), Vector3(1.4, 0.05, 2.4), m["paint"])
-		# Attitude thrusters at the corners.
-		_rcs(b, Vector3(side * 6.7, 4.05, -6.0), [Vector3(side, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, -1)], m)
-		_rcs(b, Vector3(side * 6.1, 3.75, 10.0), [Vector3(side, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, 1)], m)
-	for z: float in [-4.0, 0.0, 4.0]:
-		b.box(Vector3(0, 4.71, z), Vector3(10.0, 0.04, 0.12), m["dark"])
-		b.box(Vector3(0, -1.91, z), Vector3(10.0, 0.04, 0.12), m["dark"])
-	# Dorsal spine with vents, between the roof hatches.
-	b.box(Vector3(0, 4.86, 2.6), Vector3(1.3, 0.24, 6.8), m["mid"])
-	for i in 7:
-		b.box(Vector3(0, 5.0, -0.4 + i * 1.0), Vector3(1.0, 0.04, 0.12), m["dark"])
-	b.sphere(Vector3(0, 5.02, -0.9), 0.09, m["red"])
-	# Cockpit canopy with frame struts.
-	b.box(Vector3(0, 4.22, -9.8), Vector3(4.0, 0.12, 3.4), m["glass"], Vector3(-17, 0, 0))
-	for x: float in [-1.35, 0.0, 1.35]:
-		b.box(Vector3(x, 4.3, -9.8), Vector3(0.1, 0.1, 3.5), m["dark"], Vector3(-17, 0, 0))
-	b.box(Vector3(0, 4.03, -11.35), Vector3(4.1, 0.14, 0.14), m["dark"], Vector3(-17, 0, 0))
-	# Gunnery window frames (no glass, so the crew can see out).
+		_record_rcs(root, Vector3(side * 6.7, 4.05, -6.0), [Vector3(side, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, -1)])
+		_record_rcs(root, Vector3(side * 6.1, 3.75, 10.0), [Vector3(side, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, 1)])
 	for side: float in [-1.0, 1.0]:
-		for dz: float in [-1.55, 1.55]:
-			b.box(Vector3(side * 7.42, 1.8, -2.5 + dz), Vector3(0.06, 1.6, 0.1), m["dark"])
-		for dy: float in [-0.75, 0.75]:
-			b.box(Vector3(side * 7.42, 1.8 + dy, -2.5), Vector3(0.06, 0.1, 3.2), m["dark"])
-	# The side gun pods stand out on towers, far enough from the hull to swing past the bow.
-	for id: String in ["gun_l", "gun_r"]:
-		_pod_mount(b, t, id, m, m["mid"], m["accent"])
-	# Mining laser housing and the sensor dome under the nose.
-	b.box(Vector3(0, 1.45, -13.9), Vector3(1.1, 0.9, 0.5), m["mid"])
-	b.box(Vector3(0, 1.95, -13.6), Vector3(0.7, 0.14, 0.9), m["accent"])
-	b.sphere(Vector3(0, 0.1, -11.4), 0.45, m["glass"], Vector3(1.0, 0.6, 1.0))
-	for side: float in [-1.0, 1.0]:
-		b.box(Vector3(side * 1.6, 3.05, -11.9), Vector3(0.12, 0.12, 0.9), m["dark"], Vector3(0, side * 20.0, 0))
-	# Engines: housings either side of the cargo door, two nacelles and pylons.
-	for side: float in [-1.0, 1.0]:
-		b.box(Vector3(side * 2.2, 1.3, 12.3), Vector3(1.4, 3.0, 1.6), m["mid"])
-		b.box(Vector3(side * 2.2, 1.3, 13.12), Vector3(1.1, 2.6, 0.06), m["dark"])
-		_engine(root, b, Vector3(side * 4.5, 1.1, 12.5), 1.55, 3.6, m, glow)
-		b.box(Vector3(side * 6.0, 1.1, 11.0), Vector3(0.6, 0.5, 2.0), m["dark"])
-		b.box(Vector3(side * 4.5, 2.75, 11.6), Vector3(0.5, 0.4, 2.2), m["mid"])
-	# Antennas, a sensor dish and greebles on the roof.
-	_antenna(root, b, Vector3(-2.5, 4.7, 9.0), 1.8, m)
-	_antenna(root, b, Vector3(-2.2, 4.7, 9.7), 1.1, m, Color(1.0, 0.95, 0.85))
-	_dish(b, Vector3(3.0, 5.55, 8.0), 0.7, Vector3(-35, 30, 0), m)
-	b.box(Vector3(3.0, 4.85, 8.0), Vector3(1.6, 0.3, 2.2), m["mid"])
-	b.box(Vector3(-3.5, 4.9, -1.0), Vector3(1.2, 0.4, 1.4), m["mid"])
-	b.box(Vector3(-3.5, 5.12, -1.0), Vector3(0.9, 0.06, 1.1), m["dark"])
-	b.box(Vector3(4.5, 4.85, -4.5), Vector3(0.8, 0.3, 2.4), m["dark"])
-	for i in 3:
-		b.cyl(Vector3(4.5, 5.05, -5.4 + i * 0.9), 0.22, 0.18, m["steel"])
-	b.cyl(Vector3(-1.6, 4.95, 4.4), 0.12, 6.0, m["steel"], Vector3(90, 0, 0))
-	b.cyl(Vector3(-1.9, 4.92, 4.4), 0.08, 6.0, m["accent"], Vector3(90, 0, 0))
-	# Navigation lights.
-	b.sphere(Vector3(-7.45, 3.6, -6.4), 0.14, m["red"])
-	b.sphere(Vector3(7.45, 3.6, -6.4), 0.14, m["green"])
-	for side: float in [-1.0, 1.0]:
+		var g := Models.cylinder(root, Vector3(side * 4.5, 1.1, 14.67), 0.93, 0.04, glow, Vector3(90, 0, 0), 0.93, 20)
+		g.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		Models.sphere(root, Vector3(side * 6.4, 3.85, 10.6), 0.1, Models.blink(Color(1, 1, 1), 1.1, 0.5 if side > 0 else 0.0, 0.12))
-	# Headlight housing under the nose, clear of the nose-mounted mining laser so the turret
-	# doesn't throw a giant shadow down the tunnel.
-	b.box(Vector3(0, -0.05, -12.7), Vector3(1.8, 0.4, 1.0), m["mid"])
-	for x: float in [-0.45, 0.45]:
-		b.cyl(Vector3(x, -0.08, -13.22), 0.16, 0.05, m["white"], Vector3(90, 0, 0))
-	# Belly antenna and cargo hatch outlines.
-	b.box(Vector3(0, -1.93, -5.5), Vector3(3.4, 0.04, 2.6), m["dark"])
-	b.box(Vector3(0, -1.95, -5.5), Vector3(3.0, 0.04, 0.1), m["hazard"])
-	b.cyl(Vector3(2.2, -2.3, 9.3), 0.04, 0.8, m["steel"])
+	for mast: Array in [[Vector3(-2.5, 0, 9.0), 1.8, Color(1, 0.2, 0.2)], [Vector3(-2.2, 0, 9.7), 1.1, Color(1.0, 0.95, 0.85)]]:
+		var base: Vector3 = mast[0]
+		var tip := Vector3(base.x, top_y(sections, base.z) + 0.16 + float(mast[1]) + 0.05, base.z)
+		Models.sphere(root, tip, 0.08, Models.blink(mast[2], 0.9, base.x * 0.13, 0.25))
 
 
 static func _dress_vanguard(root: Node3D, b: Models.Batch, t: Dictionary, m: Dictionary, glow: Material) -> void:
@@ -426,12 +637,13 @@ static func _dress_vanguard(root: Node3D, b: Models.Batch, t: Dictionary, m: Dic
 	var deck := PackedVector2Array([Vector2(-8.4, 11.2), Vector2(-8.4, -11.5), Vector2(-5.2, -19.4),
 		Vector2(5.2, -19.4), Vector2(8.4, -11.5), Vector2(8.4, 11.2)])
 	b.add(Models.prism(deck, 4.6, 5.05), Transform3D.IDENTITY, deck_mat)
-	# Forecastle under the bow overhang (its underside clear of the mining laser's sweep).
+	# Forecastle under the bow overhang, its underside just clear of the glazed nose below it, with a
+	# row of deck-edge lights along its front.
 	var fore := PackedVector2Array([Vector2(-5.6, -10.0), Vector2(-4.6, -18.9), Vector2(4.6, -18.9), Vector2(5.6, -10.0)])
-	b.add(Models.prism(fore, 3.0, 4.6), Transform3D.IDENTITY, m["hull"])
-	b.box(Vector3(0, 3.6, -18.95), Vector3(9.0, 1.2, 0.1), m["dark"])
+	b.add(Models.prism(fore, 3.85, 4.6), Transform3D.IDENTITY, m["hull"])
+	b.box(Vector3(0, 4.22, -18.95), Vector3(9.0, 0.6, 0.1), m["dark"])
 	for x: float in [-3.0, -1.0, 1.0, 3.0]:
-		b.box(Vector3(x, 3.6, -19.0), Vector3(1.4, 0.5, 0.06), m["window"])
+		b.box(Vector3(x, 4.22, -19.0), Vector3(1.4, 0.16, 0.06), m["window"])
 	# Deck markings: centre line, edge lines, scout spots and bow hazard chevrons.
 	for i in 14:
 		b.box(Vector3(0, 5.06, -17.0 + i * 2.0), Vector3(0.22, 0.02, 1.1), white)
@@ -461,8 +673,9 @@ static func _dress_vanguard(root: Node3D, b: Models.Batch, t: Dictionary, m: Dic
 	b.box(Vector3(7.1, 8.62, 2.6), Vector3(0.8, 0.08, 0.8), m["dark"])
 	# Bow gun pod on a barbette at the front edge of the deck.
 	_pod_mount(b, t, "gun_f", m, m["mid"], m["accent"])
-	# Mining laser housing under the bow.
-	b.box(Vector3(0, 1.2, -15.6), Vector3(1.2, 1.0, 0.7), m["mid"])
+	# The mining laser hangs under the chin, ahead of the glazing, with the headlamps above it.
+	_chin_mount(b, t, "mining", m)
+	_headlamps(b, Vector3(0, 0.12, -14.43), 1.1, m)
 	# Hull details below the deck.
 	for side: float in [-1.0, 1.0]:
 		b.box(Vector3(side * 7.12, 3.0, 0.5), Vector3(0.08, 0.3, 12.0), m["accent"])
@@ -474,7 +687,7 @@ static func _dress_vanguard(root: Node3D, b: Models.Batch, t: Dictionary, m: Dic
 			b.box(Vector3(side * 7.12, 1.8, -3.75 + dz), Vector3(0.06, 1.6, 0.1), m["dark"])
 		for dy: float in [-0.75, 0.75]:
 			b.box(Vector3(side * 7.12, 1.8 + dy, -3.75), Vector3(0.06, 0.1, 3.2), m["dark"])
-		_rcs(b, Vector3(side * 6.4, 1.0, -7.4), [Vector3(side, 0, 0), Vector3(0, -1, 0), Vector3(0, 0, -1)], m)
+		_rcs(root, b, Vector3(side * 6.4, 1.0, -7.4), [Vector3(side, 0, 0), Vector3(0, -1, 0), Vector3(0, 0, -1)], m)
 	# Engines: two nacelles plus two small ones under the deck's rear corners.
 	for side: float in [-1.0, 1.0]:
 		b.box(Vector3(side * 2.2, 1.3, 12.3), Vector3(1.4, 3.0, 1.6), m["mid"])
@@ -483,10 +696,6 @@ static func _dress_vanguard(root: Node3D, b: Models.Batch, t: Dictionary, m: Dic
 		b.box(Vector3(side * 6.0, 1.1, 11.0), Vector3(0.6, 0.5, 2.0), m["dark"])
 	b.sphere(Vector3(-8.45, 4.82, -11.4), 0.14, m["red"])
 	b.sphere(Vector3(8.45, 4.82, -11.4), 0.14, m["green"])
-	# Headlight housing under the nose.
-	b.box(Vector3(0, -0.1, -14.4), Vector3(1.8, 0.4, 1.0), m["mid"])
-	for x: float in [-0.45, 0.45]:
-		b.cyl(Vector3(x, -0.13, -14.92), 0.16, 0.05, m["white"], Vector3(90, 0, 0))
 	# Deck lettering for the scout spots.
 	for sid: String in ["scout", "scout2"]:
 		var dock: Vector3 = t["by_id"][sid]["dock"]
@@ -503,10 +712,10 @@ static func _dress_vanguard(root: Node3D, b: Models.Batch, t: Dictionary, m: Dic
 
 static func _dress_excavator(root: Node3D, b: Models.Batch, t: Dictionary, m: Dictionary, glow: Material) -> void:
 	var sec: Array = t["sections"]
-	# Hazard stripes across the brow of the nose.
-	for i in 11:
-		var x := -4.0 + i * 0.8
-		b.box(Vector3(x, top_y(sec, -11.0) + 0.03, -11.0), Vector3(0.36, 0.05, 1.6), m["black"], Vector3(0, 40, 0))
+	# Hazard stripes across the brow, just behind the glazed nose.
+	for i in 10:
+		var x := -3.6 + i * 0.8
+		b.box(Vector3(x, top_y(sec, -9.75) + 0.03, -9.75), Vector3(0.32, 0.05, 1.0), m["black"], Vector3(0, 40, 0))
 	# Mining arms: shoulder pivots, booms, pistons and the laser heads (turrets) at their tips.
 	for side: float in [-1.0, 1.0]:
 		var shoulder := Vector3(side * 5.5, 0.3, -6.9)
@@ -536,7 +745,7 @@ static func _dress_excavator(root: Node3D, b: Models.Batch, t: Dictionary, m: Di
 		for dy: float in [-0.75, 0.75]:
 			b.box(Vector3(side * 7.43, 1.8 + dy, -4.6), Vector3(0.06, 0.1, 3.2), m["black"])
 		_vents(b, Vector3(side * 7.15, 0.6, 9.6), Vector3(side, 0, 0), Vector3(0, 0, 1), 5, 0.8, m)
-		_rcs(b, Vector3(side * 6.6, 4.4, 10.2), [Vector3(side, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, 1)], m)
+		_rcs(root, b, Vector3(side * 6.6, 4.4, 10.2), [Vector3(side, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, 1)], m)
 	# Tractor funnel under the belly.
 	var col: Vector3 = t["collector"]
 	var by := bottom_y(sec, col.z)
@@ -561,10 +770,6 @@ static func _dress_excavator(root: Node3D, b: Models.Batch, t: Dictionary, m: Di
 			b.box(Vector3(side * 3.3 + (i - 1) * 0.5, 5.1, -9.14), Vector3(0.35, 0.16, 0.04), m["white"])
 	_antenna(root, b, Vector3(2.6, 4.87, 8.6), 1.5, m, Color(1.0, 0.65, 0.1))
 	_dish(b, Vector3(-3.6, 5.5, -1.0), 0.55, Vector3(-30, -30, 0), m)
-	# Cockpit glazing and the hull number on the brow.
-	b.box(Vector3(0, top_y(sec, -9.9) + 0.02, -9.9), Vector3(3.6, 0.1, 2.4), m["glass"], Vector3(-10, 0, 0))
-	for x: float in [-0.9, 0.9]:
-		b.box(Vector3(x, top_y(sec, -9.9) + 0.06, -9.9), Vector3(0.12, 0.08, 2.5), m["black"], Vector3(-10, 0, 0))
 	# Engines.
 	for side: float in [-1.0, 1.0]:
 		b.box(Vector3(side * 2.2, 1.3, 12.3), Vector3(1.4, 3.0, 1.6), m["dark"])
@@ -574,10 +779,10 @@ static func _dress_excavator(root: Node3D, b: Models.Batch, t: Dictionary, m: Di
 	b.sphere(Vector3(7.55, 3.8, -6.2), 0.14, m["green"])
 	for side: float in [-1.0, 1.0]:
 		Models.sphere(root, Vector3(side * 8.1, 3.85, 8.0), 0.12, Models.blink(Color(1.0, 0.6, 0.1), 1.3, 0.5 if side > 0 else 0.0, 0.3))
-	# Headlight housing under the nose.
-	b.box(Vector3(0, -0.72, -12.4), Vector3(1.8, 0.4, 1.0), m["dark"])
+	# Headlight housing under the chin.
+	b.box(Vector3(0, -0.5, -12.35), Vector3(1.8, 0.4, 0.9), m["dark"])
 	for x: float in [-0.45, 0.45]:
-		b.cyl(Vector3(x, -0.75, -12.92), 0.16, 0.05, m["white"], Vector3(90, 0, 0))
+		b.cyl(Vector3(x, -0.52, -12.82), 0.16, 0.05, m["white"], Vector3(90, 0, 0))
 
 
 static func _dress_dreadnought(root: Node3D, b: Models.Batch, t: Dictionary, m: Dictionary, glow: Material) -> void:
@@ -628,44 +833,45 @@ static func _dress_dreadnought(root: Node3D, b: Models.Batch, t: Dictionary, m: 
 	rb.add(Models.prism(ram, -0.9, -0.15), Transform3D.IDENTITY, armor)
 	rb.add(Models.prism(PackedVector2Array([Vector2(-1.0, -16.2), Vector2(0, -19.1), Vector2(1.0, -16.2)]), -0.15, -0.09), Transform3D.IDENTITY, gold)
 	rb.commit(root, "Ram", false)
+	# Horn antennas on the brow, reaching forward over the glazing, and the mining laser's armoured
+	# collar on the tip of the ram.
 	for side: float in [-1.0, 1.0]:
-		b.strut(Vector3(side * 1.4, top_y(sec, -14.0) - 0.1, -14.0), Vector3(side * 2.4, top_y(sec, -14.0) + 1.3, -15.6), 0.07, m["steel"])
-		b.sphere(Vector3(side * 2.4, top_y(sec, -14.0) + 1.34, -15.6), 0.09, m["red"])
-	b.box(Vector3(0, 2.3, -17.1), Vector3(1.2, 1.0, 0.6), armor)
+		b.strut(Vector3(side * 2.6, top_y(sec, -12.4) - 0.1, -12.4), Vector3(side * 3.5, top_y(sec, -12.4) + 1.3, -13.8), 0.07, m["steel"])
+		b.sphere(Vector3(side * 3.5, top_y(sec, -12.4) + 1.34, -13.8), 0.09, m["red"])
+	b.box(Vector3(0, -0.5, -18.75), Vector3(0.75, 0.8, 0.5), armor)
 	# Engines: two big lower nacelles, two upper ones and a central exhaust above the door.
 	for side: float in [-1.0, 1.0]:
 		b.box(Vector3(side * 2.3, 1.4, 12.2), Vector3(1.6, 3.4, 1.4), armor)
 		_engine(root, b, Vector3(side * 4.9, 0.4, 13.0), 1.9, 4.0, m, glow)
 		_engine(root, b, Vector3(side * 7.2, 3.8, 12.3), 1.2, 3.0, m, glow)
 		b.box(Vector3(side * 6.2, 2.1, 11.6), Vector3(1.4, 1.2, 2.4), armor)
-		_rcs(b, Vector3(side * 7.6, 4.9, -7.0), [Vector3(side, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, -1)], m)
+		_rcs(root, b, Vector3(side * 7.6, 4.9, -7.0), [Vector3(side, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, -1)], m)
 	_engine(root, b, Vector3(0, 4.55, 12.2), 0.9, 2.4, m, glow)
 	b.sphere(Vector3(-9.25, 4.2, -6.2), 0.16, m["red"])
 	b.sphere(Vector3(9.25, 4.2, -6.2), 0.16, m["green"])
 	for side: float in [-1.0, 1.0]:
 		Models.sphere(root, Vector3(side * 8.3, 5.3, 10.6), 0.12, Models.blink(Color(1, 1, 1), 1.0, 0.5 if side > 0 else 0.0, 0.12))
-	# Headlights either side of the ram.
+	# Headlamps on the chin either side of the ram, well clear of the laser on its tip.
 	for side: float in [-1.0, 1.0]:
-		b.box(Vector3(side * 2.6, -0.4, -14.4), Vector3(1.2, 0.5, 1.0), m["dark"])
-		b.cyl(Vector3(side * 2.6, -0.42, -14.92), 0.2, 0.05, m["white"], Vector3(90, 0, 0))
+		_headlamps(b, Vector3(side * 1.9, 0.08, -16.23), 0.8, m)
 
 
-## Exterior lights: headlights, side floods and the belly and work lights. The headlight is set
-## clear of the nose turret so it doesn't throw a giant shadow down the tunnel.
+## Exterior lights: headlights, side floods and the belly and work lights. The headlights sit in
+## front of the chin under the glazing, clear of the mining lasers so a turret never throws a giant
+## shadow down the tunnel (the Dreadnought's laser is on the tip of its ram, so it has a pair).
 static func _lights(root: Node3D, t: Dictionary, _m: Dictionary) -> Array[Light3D]:
 	var sec: Array = t["sections"]
-	var nose := float((sec[0] as Array)[0])
 	var lights: Array[Light3D] = []
 	var heads: Array[Vector3] = []
 	match str(t["id"]):
 		"dreadnought":
-			heads = [Vector3(0, -0.45, -15.0)]
+			heads = [Vector3(-1.9, 0.08, -16.38), Vector3(1.9, 0.08, -16.38)]
 		"vanguard":
-			heads = [Vector3(0, -0.15, -14.95)]
+			heads = [Vector3(0, 0.12, -14.58)]
 		"excavator":
-			heads = [Vector3(0, -0.77, -12.95)]
+			heads = [Vector3(0, -0.52, -12.9)]
 		_:
-			heads = [Vector3(0, -0.1, nose + 0.45)]
+			heads = [Vector3(0, 0.12, -12.68)]
 	for hp in heads:
 		var head := SpotLight3D.new()
 		head.position = hp
@@ -673,8 +879,9 @@ static func _lights(root: Node3D, t: Dictionary, _m: Dictionary) -> Array[Light3
 		head.spot_range = 95.0
 		head.spot_angle = 34.0
 		head.spot_attenuation = 0.6
-		head.light_energy = 7.0
+		head.light_energy = 7.0 if heads.size() == 1 else 4.6
 		head.light_color = Color(1.0, 0.95, 0.86)
+		head.light_projector = Models.light_cookie("headlight")
 		configure_shadow(head)
 		root.add_child(head)
 		lights.append(head)
@@ -686,6 +893,8 @@ static func _lights(root: Node3D, t: Dictionary, _m: Dictionary) -> Array[Light3
 		flood.spot_angle = 48.0
 		flood.light_energy = 3.0
 		flood.light_color = Color(0.85, 0.92, 1.0)
+		flood.light_projector = Models.light_cookie("flood")
+		configure_shadow(flood)
 		root.add_child(flood)
 		lights.append(flood)
 	var belly := OmniLight3D.new()
@@ -693,6 +902,8 @@ static func _lights(root: Node3D, t: Dictionary, _m: Dictionary) -> Array[Light3
 	belly.omni_range = 34.0
 	belly.light_energy = 0.9
 	belly.light_color = Color(0.8, 0.88, 1.0)
+	# (No lamp hangs there: it leaves the glass alone, see Game.VIS_GLASS.)
+	belly.light_cull_mask &= ~Game.VIS_GLASS
 	root.add_child(belly)
 	lights.append(belly)
 	# Work lights above the hull so the ship reads clearly from the chase and scout cameras.
@@ -702,6 +913,7 @@ static func _lights(root: Node3D, t: Dictionary, _m: Dictionary) -> Array[Light3
 		top.omni_range = 18.0
 		top.light_energy = 0.7
 		top.light_color = Color(1.0, 0.95, 0.88)
+		top.light_cull_mask &= ~Game.VIS_GLASS
 		root.add_child(top)
 		lights.append(top)
 	return lights
@@ -811,8 +1023,9 @@ const PALETTES := {
 
 
 ## Build the walkable interior under `root` for a ship type (see ShipInteriors): its rooms, the
-## consoles of its stations, the emergency blast button, the install hub, repair panels, reactor
-## cores, the cargo door and ramp, lights and the interaction areas.
+## cockpit at the front (Cockpit: the pilot's seat, dashboard, side panels and emergency blast),
+## the consoles of the other stations, the install hub, repair panels, reactor cores, the cargo
+## door and ramp, lights and the interaction areas.
 static func build_interior(root: Node3D, type_id: String) -> Dictionary:
 	var layout := ShipTypes.get_type(type_id)
 	var id := str(layout["id"])
@@ -854,8 +1067,15 @@ static func build_interior(root: Node3D, type_id: String) -> Dictionary:
 			_rooms_prospector(root, body, m, layout)
 	_cargo_door(root, body, m, inner, parts)
 	_cores(root, body, m, inner, parts)
-	parts["station_areas"] = _consoles(root, body, m, layout)
-	_blast_button(root, body, m, inner, parts)
+	var cockpit := Cockpit.new()
+	cockpit.name = "Cockpit"
+	cockpit.position = Vector3(0, 0, float((inner["cockpit"] as Dictionary)["z"]))
+	root.add_child(cockpit)
+	cockpit.build(layout, body)
+	parts["cockpit"] = cockpit
+	var areas := _consoles(root, body, m, layout)
+	areas["pilot"] = cockpit.station_area
+	parts["station_areas"] = areas
 	_install_hub(root, body, m, inner, parts)
 	parts["panels"] = _repair_panels(root, inner)
 	_interior_lights(root, inner, parts)
@@ -889,8 +1109,6 @@ static func _rooms_prospector(root: Node3D, body: StaticBody3D, m: Dictionary, l
 		_solid(root, body, Vector3(side * 3.125, 1.6, -8.25), Vector3(0.25, 3.2, 4.0), wall_mat)
 		# Front bulkhead either side of the cockpit door.
 		_solid(root, body, Vector3(side * 3.675, 1.6, -6.125), Vector3(5.15, 3.2, 0.25), wall_mat)
-		# Cockpit window frame.
-		_solid(root, body, Vector3(side * 2.75, 1.6, -10.125), Vector3(0.5, 3.2, 0.25), wall_mat)
 		# Engine bulkhead.
 		_solid(root, body, Vector3(side * 3.55, 1.6, 5.0), Vector3(4.9, 3.2, 0.25), wall_mat)
 		# Side rooms (weapons on port, scout bay on starboard).
@@ -905,9 +1123,6 @@ static func _rooms_prospector(root: Node3D, body: StaticBody3D, m: Dictionary, l
 			Models.box(root, Vector3(x - side * 0.16, 1.6, z), Vector3(0.08, 3.2, 0.22), dark)
 	_solid(root, body, Vector3(0, 2.8, -6.125), Vector3(2.2, 0.8, 0.25), wall_mat)
 	_solid(root, body, Vector3(0, 2.8, 5.0), Vector3(2.2, 0.8, 0.25), wall_mat)
-	_solid(root, body, Vector3(0, 0.45, -10.125), Vector3(5.0, 0.9, 0.25), wall_mat)
-	_solid(root, body, Vector3(0, 3.0, -10.125), Vector3(5.0, 0.4, 0.25), wall_mat)
-	_solid(root, body, Vector3(0, 1.85, -10.125), Vector3(5.0, 1.9, 0.06), glass)
 	Models.box(root, Vector3(0, 2.38, -6.125), Vector3(2.2, 0.06, 0.3), trim)
 	Models.box(root, Vector3(0, 2.38, 5.0), Vector3(2.2, 0.06, 0.3), trim)
 	# Ceiling light strips and the ship's name over the cockpit door.
@@ -938,12 +1153,9 @@ static func _rooms_vanguard(root: Node3D, body: StaticBody3D, m: Dictionary, lay
 	# Floors and ceilings: the bridge and the main deck.
 	_slab(root, body, m, -3.425, -12.125, 3.425, -6.875, h)
 	_slab(root, body, m, -6.25, -6.875, 6.25, 10.25, h)
-	# The bridge: wide front window, small side windows.
-	_wall(root, body, m, true, -12.0, -3.425, 3.425, h, dh, [], [[0.0, 5.8, 0.9, 2.8]])
+	# The bridge: open to the glazed nose at the front (the cockpit), small side windows.
 	for side: float in [-1.0, 1.0]:
 		_wall(root, body, m, false, side * 3.3, -12.125, -6.875, h, dh, [], [[-10.4, 1.6, 1.0, 2.3]])
-	for x: float in [-1.45, 1.45]:
-		b.box(Vector3(x, 1.85, -11.86), Vector3(0.08, 1.9, 0.05), m["dark"])
 	# Bulkhead between the bridge and the spine corridor.
 	_wall(root, body, m, true, -6.75, -6.25, 6.25, h, dh, [[0.0, 2.2]])
 	# The spine corridor with a doorway into each room.
@@ -1017,10 +1229,7 @@ static func _rooms_excavator(root: Node3D, body: StaticBody3D, m: Dictionary, la
 	var b := Models.Batch.new()
 	_slab(root, body, m, -3.425, -10.325, 3.425, -5.925, h)
 	_slab(root, body, m, -6.725, -5.925, 6.725, 10.25, h)
-	# Control room with a wide window over the mining arms.
-	_wall(root, body, m, true, -10.2, -3.425, 3.425, h, dh, [], [[0.0, 5.8, 0.9, 2.8]])
-	for x: float in [-1.1, 1.1]:
-		b.box(Vector3(x, 1.85, -10.06), Vector3(0.08, 1.9, 0.05), m["dark"])
+	# Control room, open to the glazed nose between the mining arms (the cockpit).
 	for side: float in [-1.0, 1.0]:
 		_wall(root, body, m, false, side * 3.3, -10.325, -5.925, h, dh)
 	_wall(root, body, m, true, -5.8, -6.725, 6.725, h, dh, [[0.0, 2.2]])
@@ -1091,10 +1300,7 @@ static func _rooms_dreadnought(root: Node3D, body: StaticBody3D, m: Dictionary, 
 	_slab(root, body, m, -3.925, -13.525, 3.925, -8.475, h)
 	_slab(root, body, m, -1.55, -8.725, 1.55, -6.475, h)
 	_slab(root, body, m, -7.925, -6.725, 7.925, 10.25, h)
-	# The bridge.
-	_wall(root, body, m, true, -13.4, -3.925, 3.925, h, dh, [], [[0.0, 6.0, 1.0, 2.9]])
-	for x: float in [-1.5, 1.5]:
-		b.box(Vector3(x, 1.95, -13.26), Vector3(0.08, 1.9, 0.05), m["dark"])
+	# The bridge, open to the glazed nose at the front (the cockpit).
 	for side: float in [-1.0, 1.0]:
 		_wall(root, body, m, false, side * 3.8, -13.525, -8.475, h, dh, [], [[-11.0, 2.0]])
 	_wall(root, body, m, true, -8.6, -3.925, 3.925, h, dh, [[0.0, 2.2]])
@@ -1231,15 +1437,18 @@ static func _cores(root: Node3D, body: StaticBody3D, m: Dictionary, inner: Dicti
 	parts["core_mat"] = core_mat
 
 
-## Station consoles and seats; returns station id -> interaction area.
+## Station consoles and seats, except the pilot's (the cockpit has its own); returns station id ->
+## interaction area.
 static func _consoles(root: Node3D, body: StaticBody3D, m: Dictionary, layout: Dictionary) -> Dictionary:
 	var screen_cols := {
-		"pilot": Color(0.3, 0.9, 1.0), "gun": Color(1.0, 0.45, 0.3), "laser": Color(1.0, 0.75, 0.25), "scout": Color(0.45, 1.0, 0.5),
+		"gun": Color(1.0, 0.45, 0.3), "laser": Color(1.0, 0.75, 0.25), "scout": Color(0.45, 1.0, 0.5),
 	}
 	var dark: Material = m["dark"]
 	var areas := {}
 	for id: String in layout["order"]:
 		var st: Dictionary = layout["by_id"][id]
+		if st["kind"] == "pilot":
+			continue
 		var c: Vector3 = st["console"]
 		var size: Vector3 = st["console_size"]
 		var col: Color = screen_cols[st["kind"]]
@@ -1269,31 +1478,6 @@ static func _consoles(root: Node3D, body: StaticBody3D, m: Dictionary, layout: D
 		root.add_child(label)
 		areas[id] = _interact_area(root, Vector3(c.x, 0.9, c.z), Vector3(1.8, 1.8, minf(1.8, size.z + 0.6) if st["kind"] == "scout" else 1.8), "station", id)
 	return areas
-
-
-## The big red emergency blast button on a pedestal beside the pilot seat.
-static func _blast_button(root: Node3D, body: StaticBody3D, m: Dictionary, inner: Dictionary, parts: Dictionary) -> void:
-	var eb: Vector3 = inner["button"]
-	_solid(root, body, Vector3(eb.x, 0.5, eb.z), Vector3(0.45, 1.0, 0.45), m["dark"])
-	Models.box(root, Vector3(eb.x, 0.5, eb.z), Vector3(0.47, 0.12, 0.47), Models.mat(Color(0.95, 0.8, 0.1), 0.3, 0.5))
-	Models.cylinder(root, Vector3(eb.x, 1.015, eb.z), 0.2, 0.03, Models.mat(Color(0.95, 0.8, 0.1), 0.3, 0.5), Vector3.ZERO, -1.0, 20)
-	var blast_mat := StandardMaterial3D.new()
-	blast_mat.albedo_color = Color(0.45, 0.02, 0.02)
-	blast_mat.emission_enabled = true
-	blast_mat.emission = Color(1.0, 0.12, 0.05)
-	blast_mat.emission_energy_multiplier = 2.0
-	Models.cylinder(root, Vector3(eb.x, 1.07, eb.z), 0.13, 0.09, blast_mat, Vector3.ZERO, 0.11, 16)
-	var blabel := Label3D.new()
-	blabel.text = "EMERGENCY\nBLAST"
-	blabel.font_size = 30
-	blabel.pixel_size = 0.0032
-	blabel.outline_size = 8
-	blabel.modulate = Color(1.0, 0.35, 0.25)
-	blabel.billboard = BaseMaterial3D.BILLBOARD_FIXED_Y
-	blabel.position = Vector3(eb.x, 1.5, eb.z)
-	root.add_child(blabel)
-	_interact_area(root, Vector3(eb.x, 0.9, eb.z), Vector3(0.9, 1.4, 0.9), "emergency", true)
-	parts["blast_mat"] = blast_mat
 
 
 ## The install hub for supply-crate upgrades, against a wall. Built facing +x, then turned by the

@@ -104,8 +104,9 @@ func _build_world() -> void:
 		spot.spot_range = 60.0
 		spot.spot_angle = 32.0
 		spot.light_energy = 6.0
-		if p.z > 20.0:
-			ShipBuilder.configure_shadow(spot)
+		# The hangar's floods, each with its lamp's cookie (which needs the light's shadows on).
+		spot.light_projector = Models.light_cookie("flood")
+		ShipBuilder.configure_shadow(spot)
 		add_child(spot)
 	var fill := OmniLight3D.new()
 	fill.position = Vector3(0, 12, 0)

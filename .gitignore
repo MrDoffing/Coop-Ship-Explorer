@@ -1,3 +1,7 @@
 # Godot 4+ specific ignores
 .godot/
 /android/
+
+# Blender preview renders and work textures (tools/blender)
+tools/blender/previews/
+__pycache__/

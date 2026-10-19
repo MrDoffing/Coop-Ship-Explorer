@@ -14,6 +14,8 @@ var yaw_min := deg_to_rad(-88.0)
 var yaw_max := deg_to_rad(88.0)
 var pitch_min := deg_to_rad(-60.0)
 var pitch_max := deg_to_rad(72.0)
+## A mount with yaw limits of -180..180 degrees turns all the way round: its yaw wraps.
+var full_traverse := false
 var aim := Vector2.ZERO
 ## Barrel tip and over-the-barrel camera, relative to the pitch pivot.
 var muzzle := Vector3(0, 0, -2.1)
@@ -52,6 +54,9 @@ func build(def: Dictionary) -> void:
 			Models.box(pitch_pivot, Vector3(0, 0.3, -0.6), Vector3(0.6, 0.18, 0.9), metal)
 			for x: float in [-0.26, 0.26]:
 				Models.box(pitch_pivot, Vector3(x, 0.0, -0.45), Vector3(0.06, 0.36, 0.6), steel)
+	# A laser under the cockpit's glazing is watched from under its barrel (ShipTypes "cam").
+	if def.has("cam"):
+		camera_offset = def["cam"]
 
 
 ## Read the kind, style and aim limits of a station entry and set up the yaw and pitch pivots.
@@ -63,6 +68,7 @@ func read_mount(def: Dictionary) -> void:
 	yaw_max = deg_to_rad(float(lim[1]))
 	pitch_min = deg_to_rad(float(lim[2]))
 	pitch_max = deg_to_rad(float(lim[3]))
+	full_traverse = yaw_max - yaw_min >= TAU - 0.001
 	yaw_pivot = Node3D.new()
 	add_child(yaw_pivot)
 	pitch_pivot = Node3D.new()
@@ -76,11 +82,17 @@ func set_aim(a: Vector2) -> void:
 
 
 func clamp_aim(a: Vector2) -> Vector2:
-	return Vector2(clampf(a.x, yaw_min, yaw_max), clampf(a.y, pitch_min, pitch_max))
+	var yaw := wrapf(a.x, -PI, PI) if full_traverse else clampf(a.x, yaw_min, yaw_max)
+	return Vector2(yaw, clampf(a.y, pitch_min, pitch_max))
 
 
 func within_limits(a: Vector2) -> bool:
-	return a.x >= yaw_min and a.x <= yaw_max and a.y >= pitch_min and a.y <= pitch_max
+	return (full_traverse or (a.x >= yaw_min and a.x <= yaw_max)) and a.y >= pitch_min and a.y <= pitch_max
+
+
+## The turn from aim `from` to aim `to`: the short way round on a mount that turns all the way.
+func aim_delta(from: Vector2, to: Vector2) -> Vector2:
+	return Vector2(angle_difference(from.x, to.x) if full_traverse else to.x - from.x, to.y - from.y)
 
 
 ## Unclamped (yaw, pitch) that points the barrel at a point in the ship's local space.

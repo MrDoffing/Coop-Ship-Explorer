@@ -1,8 +1,10 @@
 class_name CheatMenu
 extends PanelContainer
 ## The homebase cheat menu, for testing (debug builds, host only): research points, unlocks, maxed
-## ship upgrades, starting credits for dives and a fresh profile. Cheats change the real save; the
-## first one keeps a copy of the profile from before, which "Restore my save" brings back.
+## ship upgrades, starting credits for dives, a fresh profile, and the outpost test (a dive that
+## starts landed at an abandoned station with a crate of every hand weapon; it leaves the save
+## alone). Cheats change the real save; the first one keeps a copy of the profile from before,
+## which "Restore my save" brings back.
 
 ## Credits every dive can start with (Game.cheat_dive_credits).
 const DIVE_CREDITS := [0, 1000, 10000, 99999]
@@ -53,6 +55,10 @@ func _ready() -> void:
 	v.add_child(cr_row)
 	_credits_label = UiTheme.label("", 14, UiTheme.MUTED)
 	v.add_child(_credits_label)
+
+	v.add_child(UiTheme.label("Hand weapons", 16, UiTheme.ACCENT))
+	v.add_child(_button("outpost_test", "Outpost test: land at an abandoned station, every weapon in crates",
+		func(): Game.main.start_mission("outpost")))
 
 	v.add_child(HSeparator.new())
 	var save_row := HBoxContainer.new()

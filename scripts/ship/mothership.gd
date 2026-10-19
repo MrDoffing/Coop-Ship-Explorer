@@ -65,12 +65,15 @@ const BRAKE_DECEL := 2.0
 ## Abandoned stations: landing is possible within DERELICT_LAND_RANGE of a hangar's mouth, but not
 ## while a free-flying alien is within DERELICT_CLEAR_RANGE of the ship (aliens latched onto the
 ## hull don't count: they let go once the ship starts landing, see at_derelict()). Each room holds
-## salvage with SALVAGE_CHANCE (the vault always holds two crates) and aliens with HOSTILE_CHANCE
-## (never the first room; the vault is always guarded).
+## salvage with SALVAGE_CHANCE (more behind sealed doors, the vault and the armory always some) and
+## a credit box with CREDITS_CHANCE (sealed rooms and the vault more, worth more deeper down: see
+## _credit_box), and a stalker roams STALKER_CHANCE of them (see _derelict_contents for the rest of
+## the aliens).
 const DERELICT_LAND_RANGE := 90.0
 const DERELICT_CLEAR_RANGE := 60.0
 const SALVAGE_CHANCE := 0.65
-const HOSTILE_CHANCE := 0.55
+const CREDITS_CHANCE := 0.4
+const STALKER_CHANCE := 0.75
 ## Auto turrets: reach, turn rate, rate of fire and damage per bolt.
 const AUTO_RANGE := 75.0
 const AUTO_TURN := 3.0
@@ -89,10 +92,24 @@ const ENGINE_HUM_FADE := 5.0
 const LASER_ALIEN_SHARE := 0.6
 ## Hostility: how hard the aliens hunt the ship (MissionLevel._director sends the ambushes). It
 ## rises while the ship flies, filling up over HOSTILITY_TIME seconds, holds while the ship is down
-## at an abandoned station and resets at every waystation. Its four stages (HOSTILITY_STAGES) send
-## more and bigger ambushes; there are none while the aliens are docile.
+## at an abandoned station and resets at every waystation. Its stages (HOSTILITY_STAGES) send more
+## and bigger ambushes (none while the aliens are docile); once the meter is full it is SURGING:
+## the alarm goes off and the aliens keep coming until the ship docks at a waystation.
 const HOSTILITY_TIME := 320.0
-const HOSTILITY_STAGES := ["DOCILE", "MILD", "MODERATE", "HIGH"]
+const HOSTILITY_STAGES := ["DOCILE", "MILD", "MODERATE", "HIGH", "SURGING"]
+## The hull grinding along rock faster than this (m/s) throws sparks and screeches.
+const SCRAPE_SPEED := 0.6
+## The mining lasers burn the rock they touch (Marks, every peer on its own from the synced beam
+## ends): a new burn every BURN_STEP metres the beam moves, the one under the beam stays molten, and
+## each cools over BURN_COOL seconds once the beam moves on (glowing at BURN_GLOW) and lasts
+## BURN_LIFE. At most ROCK_MARKS burns at once.
+const BURN_STEP := 0.4
+const BURN_GLOW := 3.0
+const BURN_COOL := 2.2
+const BURN_LIFE := 150.0
+const ROCK_MARKS := 160
+## How far along a gun pod's sight line (m) the ship itself holds its fire (see fire_masked).
+const MASK_RANGE := 45.0
 
 const SHIELD_SHADER := """
 shader_type spatial;
@@ -170,6 +187,13 @@ var hostility := 0.0
 var derelict_k := -1
 var derelicts_docked := 0
 var hostiles := 0
+## The abandoned station whose doors and power are kept here (the one landed at last; -1: none
+## yet), whether its generator runs, each of its doors' state (Derelict.DOOR_*) and each keypad
+## lock's wrong codes so far.
+var outpost_k := -1
+var outpost_power := false
+var outpost_doors := PackedByteArray()
+var outpost_tries := PackedByteArray()
 ## Supplies installed this dive (item id -> count), auto turrets installed in the turret slots, and
 ## the aim of every turret hardpoint.
 var run_mods: Dictionary = {}
@@ -199,6 +223,8 @@ var cargo_spawner: MultiplayerSpawner
 ## Station id -> Turret for every gun and mining laser.
 var turrets: Dictionary = {}
 var panels: Array = []
+## The pilot's cockpit at the front (its dashboard, levers and camera feeds).
+var cockpit: Cockpit
 ## Waypoint graph for walking aboard (server): the interior, or the interior plus the abandoned
 ## station while landed at one. `derelict_nav` covers only the station (for the aliens there).
 var nav: AStar3D
@@ -209,6 +235,11 @@ var _shield_mat: ShaderMaterial
 var _shield_flash := 0.0
 ## Laser station -> {"mesh", "light", "audio"}.
 var _beams: Dictionary = {}
+## Battle damage on the hull (a child of the exterior), the lasers' burns on the rock (in the
+## mission), and each laser's current burn: station -> {"decal", "pos"}.
+var _damage_marks: Marks
+var _rock_marks: Marks
+var _burns: Dictionary = {}
 var _engine_audio: AudioStreamPlayer3D
 var _since_sync := 0.0
 var _alarm_t := 0.0
@@ -218,6 +249,15 @@ var _hub_text := ""
 ## How far the ship reaches ahead of and behind its origin (from the collision boxes).
 var _nose := 14.0
 var _stern := 14.5
+## The motion tracker (every peer): seconds until the ambush it picked up arrives (0: none), from
+## which way, and when it pings next.
+var _contact_t := 0.0
+var _contact_ahead := true
+var _ping_t := 0.0
+## Seconds the hull keeps counting as scraping after the last grind on rock, and until the next
+## screech may play.
+var _scrape_t := 0.0
+var _scrape_snd := 0.0
 
 # --- Server only ---
 var _inputs: Dictionary = {}
@@ -230,6 +270,7 @@ var _time := 0.0
 var _last_hit := -100.0
 var _yaw_rate := 0.0
 var _bump_cd := 0.0
+var _scrape_cd := 0.0
 var _fx_cd := 0.0
 var _hull_claims: Dictionary = {}
 var _hatch_claims: Dictionary = {}
@@ -253,7 +294,12 @@ var _liftoff_confirm := -100.0
 var _station_cargo: Dictionary = {}
 ## What is left in each abandoned station (index -> {"crates", "enemies"}, station-local).
 var _derelict_state: Dictionary = {}
-## Every crew member's hand weapon (peer id -> CrewWeapons id; the Blaster when missing).
+## The outpost's generator: pulls on its starter so far and how many it takes to catch, and when
+## (server time) the doors that need its power open once it runs (-1: not pending).
+var _gen_pulls := 0
+var _gen_need := 2
+var _power_doors_at := -1.0
+## Every crew member's hand weapon (peer id -> CrewWeapons id; the Pistol when missing).
 var _crew_weapons: Dictionary = {}
 var _crate_seq := 0
 var _auto_cd: Array[float] = []
@@ -268,7 +314,8 @@ func _init() -> void:
 		"weapons_online", "fuel", "throttle", "autopilot", "occupants", "beams", "gun_weapons", "credits", "ore",
 		"depth", "alive", "boarders", "frozen", "blast_cd", "landing", "station_k", "gate_k", "gate_entry",
 		"gate_exit", "stations_docked", "hostility", "derelict_k", "derelicts_docked", "hostiles", "stats", "max_hull", "max_shield",
-		"max_fuel", "run_mods", "autocannons", "auto_aim", "gun_ammo", "gun_heat", "gun_reload"], 1.0 / 30.0)
+		"max_fuel", "run_mods", "autocannons", "auto_aim", "gun_ammo", "gun_heat", "gun_reload", "outpost_k", "outpost_power",
+		"outpost_doors", "outpost_tries"], 1.0 / 30.0)
 
 
 func setup(data: Dictionary) -> void:
@@ -329,12 +376,21 @@ func _ready() -> void:
 	add_child(exterior)
 	_ext = ShipBuilder.build_exterior(exterior, ship_type)
 	turrets = _ext["turrets"]
+	_damage_marks = Marks.new()
+	_damage_marks.name = "DamageMarks"
+	_damage_marks.cap = ShipMarks.DAMAGE_CAP
+	exterior.add_child(_damage_marks)
 	interior = Node3D.new()
 	interior.name = "Interior"
 	add_child(interior)
 	_int = ShipBuilder.build_interior(interior, ship_type)
 	interior_body = _int["body"]
 	panels = _int["panels"]
+	cockpit = _int["cockpit"]
+	cockpit.ship = self
+	# The hull cameras skip the interior, all but the cockpit behind the glazed nose and the cargo
+	# ramp. The crew, boarders and cargo (added below) stay on the default layer.
+	_interior_layer(interior, [cockpit, _int["ramp"], _int["ramp_light"]])
 	crew_root = Node3D.new()
 	crew_root.name = "Crew"
 	interior.add_child(crew_root)
@@ -359,6 +415,16 @@ func _ready() -> void:
 func _exit_tree() -> void:
 	if Game.mission and Game.mission.get("ship") == self:
 		Game.mission.set("ship", null)
+
+
+## Put everything visible under `n` on the interior's render layer, except `keep` and what is under it.
+static func _interior_layer(n: Node, keep: Array) -> void:
+	for c in n.get_children():
+		if c in keep:
+			continue
+		if c is VisualInstance3D:
+			(c as VisualInstance3D).layers = Game.VIS_INTERIOR
+		_interior_layer(c, keep)
 
 
 func _add_hull_shapes() -> void:
@@ -416,6 +482,7 @@ func _build_beams() -> void:
 		audio.unit_size = 8.0
 		audio.max_distance = 120.0
 		add_child(audio)
+		Sfx.track(audio)
 		_beams[id] = {"mesh": mi, "light": light, "audio": audio}
 
 
@@ -433,6 +500,7 @@ func _build_audio() -> void:
 	_engine_audio.max_db = 0.0
 	_engine_audio.autoplay = true
 	add_child(_engine_audio)
+	Sfx.track(_engine_audio)
 
 
 ## Engine hum level (dB) for a listener at ship-local point `ear`, given the engine room's box
@@ -460,7 +528,7 @@ func _spawn_crew(data: Variant) -> Node:
 
 
 func _spawn_boarder(data: Variant) -> Node:
-	var b := Boarder.new()
+	var b := Boarder.make(str((data as Dictionary).get("kind", "boarder")))
 	b.setup(data)
 	return b
 
@@ -623,6 +691,7 @@ func _physics_process(delta: float) -> void:
 		if alive:
 			_server_systems(delta)
 		_server_gates(delta)
+		_server_outpost()
 		_server_flight(delta)
 		_server_weapons(delta)
 		_server_autocannons(delta)
@@ -710,9 +779,16 @@ func _server_systems(delta: float) -> void:
 	hostiles = outside
 
 
-## Hostility stage: 0 docile, 1 mild, 2 moderate, 3 high.
+## Hostility stage: 0 docile, 1 mild, 2 moderate, 3 high, 4 surging (the meter is full).
 func hostility_stage() -> int:
+	if surging():
+		return 4
 	return clampi(int(hostility * 4.0), 0, 3)
+
+
+## The hostility meter is full: the aliens keep coming until the ship docks at a waystation.
+func surging() -> bool:
+	return hostility >= 1.0
 
 
 func _laser_count() -> int:
@@ -760,13 +836,19 @@ func _server_flight(delta: float) -> void:
 	var pre := velocity
 	move_and_slide()
 	_bump_cd = maxf(0.0, _bump_cd - delta)
+	_scrape_cd = maxf(0.0, _scrape_cd - delta)
 	for i in get_slide_collision_count():
 		var c := get_slide_collision(i)
-		var impact := -pre.dot(c.get_normal())
+		var n := c.get_normal()
+		var impact := -pre.dot(n)
 		if impact > 2.5 and _bump_cd <= 0.0:
 			_bump_cd = 0.6
 			apply_damage((impact - 1.5) * 5.0, c.get_position(), "impact")
-			velocity += c.get_normal() * impact * 0.6
+			velocity += n * impact * 0.6
+		elif _scrape_cd <= 0.0 and (pre - n * pre.dot(n)).length() > SCRAPE_SPEED:
+			# Grinding along the rock: sparks and a screech (the cockpit's cameras catch it).
+			_scrape_cd = 0.15
+			_fx_scrape.rpc(to_local(c.get_position()))
 
 
 ## Steering (turn, vertical, strafe) that keeps the ship on the cave's centre line.
@@ -837,7 +919,8 @@ func _server_weapons(delta: float) -> void:
 				ammo[i] = GunPod.BELT
 		var cd := float(_fire_cd.get(id, 0.0)) - delta
 		var inp: Dictionary = _inputs.get(id, {})
-		if not (occupants.has(id) and weapons_online and alive and bool(inp.get("fire", false)) and reload[i] <= 0.0):
+		if not (occupants.has(id) and weapons_online and alive and bool(inp.get("fire", false)) and reload[i] <= 0.0) \
+				or fire_masked(id, aim_of(id)):
 			_fire_cd[id] = maxf(cd, 0.0)
 			continue
 		while cd <= 0.0 and ammo[i] > 0 and weapons_online:
@@ -853,6 +936,20 @@ func _server_weapons(delta: float) -> void:
 	gun_ammo = ammo
 	gun_heat = heat
 	gun_reload = reload
+
+
+## True while gun pod `id`'s sight line at aim `a` runs into the ship itself (only a mount that
+## turns all the way round can swing its guns over the hull): like a bomber turret's interrupter,
+## the pod holds its fire until the line is clear.
+func fire_masked(id: String, a: Vector2) -> bool:
+	var pod := turrets.get(id) as GunPod
+	if pod == null or not pod.full_traverse or not is_inside_tree():
+		return false
+	var eye := to_global(pod.eye_local(a))
+	var fwd := -(global_basis * pod.aim_basis_local(a)).z
+	var q := PhysicsRayQueryParameters3D.create(eye, eye + fwd * MASK_RANGE, Game.LAYER_HULL)
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	return not hit.is_empty() and hit["collider"] == self
 
 
 ## Server: one round from gun pod `id` (index `i`), from its next barrel. The barrels' fire
@@ -1170,6 +1267,8 @@ func emergency_blast() -> void:
 
 @rpc("authority", "call_local", "reliable")
 func _fx_blast() -> void:
+	# The cover of the big red button flips up for everyone (the presser saw it at once).
+	cockpit.press_button()
 	var center := to_global(shield_center())
 	Fx.shockwave(center, BLAST_RADIUS, Color(0.55, 0.9, 1.0))
 	Fx.flash(center, Color(0.6, 0.9, 1.0), 10.0, BLAST_RADIUS * 2.0, 0.5)
@@ -1231,11 +1330,13 @@ func walk_bounds() -> AABB:
 
 
 ## The waypoint of `graph` nearest to ship-local point p that is in sight of p, so nobody heads
-## for a waypoint on the far side of a wall.
+## for a waypoint on the far side of a wall (or for a closed door's, which is switched off).
 func nav_closest(graph: AStar3D, p: Vector3) -> int:
 	var ids := graph.get_point_ids()
 	var order: Array = []
 	for id in ids:
+		if graph.is_point_disabled(id):
+			continue
 		order.append([graph.get_point_position(id).distance_squared_to(p), id])
 	order.sort_custom(func(a, b): return a[0] < b[0])
 	var space := get_world_3d().direct_space_state
@@ -1473,6 +1574,7 @@ func _on_landed() -> void:
 		nav = DerelictBuilder.build_nav(d, interior_layout())
 		derelict_nav = DerelictBuilder.build_nav(d, {})
 		_unload_derelict(d)
+		_apply_outpost_doors()
 		_fx_touchdown.rpc()
 		notify.rpc("Landed at %s - no defences here, expect hostiles" % d["name"], 1)
 		return
@@ -1609,10 +1711,51 @@ func _begin_derelict_landing(d: Dictionary) -> void:
 		notify.rpc("%d alien%s let go of the hull" % [latched, "s" if latched > 1 else ""], 0)
 
 
+## Server, for the outpost test (MissionLevel): settle on abandoned station `d`'s pad at once, as if
+## the crew had come through the waystation before it and landed there: the ramp down, the
+## station's aliens and salvage set out.
+func land_for_test(d: Dictionary) -> void:
+	var k := int(d["k"])
+	var xf: Transform3D = d["xform"]
+	gate_k = k
+	gate_entry = 0.0
+	_exit_state = 3
+	global_position = xf * Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	rotation = Vector3(0, atan2(xf.basis.z.x, xf.basis.z.z), 0)
+	velocity = Vector3.ZERO
+	reset_physics_interpolation()
+	throttle = 0.0
+	autopilot = false
+	_dock_keys = []
+	derelict_k = k
+	station_k = -1
+	landing = Dock.LANDED
+	ramp = 1.0
+	_on_landed()
+
+
+## Server: a free crate of `item` at ship-local `pos`, turned `yaw`.
+func spawn_crate(item: String, pos: Vector3, yaw: float) -> void:
+	_crate_seq += 1
+	cargo_spawner.spawn({"name": "C%d" % _crate_seq, "item": item, "price": 0, "pos": pos, "yaw": yaw})
+
+
 ## Server: set out what is left in an abandoned station: salvage crates and the aliens guarding
 ## them (both in ship-local space; the ship is parked).
 func _unload_derelict(d: Dictionary) -> void:
 	var k := int(d["k"])
+	if outpost_k != k:
+		# First landing here: its doors as they were left, the power off.
+		var layout: Dictionary = d["layout"]
+		outpost_k = k
+		outpost_power = false
+		outpost_doors = Derelict.start_doors(layout)
+		var tries := PackedByteArray()
+		tries.resize((layout["doors"] as Array).size())
+		outpost_tries = tries
+		_gen_pulls = 0
+		_gen_need = 2 + absi(int(d["seed"])) % 2
+		_power_doors_at = -1.0
 	if not _derelict_state.has(k):
 		_derelict_state[k] = _derelict_contents(d)
 	var state: Dictionary = _derelict_state[k]
@@ -1622,15 +1765,41 @@ func _unload_derelict(d: Dictionary) -> void:
 		cargo_spawner.spawn({"name": "C%d" % _crate_seq, "item": rec["item"], "price": 0,
 			"pos": (rec["pos"] as Vector3) - lift, "yaw": rec["yaw"]})
 	for rec: Dictionary in state["enemies"]:
-		_boarder_seq += 1
-		boarder_spawner.spawn({"name": "H%d" % _boarder_seq, "kind": rec["kind"], "pos": (rec["pos"] as Vector3) - lift,
-			"hp": rec["hp"], "max_hp": rec["max_hp"], "dmg": rec["dmg"], "outside": true})
+		var data := rec.duplicate()
+		data["pos"] = (rec["pos"] as Vector3) - lift
+		if data.has("lair"):
+			data["lair"] = (rec["lair"] as Vector3) - lift
+		var kind := str(rec["kind"])
+		data.erase("kind")
+		spawn_hostile(kind, data["pos"], data)
 	state["crates"] = []
 	state["enemies"] = []
 
 
-## What an abandoned station holds when the crew first lands there: salvage crates by the walls
-## (see RunItems.roll_salvage) and packs of aliens in the rooms, tougher deeper down.
+## Server: an alien of `kind` in the abandoned station the ship is landed at, at ship-local `pos`;
+## `extra` is the rest of its spawn data (health, depth's damage, its kind's own: a crawler's nest,
+## the stalker's lair...).
+func spawn_hostile(kind: String, pos: Vector3, extra := {}) -> Boarder:
+	_boarder_seq += 1
+	var hp := float(extra.get("hp", float(Boarder.KIND_STATS[kind]["hp"]) * outpost_hp_mult()))
+	var data := {"name": "H%d" % _boarder_seq, "kind": kind, "pos": pos, "hp": hp, "max_hp": float(extra.get("max_hp", hp)),
+		"dmg": float(extra.get("dmg", 1.0)), "outside": true}
+	data.merge(extra, false)
+	return boarder_spawner.spawn(data) as Boarder
+
+
+## How much tougher the aliens of the abandoned station the ship is at are (by its depth).
+func outpost_hp_mult() -> float:
+	if derelict_k < 0 or Game.mission == null:
+		return 1.0
+	return (Game.mission as MissionLevel).hp_mult(float((Game.mission.cave as CaveGen).derelict(derelict_k)["s"]))
+
+
+## What an abandoned station holds when the crew first lands there (station-local): salvage crates
+## by the walls (RunItems.roll_salvage; the armory's are mostly hand weapons, and a room behind a
+## sealed door holds more), and the aliens living there, tougher deeper down: a stalker roaming it
+## (shut in behind a door that needs the generator's power, if there is one), barnacles on the
+## ceilings, crawler nests with their packs, and acid spiders. The first room is always clear.
 func _derelict_contents(d: Dictionary) -> Dictionary:
 	var mission: MissionLevel = Game.mission
 	var k := int(d["k"])
@@ -1647,57 +1816,166 @@ func _derelict_contents(d: Dictionary) -> Dictionary:
 	var rooms: Array = layout["rooms"]
 	var crates: Array = []
 	var enemies: Array = []
+	var extra := (1 if s > 900.0 else 0) + (1 if s > 1800.0 else 0)
+	var weapons: Array = CrewWeapons.ORDER.filter(func(w): return w != CrewWeapons.DEFAULT)
+	var cash_rng := RandomNumberGenerator.new()
+	cash_rng.seed = hash([int(mission.mission_seed), k, "credits"])
 	for i in rooms.size():
 		var room: Dictionary = rooms[i]
-		var vault := i == int(layout["vault"])
+		var theme := str(room["theme"])
 		var spots: Array = (room["spots"] as Array).duplicate()
-		for j in range(spots.size() - 1, 0, -1):
-			var r := rng.randi() % (j + 1)
-			var t: Variant = spots[j]
-			spots[j] = spots[r]
-			spots[r] = t
-		var loot := 2 if vault else (1 if rng.randf() < SALVAGE_CHANCE else 0)
+		OutpostLayout._shuffle(spots, rng)
+		var loot := 1 if rng.randf() < SALVAGE_CHANCE else 0
 		if loot == 1 and rng.randf() < 0.2:
 			loot = 2
+		if str(room["seal"]) != "":
+			loot = 2
+		match theme:
+			"vault":
+				loot = 2 + (1 if rng.randf() < 0.5 else 0)
+			"armory":
+				loot = 2 + (1 if rng.randf() < 0.4 else 0)
 		for j in mini(loot, spots.size()):
 			var item := RunItems.roll_salvage(rng, guns, free)
+			if theme == "armory" and (j < 2 or rng.randf() < 0.5):
+				item = RunItems.crew_weapon_item(str(weapons[rng.randi() % weapons.size()]))
 			if item == "autocannon":
 				free -= 1
 			var spot: Dictionary = spots[j]
 			crates.append({"item": item, "pos": (spot["pos"] as Vector3) + Vector3(0, SupplyCrate.SIZE.y * 0.5, 0), "yaw": spot["yaw"]})
-		if i == 0 or not (vault or rng.randf() < HOSTILE_CHANCE):
+		# Credit boxes, by the next free spots along the walls (rolled apart, so the rest of what
+		# a station holds doesn't depend on them).
+		var boxes := 1 if cash_rng.randf() < (CREDITS_CHANCE * 0.6 if i == 0 else CREDITS_CHANCE) else 0
+		if str(room["seal"]) != "":
+			boxes += 1
+		if theme == "vault":
+			boxes += 2
+		for j in range(loot, mini(loot + boxes, spots.size())):
+			var spot: Dictionary = spots[j]
+			var worth := _credit_box(cash_rng, s) * (1.5 if theme == "vault" else (1.25 if str(room["seal"]) != "" else 1.0))
+			crates.append({"item": RunItems.credits_item(int(round(worth / 5.0)) * 5),
+				"pos": (spot["pos"] as Vector3) + Vector3(0, SupplyCrate.SIZE.y * 0.5, 0), "yaw": spot["yaw"]})
+	var add := func(kind: String, pos: Vector3, more: Dictionary) -> void:
+		var hp := float(Boarder.KIND_STATS[kind]["hp"]) * hp_mult
+		var rec := {"kind": kind, "pos": pos, "hp": hp, "max_hp": hp, "dmg": dmg_mult}
+		rec.merge(more)
+		enemies.append(rec)
+	var used := {}
+	# The stalker: shut in behind a door that needs power if there is one (the generator lets it
+	# out), else in the dead end furthest in that isn't locked.
+	if rng.randf() < STALKER_CHANCE and rooms.size() > 1:
+		var lair := -1
+		for ri in range(1, rooms.size()):
+			if str(rooms[ri]["seal"]) == "power":
+				lair = ri
+		if lair < 0:
+			for ri in range(1, rooms.size()):
+				if str(rooms[ri]["seal"]) == "" and (lair < 0 or int(rooms[ri]["dist"]) > int(rooms[lair]["dist"])):
+					lair = ri
+		if lair >= 0:
+			var at := _free_spot(rooms[lair], used, rng)
+			add.call("stalker", at, {"lair": at})
+	# Barnacles on the ceilings of corridors (straight stretches away from the front door) and here
+	# and there a room.
+	var ceilings: Array[Vector2i] = []
+	for c: Vector2i in OutpostLayout.corridor_cells(layout):
+		var bits := DerelictBuilder._hall_opens(layout, c)
+		if absi(c.x - OutpostLayout.MID) + c.y > 2 and (bits == 3 or bits == 12):
+			ceilings.append(c)
+	for ri in range(1, rooms.size()):
+		for c: Vector2i in OutpostLayout.free_cells(rooms[ri]):
+			if rng.randf() < 0.15:
+				ceilings.append(c)
+	OutpostLayout._shuffle(ceilings, rng)
+	var barnacles := rng.randi_range(2, 4) + extra
+	var placed: Array[Vector2i] = []
+	for c in ceilings:
+		if placed.size() >= barnacles:
+			break
+		var near := false
+		for q in placed:
+			if absi(q.x - c.x) + absi(q.y - c.y) < 3:
+				near = true
+		if near:
 			continue
-		var c: Vector2 = room["c"]
-		var size: Vector2 = room["size"]
-		for kind: String in _roll_pack(rng, s, vault):
-			var p := Vector3(c.x + rng.randf_range(-0.5, 0.5) * (size.x - 3.2), StationBuilder.DECK_Y,
-				c.y + rng.randf_range(-0.5, 0.5) * (size.y - 3.2))
-			var hp := float(Boarder.KIND_STATS[kind]["hp"]) * hp_mult
-			enemies.append({"kind": kind, "pos": p, "hp": hp, "max_hp": hp, "dmg": dmg_mult})
+		placed.append(c)
+		var p := OutpostLayout.cell_pos(c) + _barnacle_spot(layout, c, rng) + Vector3(0, OutpostLayout.ceiling(layout, c) - 0.02, 0)
+		add.call("barnacle", p, {})
+	# Crawler nests, each with its pack, in rooms past the first (the vault's always has one if it
+	# has none of the others).
+	var nest_rooms: Array = []
+	for ri in range(1, rooms.size()):
+		if str(rooms[ri]["theme"]) in ["lab", "storage", "quarters", "workshop", "medbay", "mess", "vault"]:
+			nest_rooms.append(ri)
+	OutpostLayout._shuffle(nest_rooms, rng)
+	var nests := mini(nest_rooms.size(), rng.randi_range(1, 2) + (1 if s > 1200.0 else 0))
+	var hive_id := 0
+	for n in nests:
+		var room: Dictionary = rooms[nest_rooms[n]]
+		var slots := OutpostLayout.wall_slots(layout, nest_rooms[n])
+		var slot: Dictionary = slots[rng.randi() % slots.size()]
+		var r := rng.randf()
+		var at: Vector3
+		var up: Vector3
+		if r < 0.6:
+			at = (slot["pos"] as Vector3) + Vector3(0, rng.randf_range(0.6, 2.4), 0)
+			up = slot["inward"]
+		elif r < 0.85:
+			at = _free_spot(room, used, rng) + Vector3(0, float(room["h"]) - 0.02, 0)
+			up = Vector3.DOWN
+		else:
+			at = _free_spot(room, used, rng)
+			up = Vector3.UP
+		var brood := rng.randi_range(3, 5) + extra
+		add.call("hive", at, {"hive_id": hive_id, "brood": brood, "up": up})
+		for j in brood:
+			add.call("crawler", _free_spot(room, used, rng), {"hive_id": hive_id})
+		hive_id += 1
+	# Acid spiders: a room or two, and a pair behind every sealed door.
+	var spider_rooms: Array = []
+	for ri in range(1, rooms.size()):
+		if str(rooms[ri]["seal"]) != "":
+			spider_rooms.append(ri)
+	var open_rooms: Array = range(1, rooms.size()).filter(func(ri): return str(rooms[ri]["seal"]) == "")
+	OutpostLayout._shuffle(open_rooms, rng)
+	spider_rooms.append_array(open_rooms.slice(0, rng.randi_range(1, 2)))
+	for ri: int in spider_rooms:
+		var count := (2 if str(rooms[ri]["seal"]) != "" else rng.randi_range(1, 2)) + (1 if extra > 0 and rng.randf() < 0.5 else 0)
+		for j in count:
+			add.call("spider", _free_spot(rooms[ri], used, rng), {})
 	return {"crates": crates, "enemies": enemies}
 
 
-## The aliens in one room: a pack of skitters, a needler or two, a boarder or two, or (guarding
-## the vault) a mix of them all.
-static func _roll_pack(rng: RandomNumberGenerator, depth: float, vault: bool) -> Array[String]:
-	var out: Array[String] = []
-	var extra := 1 if depth > 900.0 else 0
-	if vault:
-		out.append_array(["boarder", "needler"])
-		for i in 3 + extra:
-			out.append("skitter")
-		return out
-	var r := rng.randf()
-	if r < 0.4:
-		for i in rng.randi_range(2, 4) + extra:
-			out.append("skitter")
-	elif r < 0.72:
-		for i in 1 + (1 if rng.randf() < 0.4 else 0) + extra:
-			out.append("needler")
-	else:
-		for i in 1 + (1 if rng.randf() < 0.35 else 0) + extra:
-			out.append("boarder")
-	return out
+## Where on cell c's ceiling a barnacle grows (from the middle of the cell): down the middle of a
+## straight corridor's flat ceiling, on the far side from its lamp if it has one; in a room off
+## towards a corner, clear of a lamp in the cell's middle and the beams at its edges.
+static func _barnacle_spot(layout: Dictionary, c: Vector2i, rng: RandomNumberGenerator) -> Vector3:
+	if (layout["kind"] as PackedByteArray)[OutpostLayout.idx(c)] == OutpostLayout.HALL:
+		var along := Vector3(1, 0, 0) if DerelictBuilder._hall_opens(layout, c) == 3 else Vector3(0, 0, 1)
+		var lamp := (c.x + c.y) % DerelictBuilder.LAMP_EVERY == 0
+		var s := -rng.randf_range(0.45, 0.8) if lamp else rng.randf_range(-0.8, 0.8)
+		return along * s + Vector3(along.z, 0, along.x) * rng.randf_range(-0.12, 0.12)
+	return Vector3(rng.randf_range(0.55, 0.75) * signf(rng.randf() - 0.5), 0, rng.randf_range(0.55, 0.75) * signf(rng.randf() - 0.5))
+
+
+## What a credit box found in a station `s` metres down is worth (before the vault's and the sealed
+## rooms' bonus).
+static func _credit_box(rng: RandomNumberGenerator, s: float) -> float:
+	return (45.0 + s / 14.0) * rng.randf_range(0.75, 1.3)
+
+
+## A free floor point in a room (station-local), away from the ones already used if it can be.
+static func _free_spot(room: Dictionary, used: Dictionary, rng: RandomNumberGenerator) -> Vector3:
+	var cells := OutpostLayout.free_cells(room)
+	if cells.is_empty():
+		cells = room["cells"]
+	var pick: Vector2i = cells[rng.randi() % cells.size()]
+	for i in 6:
+		if not used.has(pick):
+			break
+		pick = cells[rng.randi() % cells.size()]
+	used[pick] = true
+	return OutpostLayout.cell_pos(pick) + Vector3(rng.randf_range(-0.6, 0.6), 0, rng.randf_range(-0.6, 0.6))
 
 
 ## Server: on liftoff, put away the crates left outside the ship and the aliens still alive in the
@@ -1717,11 +1995,155 @@ func _stow_derelict(d: Dictionary) -> void:
 		if b == null or not b.outside or b.is_queued_for_deletion():
 			continue
 		if b.hp > 0.0:
-			(state["enemies"] as Array).append({"kind": b.kind, "pos": b.home + lift, "hp": b.hp, "max_hp": b.max_hp, "dmg": b.dmg_mult})
+			var rec := {"kind": b.kind, "pos": b.home + lift, "hp": b.hp, "max_hp": b.max_hp, "dmg": b.dmg_mult}
+			var more := b.save_data()
+			if more.has("lair"):
+				more["lair"] = (more["lair"] as Vector3) + lift
+			rec.merge(more)
+			(state["enemies"] as Array).append(rec)
 		b.queue_free()
 	_derelict_state[k] = state
 	nav = ShipInteriors.build_nav(interior_layout())
 	derelict_nav = null
+
+
+# --- The outpost's doors, keypads and generator --------------------------------------------------
+
+## The abandoned station the ship is landed at whose state is kept here, or {}.
+func _landed_outpost() -> Dictionary:
+	if derelict_k < 0 or derelict_k != outpost_k or landing != Dock.LANDED or Game.mission == null:
+		return {}
+	return (Game.mission.cave as CaveGen).derelict(derelict_k)
+
+
+## Server: switch the doorways' waypoints to the doors' states (both walking graphs).
+func _apply_outpost_doors() -> void:
+	var d := _landed_outpost()
+	if d.is_empty():
+		return
+	for graph: AStar3D in [nav, derelict_nav]:
+		if graph:
+			DerelictBuilder.apply_doors(graph, d["layout"], outpost_doors)
+
+
+func _set_door(di: int, state: int) -> void:
+	var doors := outpost_doors.duplicate()
+	doors[di] = state
+	outpost_doors = doors
+	_apply_outpost_doors()
+
+
+## Server: the doors that need the generator's power open a little after it starts.
+func _server_outpost() -> void:
+	if _power_doors_at < 0.0 or _time < _power_doors_at:
+		return
+	_power_doors_at = -1.0
+	var d := _landed_outpost()
+	if d.is_empty():
+		return
+	var doors: Array = d["layout"]["doors"]
+	var states := outpost_doors.duplicate()
+	var opened := 0
+	for di in doors.size():
+		if str(doors[di]["kind"]) == "power" and states[di] == Derelict.DOOR_CLOSED:
+			states[di] = Derelict.DOOR_OPEN
+			opened += 1
+	outpost_doors = states
+	_apply_outpost_doors()
+	if opened > 0:
+		notify.rpc("Power restored - %d sealed door%s opening" % [opened, "s" if opened > 1 else ""], 1)
+
+
+## A crew member (any peer) pulls the generator's starter: it coughs and dies, until a pull makes it
+## catch; then the working lamps come back and the doors that need its power open.
+@rpc("any_peer", "call_local", "reliable")
+func request_generator() -> void:
+	if not multiplayer.is_server():
+		return
+	var d := _landed_outpost()
+	if d.is_empty() or outpost_power or int(d["layout"]["generator"]) < 0:
+		return
+	var p := crew_root.get_node_or_null(str(Game.sender_id())) as CrewMember
+	var gen := _outpost_spot("generator")
+	if p == null or not p.alive or gen.distance_to(p.position + Vector3(0, 1.2, 0)) > 4.0:
+		return
+	_gen_pulls += 1
+	if _gen_pulls < _gen_need:
+		fx_outpost.rpc("gen_pull", -1)
+		return
+	outpost_power = true
+	_power_doors_at = _time + 2.5
+	fx_outpost.rpc("gen_start", -1)
+	notify.rpc("The generator is running", 0)
+	alert_outpost(gen, 30.0)
+
+
+## A crew member (any peer) keys a code into door `di`'s keypad. Right: the door opens. Wrong: one
+## try fewer; with none left the door locks down for good (and the noise brings company).
+@rpc("any_peer", "call_local", "reliable")
+func request_hack(di: int, code: String) -> void:
+	if not multiplayer.is_server():
+		return
+	var d := _landed_outpost()
+	if d.is_empty():
+		return
+	var doors: Array = d["layout"]["doors"]
+	if di < 0 or di >= doors.size() or str(doors[di]["kind"]) != "hack" or outpost_doors[di] != Derelict.DOOR_CLOSED:
+		return
+	var p := crew_root.get_node_or_null(str(Game.sender_id())) as CrewMember
+	var at := _outpost_spot("keypad", di)
+	if p == null or not p.alive or at.distance_to(p.position + Vector3(0, 1.2, 0)) > 3.5:
+		return
+	if code == str(doors[di]["code"]):
+		_set_door(di, Derelict.DOOR_OPEN)
+		fx_outpost.rpc("hack_ok", di)
+		notify.rpc("Code accepted - the %s is open" % _door_room_name(d, di), 0)
+		return
+	var tries := outpost_tries.duplicate()
+	tries[di] = tries[di] + 1
+	outpost_tries = tries
+	if tries[di] >= OutpostLayout.HACK_TRIES:
+		_set_door(di, Derelict.DOOR_LOCKDOWN)
+		fx_outpost.rpc("lockdown", di)
+		notify.rpc("LOCKDOWN - the %s is sealed for good" % _door_room_name(d, di), 2)
+		alert_outpost(at, 45.0)
+	else:
+		fx_outpost.rpc("hack_bad", di)
+		var left := OutpostLayout.HACK_TRIES - tries[di]
+		notify_peer(Game.sender_id(), "Wrong code - %d tr%s left before lockdown" % [left, "y" if left == 1 else "ies"], 1)
+
+
+static func _door_room_name(d: Dictionary, di: int) -> String:
+	var room := int(d["layout"]["doors"][di]["room"])
+	return str(d["layout"]["rooms"][room]["name"]).to_lower() if room >= 0 else "door"
+
+
+## Ship-local spots at the landed outpost: "generator" (its starter) or "keypad" (door `di`'s).
+func _outpost_spot(what: String, di := -1) -> Vector3:
+	var node: Derelict = Derelict.live.get(derelict_k)
+	if node == null:
+		return Vector3(INF, INF, INF)
+	if what == "generator":
+		return to_local(node.generator_spot())
+	var panel := node.panel_of(di)
+	return to_local(panel.global_position) if panel else Vector3(INF, INF, INF)
+
+
+## Server: a noise at ship-local `pos` (the generator starting, a lockdown's alarm) draws the
+## aliens within `reach` that hunt by ear.
+func alert_outpost(pos: Vector3, reach: float) -> void:
+	for c in boarder_root.get_children():
+		var b := c as Boarder
+		if b and b.outside and b.position.distance_to(pos) < reach:
+			b.hear(pos)
+
+
+## Every peer: something happened at the outpost the ship is landed at (Derelict.on_event).
+@rpc("authority", "call_local", "reliable")
+func fx_outpost(kind: String, di: int) -> void:
+	var node: Derelict = Derelict.live.get(outpost_k)
+	if node:
+		node.on_event(kind, di)
 
 
 # --- Shop and supply crates --------------------------------------------------------------------
@@ -1813,9 +2235,21 @@ func _server_cargo() -> void:
 
 
 func _drop_crate(crate: SupplyCrate, pos: Vector3, yaw: float) -> void:
+	var who := crew_root.get_node_or_null(str(crate.carrier)) as CrewMember
 	crate.net_pos = pos
 	crate.net_yaw = yaw
 	crate.carrier = 0
+	if RunItems.is_credits(crate.item) and is_aboard(pos):
+		_deposit(crate, who)
+
+
+## Server: a credit box put down aboard pays into the dive's credits.
+func _deposit(crate: SupplyCrate, who: CrewMember) -> void:
+	var worth := RunItems.credits_of(crate.item)
+	credits += worth
+	notify.rpc("%s deposited a credit box: +%d CR" % [who.display_name if who else "The crew", worth], 0)
+	_fx_buy.rpc(crate.net_pos)
+	crate.queue_free()
 
 
 ## Buy a shop item with the dive's credits; it can then be picked up.
@@ -1900,6 +2334,10 @@ func request_install(crate_name: String, target: String) -> void:
 	elif RunItems.is_crew_weapon(item):
 		notify_peer(pid, "Hand weapons aren't installed - put the crate down and press F to equip it", 1)
 		return
+	elif RunItems.is_credits(item):
+		crate.carrier = 0
+		_deposit(crate, who)
+		return
 	else:
 		if target != "hub":
 			notify_peer(pid, "Fit this at the install hub in the %s" % install_hub_room(), 1)
@@ -1967,19 +2405,25 @@ func crew_weapon(pid: int) -> String:
 	return str(_crew_weapons.get(pid, CrewWeapons.DEFAULT))
 
 
-## Splash damage from a crew member's plasma orb bursting at a ship-local point.
+## Blast damage from a crew member's grenade going off at a ship-local point: full damage in the
+## middle, half at the edge of the blast, and none through a wall.
 @rpc("any_peer", "call_local", "reliable")
 func crew_splash(center: Vector3, radius: float, dmg: float) -> void:
 	if not multiplayer.is_server():
 		return
 	radius = clampf(radius, 0.0, 8.0)
 	var by := Game.sender_id()
+	var space := get_world_3d().direct_space_state
+	var at := to_global(center)
 	for c in boarder_root.get_children():
 		var b := c as Boarder
 		if b == null or b.hp <= 0.0:
 			continue
 		var dist := to_local(b.center_global()).distance_to(center)
-		if dist < radius:
+		if dist >= radius:
+			continue
+		var q := PhysicsRayQueryParameters3D.create(at, b.center_global(), Game.LAYER_INTERIOR | Game.LAYER_STATION)
+		if space.intersect_ray(q).is_empty():
 			b.take_damage(dmg * lerpf(1.0, 0.5, dist / radius), {"source": "player", "by": by})
 
 
@@ -2284,6 +2728,138 @@ func notify(text: String, level: int) -> void:
 		Sfx.play("alarm", null, -12.0)
 
 
+## Server -> everyone: the motion tracker picked up an ambush closing in from ahead or astern; it
+## arrives in `seconds`. The tracker pings ever faster until then (see _update_tracker), and the
+## HUD counts down at the top of the screen (Hud._update_ambush).
+@rpc("authority", "call_local", "reliable")
+func ambush_warning(ahead: bool, seconds: float) -> void:
+	_contact_t = seconds
+	_contact_ahead = ahead
+	_ping_t = 0.0
+
+
+## Seconds until the ambush the motion tracker picked up arrives (0: no warning running).
+func contact_warning() -> float:
+	return _contact_t
+
+
+## Whether that ambush closes in from ahead (or astern).
+func contact_ahead() -> bool:
+	return _contact_ahead
+
+
+## Server -> everyone: the hostility is surging. The klaxon sounds three times; the alarm lights
+## pulse for as long as it lasts.
+@rpc("authority", "call_local", "reliable")
+func surge_alarm() -> void:
+	for i in 3:
+		get_tree().create_timer(i * 1.45).timeout.connect(func(): Sfx.play("klaxon", null, -7.0))
+
+
+## The hull grinding along rock (ship-local point): sparks, a screech and a shudder for the crew
+## aboard (the cockpit's camera feeds show where).
+@rpc("authority", "call_local", "unreliable")
+func _fx_scrape(local_pos: Vector3) -> void:
+	_scrape_t = 0.5
+	ShipMarks.damage(_damage_marks, layout, "scrape", local_pos)
+	var pos := to_global(local_pos)
+	Fx.sparks(pos, Color(1.0, 0.7, 0.3), 12, 7.0, 0.05, 0.5)
+	if _scrape_snd <= 0.0:
+		_scrape_snd = 0.4
+		Sfx.play("scrape", pos, -2.0, randf_range(0.85, 1.15))
+	var lp: CrewMember = Game.mission.local_player if Game.mission else null
+	if lp and is_aboard(lp.position):
+		Game.mission.shake(0.1)
+
+
+func scraping() -> bool:
+	return _scrape_t > 0.0
+
+
+## Mining laser `id` is on: if its beam ends on the rock, burn it there (see BURN_STEP).
+func _burn_rock(id: String) -> void:
+	if Game.mission == null:
+		return
+	var t: Turret = turrets[id]
+	var from := to_global(t.muzzle_local(t.aim))
+	var end := laser_end(id)
+	var dir := end - from
+	if dir.length() < 0.5:
+		return
+	var q := PhysicsRayQueryParameters3D.create(from, end + dir.normalized() * 0.5, Game.LAYER_CAVE)
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	# Only where the beam really stops on rock (not on a deposit or an alien in front of it).
+	if hit.is_empty() or (hit["position"] as Vector3).distance_to(end) > 0.4:
+		_burns.erase(id)
+		return
+	if _rock_marks == null or not is_instance_valid(_rock_marks):
+		_rock_marks = Marks.new()
+		_rock_marks.name = "RockMarks"
+		_rock_marks.cap = ROCK_MARKS
+		Game.mission.add_child(_rock_marks)
+	var p: Vector3 = hit["position"]
+	var n: Vector3 = hit["normal"]
+	var burn: Dictionary = _burns.get(id, {})
+	var d: Decal = burn.get("decal")
+	if d and is_instance_valid(d) and (burn["pos"] as Vector3).distance_to(p) < BURN_STEP:
+		_rock_marks.heat(d)
+		return
+	var size := randf_range(0.75, 1.05)
+	var across := n.cross(Vector3.UP if absf(n.y) < 0.9 else Vector3.RIGHT).rotated(n, randf() * TAU)
+	var length := size
+	var centre := p
+	# A sweeping beam: stretch the burn back along its path, so the trail is one scorch.
+	if burn.has("pos"):
+		var step := p - (burn["pos"] as Vector3)
+		step -= n * step.dot(n)
+		if step.length() < 2.5:
+			across = step
+			length = size + step.length()
+			centre = p - step * 0.5
+	d = _rock_marks.add(Marks.make("burn_a" if randf() < 0.5 else "burn_b", Marks.on_surface(centre, n, across), Vector3(length, 0.8, size),
+		Game.VIS_ROCK), BURN_LIFE, BURN_GLOW, BURN_COOL)
+	_burns[id] = {"decal": d, "pos": p}
+
+
+## What the pilot needs to know about the next station, the docking and the dangers, for the
+## cockpit's terminal: a few short lines.
+func pilot_status() -> PackedStringArray:
+	var out := PackedStringArray()
+	if not alive:
+		out.append("*** HULL BREACHED ***")
+		return out
+	if not engine_online:
+		out.append("ENGINE OFFLINE - REPAIR IT")
+	elif fuel <= 0.0:
+		out.append("NO FUEL - LOW POWER")
+	match landing:
+		Dock.APPROACH:
+			out.append("DOCKING - ON AUTOPILOT")
+		Dock.LANDED:
+			out.append("%s - [L] LIFT OFF" % ("LANDED" if derelict_k >= 0 else "DOCKED"))
+			var who := crew_outside()
+			if who != "":
+				out.append("WAITING FOR %s" % who)
+		Dock.LIFTOFF:
+			out.append("LIFTING OFF")
+		_:
+			var st := nearest_station(LAND_RANGE)
+			var dr := nearest_derelict(DERELICT_LAND_RANGE)
+			if not st.is_empty():
+				out.append("%s IN RANGE" % st["name"])
+				out.append("[L] LAND - EXIT SEALED" if in_hall(st) else "[L] LAND")
+			elif not dr.is_empty():
+				out.append("OUTPOST %d M - OPTIONAL" % int(derelict_distance(dr)))
+				out.append("ALIENS TOO CLOSE TO LAND" if aliens_near(DERELICT_CLEAR_RANGE) > 0 else "[L] LAND")
+			else:
+				var nx := next_station()
+				if not nx.is_empty():
+					out.append("%s  %d M" % [nx["name"], int(station_distance(nx))])
+	if surging() and landing == Dock.FLYING:
+		out.append("SURGING - FULL THRUST!")
+	return out
+
+
 @rpc("authority", "call_local", "unreliable")
 func _fx_hit(local_pos: Vector3, shielded: bool, kind: String) -> void:
 	var pos := to_global(local_pos)
@@ -2293,6 +2869,7 @@ func _fx_hit(local_pos: Vector3, shielded: bool, kind: String) -> void:
 	else:
 		_shield_flash = maxf(_shield_flash, 0.15)
 		Fx.sparks(pos, Color(1.0, 0.6, 0.2), 14, 9.0)
+		ShipMarks.damage(_damage_marks, layout, kind, local_pos)
 		Sfx.play("hull_hit", pos, -2.0)
 		if Game.mission:
 			Game.mission.shake(0.45 if kind == "impact" else 0.22)
@@ -2402,20 +2979,56 @@ func fx_weapon(weapon: String, from_local: Vector3, ends_local: PackedVector3Arr
 	for i in ends_local.size():
 		ends.append(to_global(ends_local[i]))
 		normals.append(global_basis * (normals_local[i] if i < normals_local.size() else Vector3.UP))
-	if weapon == "plasma" and ends_local.size() > 0:
-		CrewWeapons.launch_orb(self, from_local, ends_local[0])
 	CrewWeapons.shot_fx(weapon, to_global(from_local), ends, normals, hit_mask, flesh_mask)
+	# The shooter's gun flashes and throws out its casing.
+	var shooter := crew_root.get_node_or_null(str(multiplayer.get_remote_sender_id())) as CrewMember
+	if shooter:
+		shooter.remote_shot()
 
 
-## Relay a crew bot's blaster shot (ship-local coordinates) to the other peers.
+## Relay a crew member's grenade (Multiple Grenade Launcher; ship-local) to the other peers: each
+## flies a copy of it (Grenades).
+@rpc("any_peer", "call_remote", "reliable")
+func fx_grenade(id: int, from_local: Vector3, vel_local: Vector3, fuse: float) -> void:
+	if vel_local.length() > 80.0 or fuse > 6.0:
+		return
+	var g := Grenades.of(self)
+	if g:
+		g.launch(id, from_local, vel_local, fuse, false)
+
+
+## Relay where a crew member's grenade went off (ship-local) to the other peers.
+@rpc("any_peer", "call_remote", "reliable")
+func fx_grenade_burst(id: int, at_local: Vector3) -> void:
+	var g := Grenades.of(self)
+	if g:
+		g.burst(id, at_local)
+
+
+## Relay a crew member's lightning bolt (ship-local points: the emitter, then each alien it jumped
+## to, or where it struck the wall) to the other peers.
 @rpc("any_peer", "call_remote", "unreliable")
-func fx_blaster(from_local: Vector3, to_local_pos: Vector3, normal_local: Vector3, flesh: bool, did_hit: bool) -> void:
-	var a := to_global(from_local)
-	var b := to_global(to_local_pos)
-	Fx.tracer(a, b, Color(1.0, 0.5, 0.2), 0.04, 0.08)
-	if did_hit:
-		Fx.impact(b, global_basis * normal_local, Color(0.6, 1.0, 0.3) if flesh else Color(1.0, 0.6, 0.3), 1.2 if flesh else 1.0)
-	Sfx.play("blaster", a, -6.0)
+func fx_lightning(points_local: PackedVector3Array, charge: float, hits: int) -> void:
+	if points_local.size() < 2 or points_local.size() > 8:
+		return
+	var points := PackedVector3Array()
+	for p in points_local:
+		points.append(to_global(p))
+	CrewWeapons.lightning_fx(points, clampf(charge, 0.0, 1.0), hits)
+	var shooter := crew_root.get_node_or_null(str(multiplayer.get_remote_sender_id())) as CrewMember
+	if shooter:
+		shooter.remote_shot()
+
+
+## Relay a crew bot's pistol shot (ship-local coordinates) to the other peers: the shot and the
+## bot's gun flashing and throwing out its casing.
+@rpc("any_peer", "call_remote", "unreliable")
+func fx_sidearm(bot_id: int, from_local: Vector3, to_local_pos: Vector3, normal_local: Vector3, flesh: bool, did_hit: bool) -> void:
+	CrewWeapons.shot_fx(CrewWeapons.DEFAULT, to_global(from_local), PackedVector3Array([to_global(to_local_pos)]),
+		PackedVector3Array([global_basis * normal_local]), 1 if did_hit else 0, 1 if flesh else 0)
+	var bot := crew_root.get_node_or_null(str(bot_id)) as CrewMember
+	if bot:
+		bot.remote_shot()
 
 
 # --- Visuals -----------------------------------------------------------------------------------
@@ -2461,7 +3074,7 @@ func _update_visuals(delta: float) -> void:
 			a = lp.pod_aim if t is GunPod else lp.station_aim
 		elif t is GunPod:
 			# Someone else's pod: smooth out the aim that arrives 30 times a second.
-			a = t.aim.lerp(a, NetUtil.smooth(18.0, delta))
+			a = t.aim + t.aim_delta(t.aim, a) * NetUtil.smooth(18.0, delta)
 		t.set_aim(a)
 	var pods: Array = layout["guns"]
 	for i in mini(pods.size(), gun_ammo.size()):
@@ -2473,6 +3086,7 @@ func _update_visuals(delta: float) -> void:
 		var mine := lp != null and lp.station == gid
 		var figure := Net.player_color(holder) if holder != 0 and not mine else Color(0, 0, 0, 0)
 		pod.set_state(gun_ammo[i], gun_heat[i], gun_reload[i], weapons_hp, weapons_online and alive, figure, mine)
+		pod.masked = fire_masked(gid, pod.aim)
 	var glow: StandardMaterial3D = _ext["engine_glow_mat"]
 	var power := clampf(absf(throttle), 0.0, 1.0) if engine_online and alive else 0.0
 	glow.albedo_color = Color(0.12, 0.2, 0.26).lerp(Color(0.7, 1.2, 1.5), 0.2 + power * 0.8 if engine_online and alive else 0.0)
@@ -2495,8 +3109,10 @@ func _update_visuals(delta: float) -> void:
 			light.light_energy = 2.5 + randf() * 1.5
 			if randf() < 0.35:
 				Fx.sparks(laser_end(id), Color(1.0, 0.6, 0.25), 4, 6.0, 0.05, 0.35)
+			_burn_rock(id)
 		else:
 			light.light_energy = 0.0
+			_burns.erase(id)
 		if on != audio.playing:
 			if on:
 				audio.play()
@@ -2504,8 +3120,12 @@ func _update_visuals(delta: float) -> void:
 				audio.stop()
 	_engine_audio.pitch_scale = 0.75 + clampf(velocity.length() / 14.0, 0.0, 1.0) * 0.6
 	_update_engine_hum(power)
-	# Alarm lights inside the ship.
-	var alarm := alive and (boarders > 0 or hull < max_hull * 0.3 or not engine_online or not weapons_online or shield_down)
+	_update_tracker(delta)
+	_scrape_t = maxf(0.0, _scrape_t - delta)
+	_scrape_snd = maxf(0.0, _scrape_snd - delta)
+	# Alarm lights inside the ship (also while the hostility is surging).
+	var alarm := alive and (boarders > 0 or hull < max_hull * 0.3 or not engine_online or not weapons_online or shield_down
+			or (surging() and landing == Dock.FLYING))
 	_alarm_t += delta
 	var pulse := (0.5 + 0.5 * sin(_alarm_t * 6.0)) * 0.9 if alarm else 0.0
 	for l: OmniLight3D in _int["alarms"]:
@@ -2516,8 +3136,6 @@ func _update_visuals(delta: float) -> void:
 			_alarm_sound_t = 2.5
 			Sfx.play("alarm", null, -16.0)
 	(_int["core_mat"] as StandardMaterial3D).emission_energy_multiplier = (1.0 + engine_hp / 60.0) * (0.5 + 0.5 * sin(_alarm_t * (2.0 + power * 6.0))) + 0.6 if engine_online else 0.25
-	(_int["blast_mat"] as StandardMaterial3D).emission_energy_multiplier = \
-			(2.2 + 1.3 * sin(_alarm_t * 5.0)) if blast_cd <= 0.0 and alive else 0.25
 	for p in panels:
 		var hpv := system_hp(p["system"])
 		var online := system_online(p["system"])
@@ -2532,6 +3150,19 @@ func _update_visuals(delta: float) -> void:
 		if hpv < 60.0 and randf() < (0.02 if online else 0.08):
 			var panel_node: Node3D = p["node"]
 			Fx.sparks(panel_node.global_position + panel_node.global_basis.z * -0.15, Color(1.0, 0.7, 0.3), 6, 4.0, 0.03, 0.4)
+
+
+## The motion tracker counts down to the ambush it picked up, pinging over the ship's speakers:
+## slowly at first, then faster and higher as the contacts close in.
+func _update_tracker(delta: float) -> void:
+	if _contact_t <= 0.0:
+		return
+	_contact_t = maxf(0.0, _contact_t - delta)
+	_ping_t -= delta
+	if _ping_t <= 0.0 and alive:
+		var close := clampf(1.0 - _contact_t / MissionLevel.AMBUSH_WARNING, 0.0, 1.0)
+		_ping_t = lerpf(0.8, 0.22, close)
+		Sfx.play("tracker", null, -12.0, 1.0 + close * 0.3)
 
 
 ## Text for the install hub's screen: what was fitted this dive.

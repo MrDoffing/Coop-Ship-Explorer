@@ -1,8 +1,10 @@
 class_name MainMenu
 extends Control
-## Title screen: callsign, solo / host / join, settings. Draws an animated starfield behind.
+## Title screen: callsign, solo / host / join, settings, and in debug builds the outpost test. Draws
+## an animated starfield behind.
 
 signal solo_requested
+signal outpost_test_requested
 signal host_requested(port: int)
 signal join_requested(address: String, port: int)
 
@@ -100,6 +102,12 @@ func _build() -> void:
 	var solo := UiTheme.button("PLAY SOLO", func(): solo_requested.emit())
 	solo.custom_minimum_size.y = 48
 	box.add_child(solo)
+	if Game.cheats_allowed():
+		# For testing: land at an abandoned station with a crate of every hand weapon on its pier.
+		var test := UiTheme.button("TEST: OUTPOST + EVERY WEAPON", func(): outpost_test_requested.emit())
+		test.custom_minimum_size.y = 34
+		test.add_theme_color_override("font_color", UiTheme.WARN)
+		box.add_child(test)
 
 	var host_row := HBoxContainer.new()
 	host_row.add_theme_constant_override("separation", 8)
@@ -157,7 +165,7 @@ func _build() -> void:
 	_settings.visibility_changed.connect(func(): settings_panel.visible = _settings.visible)
 
 	var help := UiTheme.label(
-		"Walk: WASD + mouse   Interact / leave station: E   Blaster / Toolkit: 1 / 2 (or Q)   Fire / repair: Left mouse   Reload: R   Drop crate: G\n"
+		"Walk: WASD + mouse   Interact / leave station: E   Weapon / Toolkit: 1 / 2   Fire / repair: Left mouse   Aim: Right mouse   Reload: R   Scanner: hold Q   Drop crate: G\n"
 		+ "Pilot: W/S throttle, A/D turn, Space/Ctrl up/down, T autopilot, X full stop, B emergency blast, L land / lift off   Crew status: Tab   Menu: Esc",
 		14, UiTheme.MUTED)
 	help.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER

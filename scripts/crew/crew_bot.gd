@@ -2,7 +2,7 @@ class_name CrewBot
 extends RefCounted
 ## Server-side brain for a crew bot (a CrewMember with `bot = true`).
 ##
-## Priorities: defend themselves against boarders in sight with their blasters (reloading when
+## Priorities: defend themselves against boarders in sight with their pistols (reloading when
 ## the magazine runs dry, and topping it up between fights), then repair the engine or weapon
 ## systems when they are damaged (offline systems first). When no aliens have
 ## been around for a while, bots mine crystals with the mining lasers (one bot per laser);
@@ -41,7 +41,7 @@ const LASER_TOLERANCE := 0.03
 const NEST_CLEARANCE := 24.0
 const DEFEND_REACTION := 0.5
 const BLASTER_INTERVAL := 0.36
-## Blaster aim error in radians: a base amount plus more per metre of distance.
+## Pistol aim error in radians: a base amount plus more per metre of distance.
 const BLASTER_SPREAD := 0.035
 const BLASTER_SPREAD_PER_M := 0.016
 ## Following the host: how close the first bot stays (the others keep a little further back), and
@@ -62,6 +62,8 @@ var _think := 0.0
 var _path := PackedVector3Array()
 var _path_i := 0
 var _goal := Vector3(INF, INF, INF)
+## The last plan found no way to its goal (a shut door at an abandoned station).
+var _unreachable := false
 var _stuck_t := 0.0
 var _stuck_pos := Vector3.ZERO
 var _aim := Vector2.ZERO
@@ -395,11 +397,9 @@ func _do_gun(delta: float) -> void:
 	var target := _target_point(t)
 	if target.is_finite():
 		var desired := t.aim_at_local(ship.to_local(target))
-		_aim.x = move_toward(_aim.x, desired.x, TURN_RATE * delta)
-		_aim.y = move_toward(_aim.y, desired.y, TURN_RATE * delta)
-		_aim = t.clamp_aim(_aim)
+		_aim = _turn_towards(t, desired, delta)
 		_target_t += delta
-		firing = _target_t > REACTION and (_aim - desired).length() < FIRE_TOLERANCE and ship.weapons_online and not _cooling
+		firing = _target_t > REACTION and t.aim_delta(_aim, desired).length() < FIRE_TOLERANCE and ship.weapons_online and not _cooling
 	crew.station_aim = _aim
 	ship.bot_station_input(crew.peer_id, gun, {"aim": _aim, "fire": firing})
 
@@ -418,13 +418,26 @@ func _do_mine(delta: float) -> void:
 	var target := _laser_point()
 	if target.is_finite():
 		var desired := t.aim_at_local(ship.to_local(target))
-		_aim.x = move_toward(_aim.x, desired.x, TURN_RATE * delta)
-		_aim.y = move_toward(_aim.y, desired.y, TURN_RATE * delta)
-		_aim = t.clamp_aim(_aim)
+		_aim = _turn_towards(t, desired, delta)
 		_target_t += delta
-		firing = _target_t > REACTION and (_aim - desired).length() < LASER_TOLERANCE and ship.weapons_online
+		firing = _target_t > REACTION and t.aim_delta(_aim, desired).length() < LASER_TOLERANCE and ship.weapons_online
 	crew.station_aim = _aim
 	ship.bot_station_input(crew.peer_id, gun, {"aim": _aim, "fire": firing})
+
+
+## Whether the held gun can shoot at global point p: within its mount's limits, and not with its own
+## ship in the line of fire (Mothership.fire_masked).
+func _can_engage(t: Turret, p: Vector3) -> bool:
+	var a := t.aim_at_local(crew.ship.to_local(p))
+	return t.within_limits(a) and not crew.ship.fire_masked(gun, a)
+
+
+## Turn the held gun or laser towards aim `desired` at TURN_RATE on each axis (the short way round
+## on a mount that turns all the way).
+func _turn_towards(t: Turret, desired: Vector2, delta: float) -> Vector2:
+	var d := t.aim_delta(_aim, desired)
+	var step := TURN_RATE * delta
+	return t.clamp_aim(_aim + Vector2(clampf(d.x, -step, step), clampf(d.y, -step, step)))
 
 
 func _choose_laser_target(t: Turret) -> void:
@@ -672,7 +685,7 @@ func _find_boarder() -> Boarder:
 	return best
 
 
-## One blaster shot at a boarder, with aim error that grows with distance.
+## One pistol shot at a boarder, with aim error that grows with distance.
 func _shoot(foe: Boarder) -> void:
 	var ship := crew.ship
 	var up := ship.global_basis.y
@@ -697,12 +710,11 @@ func _shoot(foe: Boarder) -> void:
 			if b:
 				b.take_damage(float(ship.stats["blaster_damage"]), {"source": "bot", "by": crew.peer_id})
 	# Effects: locally for the host, relayed to everyone else.
-	var muzzle := crew.global_transform * Vector3(0.3, 1.2, -0.8)
-	Fx.tracer(muzzle, end, Color(1.0, 0.5, 0.2), 0.035, 0.07)
-	if not hit.is_empty():
-		Fx.impact(end, normal, Color(0.6, 1.0, 0.3) if flesh else Color(1.0, 0.6, 0.3), 1.2 if flesh else 1.0)
-	Sfx.play("blaster", muzzle, -5.0)
-	ship.fx_blaster.rpc(ship.to_local(muzzle), ship.to_local(end), ship.global_basis.inverse() * normal, flesh, not hit.is_empty())
+	var muzzle := crew.global_transform * CrewWeapons.held_muzzle(crew.weapon)
+	CrewWeapons.shot_fx(CrewWeapons.DEFAULT, muzzle, PackedVector3Array([end]), PackedVector3Array([normal]),
+		0 if hit.is_empty() else 1, 1 if flesh else 0)
+	crew.remote_shot()
+	ship.fx_sidearm.rpc(crew.peer_id, ship.to_local(muzzle), ship.to_local(end), ship.global_basis.inverse() * normal, flesh, not hit.is_empty())
 
 
 # --- Gunnery -----------------------------------------------------------------------------------
@@ -717,7 +729,7 @@ func _choose_target(t: Turret) -> void:
 		if alien == null or alien.attached >= 0 or alien.hp <= 0.0:
 			continue
 		var d := mount.distance_to(alien.global_position)
-		if d > GUN_RANGE or not t.within_limits(t.aim_at_local(ship.to_local(alien.global_position))):
+		if d > GUN_RANGE or not _can_engage(t, alien.global_position):
 			continue
 		var weight := 0.6 if alien.kind == Alien.Kind.SPITTER else (0.8 if alien.kind == Alien.Kind.INFILTRATOR else 1.0)
 		if alien.get_instance_id() == _target_id:
@@ -731,7 +743,7 @@ func _choose_target(t: Turret) -> void:
 					continue
 				var p := _sac_point(nest, i)
 				var d := mount.distance_to(p)
-				if d < SAC_RANGE and t.within_limits(t.aim_at_local(ship.to_local(p))):
+				if d < SAC_RANGE and _can_engage(t, p):
 					candidates.append([d, nest, i])
 	candidates.sort_custom(func(x, y): return x[0] < y[0])
 	var space := crew.get_world_3d().direct_space_state
@@ -793,6 +805,15 @@ func _walk_to(goal: Vector3, delta: float) -> bool:
 	if _goal.distance_to(goal) > 0.2:
 		_goal = goal
 		_plan(goal)
+	if _unreachable:
+		crew.velocity = Vector3(0, crew.velocity.y, 0)
+		_fall(delta)
+		# Look again now and then (a door may have opened).
+		_stuck_t += delta
+		if _stuck_t > 1.0:
+			_stuck_t = 0.0
+			_goal = Vector3(INF, INF, INF)
+		return false
 	var wp := _path[_path_i] if _path_i < _path.size() else goal
 	var to := wp - crew.position
 	to.y = 0.0
@@ -834,8 +855,12 @@ func _plan(goal: Vector3) -> void:
 	var from := crew.ship.nav_closest(nav, crew.position)
 	var to := crew.ship.nav_closest(nav, goal)
 	_path = nav.get_point_path(from, to)
-	_path.append(goal)
 	_path_i = 0
+	# Out of reach (behind a shut door at an abandoned station): wait where it is.
+	_unreachable = _path.is_empty()
+	if _unreachable:
+		return
+	_path.append(goal)
 	# Skip a first waypoint that lies behind us.
 	if _path.size() > 1 and crew.position.distance_to(_path[1]) < _path[0].distance_to(_path[1]):
 		_path_i = 1

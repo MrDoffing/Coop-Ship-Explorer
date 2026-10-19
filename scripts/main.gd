@@ -2,7 +2,8 @@ extends Node
 ## Game root. Owns the replicated level slot (homebase or mission) and the local menus.
 ##
 ## Levels are spawned by the server through LevelSpawner, so every peer always runs the same
-## level. Command line `-- --autotest=<scenario>` runs an automated test (scripts/dev/autotest.gd).
+## level. Command line `-- --autotest=<scenario>` runs an automated test (scripts/dev/autotest.gd);
+## `-- --test=outpost` (debug builds) goes straight into the outpost test (start_outpost_test()).
 
 var level_root: Node
 var level_spawner: MultiplayerSpawner
@@ -26,6 +27,7 @@ func _ready() -> void:
 	menu = MainMenu.new()
 	ui.add_child(menu)
 	menu.solo_requested.connect(start_solo)
+	menu.outpost_test_requested.connect(start_outpost_test)
 	menu.host_requested.connect(_on_host)
 	menu.join_requested.connect(_on_join)
 	pause_menu = PauseMenu.new()
@@ -42,6 +44,8 @@ func _ready() -> void:
 		var at: Node = load("res://scripts/dev/autotest.gd").new()
 		at.set("scenario", autotest)
 		add_child(at)
+	elif _user_arg("--test=") == "outpost" and Game.cheats_allowed():
+		start_outpost_test.call_deferred()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -73,13 +77,26 @@ func change_level(kind: String, data: Dictionary = {}) -> void:
 	level_spawner.spawn(d)
 
 
-## Server: start a new mission with the current upgrades.
-func start_mission() -> void:
+## Server: start a new mission with the current upgrades. `test` "outpost" lands the ship at the
+## first abandoned station at once, with a crate of every hand weapon on its pier (MissionLevel);
+## such a test dive leaves the save alone. `mission_seed` picks the cave (the autotests'), or -1.
+func start_mission(test := "", mission_seed := -1) -> void:
 	change_level("mission", {
-		"seed": randi() % 1000000,
+		"seed": mission_seed if mission_seed >= 0 else randi() % 1000000,
 		"stats": Game.ship_stats(),
 		"best": int(Game.profile.get("best_depth", 0)),
+		"test": test,
 	})
+
+
+## Debug builds: from the title screen (or `-- --test=outpost`) straight into a solo test dive at an
+## abandoned station, to try every hand weapon on its aliens.
+func start_outpost_test(mission_seed := -1) -> void:
+	if not Game.cheats_allowed():
+		return
+	Net.start_solo()
+	Game.save_settings()
+	start_mission("outpost", mission_seed)
 
 
 func return_to_homebase() -> void:

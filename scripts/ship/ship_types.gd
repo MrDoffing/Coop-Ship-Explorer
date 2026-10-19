@@ -18,19 +18,41 @@ const ORDER := ["prospector", "vanguard", "excavator", "dreadnought"]
 ## "pos" is the centre of the ball) on a "mount": a "barbette" up from the roof or deck at height
 ## "base", or a "tower" (a column on an outrigger arm) for a pod out beside the hull. The pods sit
 ## where their barrels clear the hull over the whole aim range (checked by the gunpod autotest).
+## Yaw limits of -180..180 turn the pod all the way round (the Vanguard's bow gun): its sight line
+## can then cross the ship, and the pod holds its fire while it does (Mothership.fire_masked).
+## A mining laser with "mount": "chin" hangs under the glazed nose (see below), ahead of its front
+## pane, so it never swings through the glass; "cam" moves its operator's camera under the barrel.
+##
+## The hull is lofted through "sections" ([z, half width, half height, y centre], front to back).
+## The cockpit is the front of every ship: the first section is the cockpit's bulkhead, and
+## "nose" continues the hull forward from it as a glazed greenhouse above "sill" and an opaque
+## chin below it (ShipBuilder._nose; the cockpit inside is Cockpit). "cams" are the cockpit's
+## camera feeds: name -> [position, rotation in degrees (pitch, yaw, roll)] of each camera on the
+## hull, looking along its -Z (yaw 180 looks back towards the stern), and optionally the point its
+## bracket is fixed to (otherwise straight in to the hull).
 const TYPES := {
 	"prospector": {
 		"name": "Prospector", "role": "Mining frigate", "cost": 0,
+		"asset": "prospector",
 		"desc": "The crew's trusty all-rounder: a gun pod on each side, a nose-mounted mining laser and a scout pod under the belly.",
 		"hull": 400.0, "shield": 120.0, "speed": 9.0, "accel": 2.6, "yaw": 26.0, "vert": 5.0, "slots": 1,
 		"mining": 1.0, "laser_vs_alien": 1.0, "scout_hp": 1.0, "scout_damage": 1.0, "scout_speed": 1.0,
 		"scout_style": "standard", "chase": 40.0,
 		"paint": Color(0.62, 0.64, 0.68), "accent": Color(0.95, 0.5, 0.12), "trim": Color(0.95, 0.6, 0.15),
 		"sections": [
-			[-13.8, 0.9, 0.7, 1.3], [-11.6, 3.5, 2.2, 1.4], [-9.2, 4.4, 2.95, 1.4], [-7.4, 4.7, 3.05, 1.4],
+			[-10.25, 4.0, 2.62, 1.4], [-9.2, 4.4, 2.95, 1.4], [-7.4, 4.7, 3.05, 1.4],
 			[-6.6, 7.3, 3.25, 1.4], [7.0, 7.4, 3.3, 1.4], [10.4, 6.6, 3.0, 1.4], [11.8, 5.0, 2.3, 1.4],
 		],
+		"nose": [[-10.25, 4.0, 2.62, 1.4], [-11.45, 3.35, 2.15, 1.5], [-12.5, 2.25, 1.62, 1.48]],
+		"sill": 0.35,
 		"chamfer": 0.3,
+		"cams": {
+			"rear": [Vector3(0, 4.3, 11.75), Vector3(-12, 180, 0)],
+			"port": [Vector3(-7.75, 2.8, -6.75), Vector3(-7, 172, 0)],
+			"stbd": [Vector3(7.75, 2.8, -6.75), Vector3(-7, 188, 0)],
+			"spine": [Vector3(0, 5.25, -9.55), Vector3(8, 180, 0)],
+			"belly": [Vector3(0, -2.25, -9.6), Vector3(-8, 180, 0)],
+		},
 		"stations": [
 			{"id": "pilot", "kind": "pilot", "spot": "cockpit", "name": "Pilot Seat", "label": "PILOT"},
 			{"id": "gun_l", "kind": "gun", "spot": "port_window", "name": "Port Gun", "label": "PORT GUN",
@@ -38,7 +60,8 @@ const TYPES := {
 			{"id": "gun_r", "kind": "gun", "spot": "stbd_window", "name": "Starboard Gun", "label": "STARBOARD GUN",
 				"pos": Vector3(10.0, 1.9, -5.0), "yaw": -90.0, "limits": [-88.0, 124.0, -60.0, 72.0], "style": "gun", "mount": "tower"},
 			{"id": "mining", "kind": "laser", "spot": "front_port", "name": "Mining Laser", "label": "MINING LASER",
-				"pos": Vector3(0, 1.45, -14.35), "yaw": 0.0, "limits": [-82.0, 82.0, -80.0, 78.0], "style": "laser"},
+				"pos": Vector3(0, -0.75, -13.0), "yaw": 0.0, "limits": [-82.0, 82.0, -80.0, 78.0], "style": "laser", "mount": "chin",
+				"cam": Vector3(0, -1.2, 0.9)},
 			{"id": "scout", "kind": "scout", "spot": "bay", "name": "Scout Bay", "label": "SCOUT BAY",
 				"dock": Vector3(0, -3.15, 3.5), "launch": Vector3(0, -7.0, 0)},
 		],
@@ -55,7 +78,7 @@ const TYPES := {
 			[Vector3(-7.32, 1.0, 7.5), Vector3.LEFT], [Vector3(7.32, 1.0, 7.5), Vector3.RIGHT],
 			[Vector3(-3.0, -1.92, -3.0), Vector3.DOWN], [Vector3(3.0, -1.92, -3.0), Vector3.DOWN],
 			[Vector3(-3.8, -1.92, 8.0), Vector3.DOWN], [Vector3(3.8, -1.92, 8.0), Vector3.DOWN],
-			[Vector3(0, 3.95, -10.6), Vector3(0, 0.75, -0.66)], [Vector3(0, 3.42, 11.85), Vector3.BACK],
+			[Vector3(0, 3.93, -10.62), Vector3(0, 0.955, -0.295)], [Vector3(0, 3.42, 11.85), Vector3.BACK],
 		],
 		"hardpoints": [
 			{"pos": Vector3(-6.2, 4.17, -4.0), "rot": Vector3(0, 0, 0.42)},
@@ -66,22 +89,32 @@ const TYPES := {
 	},
 	"vanguard": {
 		"name": "Vanguard Carrier", "role": "Scout carrier", "cost": 250,
-		"desc": "A carrier with a flight deck and two combat scouts (tougher, faster and harder-hitting than the standard pod). Only one gun pod, on the bow.",
+		"desc": "A carrier with a flight deck and two combat scouts (tougher, faster and harder-hitting than the standard pod). Only one gun pod, on the bow, but it turns all the way round.",
 		"hull": 380.0, "shield": 140.0, "speed": 9.4, "accel": 2.8, "yaw": 27.0, "vert": 5.2, "slots": 1,
 		"mining": 1.0, "laser_vs_alien": 1.0, "scout_hp": 1.6, "scout_damage": 1.5, "scout_speed": 1.15,
 		"scout_style": "combat", "chase": 42.0,
 		"paint": Color(0.46, 0.52, 0.6), "accent": Color(0.3, 0.6, 1.0), "trim": Color(0.35, 0.65, 1.0),
 		"sections": [
-			[-15.6, 1.2, 0.8, 1.2], [-13.2, 3.9, 2.2, 1.3], [-10.2, 4.9, 2.9, 1.4], [-7.4, 5.3, 3.1, 1.4],
+			[-12.125, 4.26, 2.45, 1.34], [-10.2, 4.9, 2.9, 1.4], [-7.4, 5.3, 3.1, 1.4],
 			[-6.6, 7.0, 3.2, 1.4], [7.0, 7.1, 3.25, 1.4], [10.4, 6.4, 2.95, 1.4], [11.8, 5.0, 2.3, 1.4],
 		],
+		"nose": [[-12.125, 4.26, 2.45, 1.34], [-13.3, 3.6, 2.05, 1.42], [-14.4, 2.45, 1.55, 1.43]],
+		"sill": 0.35,
 		"chamfer": 0.3,
+		"cams": {
+			"rear": [Vector3(0, 5.45, 10.95), Vector3(-12, 180, 0)],
+			"port": [Vector3(-7.45, 2.6, -6.75), Vector3(-6, 172, 0)],
+			"stbd": [Vector3(7.45, 2.6, -6.75), Vector3(-6, 188, 0)],
+			"spine": [Vector3(6.3, 8.8, 1.7), Vector3(-10, 33, 0), Vector3(6.4, 8.55, 1.95)],
+			"belly": [Vector3(0, -2.05, -11.6), Vector3(-8, 180, 0)],
+		},
 		"stations": [
 			{"id": "pilot", "kind": "pilot", "spot": "bridge_pilot", "name": "Pilot Seat", "label": "PILOT"},
 			{"id": "gun_f", "kind": "gun", "spot": "bridge_port", "name": "Bow Gun", "label": "BOW GUN",
-				"pos": Vector3(0, 6.75, -17.4), "yaw": 0.0, "limits": [-150.0, 150.0, -35.0, 80.0], "style": "gun", "mount": "barbette", "base": 5.0},
+				"pos": Vector3(0, 6.75, -17.4), "yaw": 0.0, "limits": [-180.0, 180.0, -35.0, 80.0], "style": "gun", "mount": "barbette", "base": 5.0},
 			{"id": "mining", "kind": "laser", "spot": "bridge_stbd", "name": "Mining Laser", "label": "MINING LASER",
-				"pos": Vector3(0, 1.2, -16.15), "yaw": 0.0, "limits": [-82.0, 82.0, -80.0, 55.0], "style": "laser"},
+				"pos": Vector3(0, -0.75, -14.9), "yaw": 0.0, "limits": [-82.0, 82.0, -80.0, 55.0], "style": "laser", "mount": "chin",
+				"cam": Vector3(0, -1.2, 0.9)},
 			{"id": "scout", "kind": "scout", "spot": "flight_a", "name": "Scout Bay A", "label": "SCOUT A",
 				"dock": Vector3(-3.4, 5.62, -6.2), "launch": Vector3(0, 6.0, -4.0)},
 			{"id": "scout2", "kind": "scout", "spot": "flight_b", "name": "Scout Bay B", "label": "SCOUT B",
@@ -118,10 +151,19 @@ const TYPES := {
 		"scout_style": "standard", "chase": 42.0,
 		"paint": Color(0.93, 0.72, 0.16), "accent": Color(0.12, 0.12, 0.13), "trim": Color(1.0, 0.78, 0.15),
 		"sections": [
-			[-13.6, 2.0, 1.3, 1.1], [-11.6, 4.2, 2.5, 1.3], [-9.2, 4.9, 3.0, 1.4], [-7.4, 5.1, 3.1, 1.4],
+			[-10.325, 4.57, 2.77, 1.35], [-9.2, 4.9, 3.0, 1.4], [-7.4, 5.1, 3.1, 1.4],
 			[-6.6, 7.4, 3.45, 1.4], [7.0, 7.5, 3.45, 1.4], [10.4, 6.8, 3.1, 1.4], [11.8, 5.2, 2.4, 1.4],
 		],
+		"nose": [[-10.325, 4.57, 2.77, 1.35], [-11.6, 3.85, 2.3, 1.45], [-12.75, 2.6, 1.7, 1.55]],
+		"sill": 0.35,
 		"chamfer": 0.2,
+		"cams": {
+			"rear": [Vector3(0, 4.35, 11.75), Vector3(-12, 180, 0)],
+			"port": [Vector3(-9.0, 3.3, -6.6), Vector3(-6, 172, 0)],
+			"stbd": [Vector3(9.0, 3.3, -6.6), Vector3(-6, 188, 0)],
+			"spine": [Vector3(0, 5.2, -9.9), Vector3(8, 180, 0)],
+			"belly": [Vector3(0, -2.25, -9.9), Vector3(-8, 180, 0)],
+		},
 		"stations": [
 			{"id": "pilot", "kind": "pilot", "spot": "ctl_pilot", "name": "Pilot Seat", "label": "PILOT"},
 			{"id": "gun_f", "kind": "gun", "spot": "gunnery", "name": "Forward Gun", "label": "FORWARD GUN",
@@ -164,10 +206,19 @@ const TYPES := {
 		"scout_style": "standard", "chase": 47.0,
 		"paint": Color(0.6, 0.11, 0.09), "accent": Color(0.95, 0.68, 0.2), "trim": Color(1.0, 0.3, 0.2),
 		"sections": [
-			[-17.0, 1.6, 1.1, 0.9], [-14.6, 4.8, 2.6, 1.2], [-11.4, 6.2, 3.4, 1.35], [-8.0, 6.8, 3.6, 1.4],
+			[-13.525, 5.27, 2.87, 1.25], [-11.4, 6.2, 3.4, 1.35], [-8.0, 6.8, 3.6, 1.4],
 			[-6.8, 8.7, 3.9, 1.4], [7.2, 8.9, 4.0, 1.4], [10.4, 7.9, 3.6, 1.4], [11.8, 6.2, 2.8, 1.4],
 		],
+		"nose": [[-13.525, 5.27, 2.87, 1.25], [-14.9, 4.4, 2.4, 1.4], [-16.2, 2.9, 1.8, 1.6]],
+		"sill": 0.35,
 		"chamfer": 0.3,
+		"cams": {
+			"rear": [Vector3(0, 5.75, 11.5), Vector3(-14, 180, 0)],
+			"port": [Vector3(-9.55, 3.3, -7.0), Vector3(-6, 172, 0)],
+			"stbd": [Vector3(9.55, 3.3, -7.0), Vector3(-6, 188, 0)],
+			"spine": [Vector3(0, 5.25, -12.9), Vector3(8, 180, 0)],
+			"belly": [Vector3(0, -2.55, -12.8), Vector3(-8, 180, 0)],
+		},
 		"stations": [
 			{"id": "pilot", "kind": "pilot", "spot": "helm", "name": "Pilot Seat", "label": "HELM"},
 			{"id": "gun_l", "kind": "gun", "spot": "battery_port", "name": "Port Gun", "label": "PORT BATTERY",
@@ -177,11 +228,11 @@ const TYPES := {
 			{"id": "gun_f", "kind": "gun", "spot": "bridge_stbd", "name": "Forward Gun", "label": "FORWARD GUN",
 				"pos": Vector3(5.9, 6.8, -10.2), "yaw": -45.0, "limits": [-150.0, 150.0, -35.0, 80.0], "style": "heavy", "mount": "barbette", "base": 4.0},
 			{"id": "mining", "kind": "laser", "spot": "bridge_port", "name": "Mining Laser", "label": "MINING LASER",
-				"pos": Vector3(0, 2.3, -17.45), "yaw": 0.0, "limits": [-82.0, 82.0, -80.0, 78.0], "style": "laser"},
+				"pos": Vector3(0, -0.5, -19.6), "yaw": 0.0, "limits": [-82.0, 82.0, -80.0, 78.0], "style": "laser"},
 			{"id": "scout", "kind": "scout", "spot": "scout_bay", "name": "Scout Bay", "label": "SCOUT BAY",
-				"dock": Vector3(0, -3.3, 4.0), "launch": Vector3(0, -7.0, 0)},
+				"dock": Vector3(0, -3.52, 4.0), "launch": Vector3(0, -7.0, 0)},
 		],
-		"boxes": [[Vector3(0, 1.4, -2.6), Vector3(21.6, 8.0, 28.8)], [Vector3(0, -3.0, 4.0), Vector3(5.5, 1.4, 6.0)]],
+		"boxes": [[Vector3(0, 1.4, -2.6), Vector3(21.6, 8.0, 28.8)], [Vector3(0, -3.2, 4.0), Vector3(5.5, 1.8, 6.0)]],
 		"shield_center": Vector3(0, 1.4, -2.2), "shield_radii": Vector3(13.6, 8.2, 20.0),
 		"collector": Vector3(0, -2.8, -2.5),
 		"legs": [Vector3(-4.2, -2.4, -8.0), Vector3(4.2, -2.4, -8.0), Vector3(-5.6, -2.4, 8.4), Vector3(5.6, -2.4, 8.4)],
@@ -267,3 +318,21 @@ static func get_type(id: String) -> Dictionary:
 
 static func display_name(id: String) -> String:
 	return str(TYPES.get(id, TYPES["prospector"])["name"])
+
+
+## The whole hull's sections from the tip of the glazed nose to the stern (the nose rings ahead of
+## the cockpit bulkhead, then the hull's own sections), for anything that measures the hull.
+static func full_sections(t: Dictionary) -> Array:
+	var out: Array = []
+	var nose: Array = t.get("nose", [])
+	for i in range(nose.size() - 1, 0, -1):
+		out.append(nose[i])
+	out.append_array(t["sections"])
+	return out
+
+
+## Ship-local transform of one of the cockpit's camera feeds (see "cams").
+static func cam_transform(t: Dictionary, cam: String) -> Transform3D:
+	var c: Array = t["cams"][cam]
+	var r: Vector3 = c[1]
+	return Transform3D(Basis.from_euler(Vector3(deg_to_rad(r.x), deg_to_rad(r.y), deg_to_rad(r.z))), c[0])

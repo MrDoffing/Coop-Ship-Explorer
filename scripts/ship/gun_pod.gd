@@ -32,6 +32,13 @@ const CONVERGE_MIN := 12.0
 const CONVERGE_MAX := 160.0
 ## The pod follows the gunner's aim at most this fast (rad/s): it is heavy.
 const TURN_RATE := 2.4
+## Smoke: the barrels start to smoke at SMOKE_FROM heat and smoke hardest at full heat; firing
+## puffs smoke out of the muzzles too, more the hotter the barrels are.
+const SMOKE_FROM := 0.3
+## The traversing motors' low whine (dB at full swing; others hear it from the pod).
+const SERVO_DB := -10.0
+## The guns' bark rises in pitch as the barrels heat up, smoothly, to this at full heat.
+const HOT_PITCH := 1.25
 
 ## Ball radius and the gunner's eye (pitch frame).
 const RADIUS := 1.05
@@ -46,12 +53,19 @@ const BARREL_LEN := 2.0
 const MOUNT_TOP := 1.02
 const TOWER_DROP := 2.7
 
+## The windows' glass (the pods' and the cockpits'): tinted, smudged, grime gathered low down and a
+## few scratches; lit as dirty glass (GLASS_LIGHT).
 const GLASS_SHADER := """
 shader_type spatial;
-render_mode blend_mix, cull_disabled, depth_draw_never, specular_schlick_ggx;
+render_mode blend_mix, cull_disabled, depth_draw_never;
 uniform vec3 tint : source_color = vec3(0.55, 0.7, 0.68);
 uniform vec3 grime_color : source_color = vec3(0.16, 0.13, 0.09);
+// Grime gathers low down on the glass: fully below grime_lo, none above grime_hi (local height).
+uniform float grime_lo = -1.0;
+uniform float grime_hi = 0.0;
 varying vec3 lp;
+varying float glass_film;
+varying float glass_alpha;
 
 float hash(vec3 p) {
 	p = fract(p * 0.3183099 + 0.1);
@@ -77,15 +91,73 @@ void fragment() {
 	float fres = pow(1.0 - clamp(abs(dot(NORMAL, VIEW)), 0.0, 1.0), 4.0);
 	float n = vnoise(lp * 6.0) * 0.6 + vnoise(lp * 21.0) * 0.4;
 	// Smudges, and grime gathering low down on the glass.
-	float grime = smoothstep(0.62, 0.92, n) * 0.6 + (1.0 - smoothstep(-1.0, 0.0, lp.y)) * n * 0.55;
+	float grime = smoothstep(0.62, 0.92, n) * 0.6 + (1.0 - smoothstep(grime_lo, grime_hi, lp.y)) * n * 0.55;
 	grime = clamp(grime, 0.0, 1.0);
 	// A few fine scratches.
 	float s = abs(fract(lp.x * 7.0 - lp.y * 2.0 + vnoise(lp * 2.5) * 3.0) - 0.5);
 	float scratch = (1.0 - smoothstep(0.0, 0.012, s)) * step(0.78, vnoise(lp * 9.0 + 4.0));
 	ALBEDO = mix(tint * 0.12, grime_color, grime);
 	ROUGHNESS = mix(0.05, 0.6, grime);
-	SPECULAR = 0.5;
-	ALPHA = clamp(0.035 + fres * 0.45 + grime * 0.3 + scratch * 0.18, 0.0, 0.9);
+	float a = clamp(0.035 + fres * 0.45 + grime * 0.3 + scratch * 0.18, 0.0, 0.9);
+	ALPHA = a;
+	glass_alpha = a;
+	// (A faint film of dust all over, as well as the grime.)
+	glass_film = clamp(0.05 + grime + scratch * 0.4, 0.0, 1.0);
+}
+"""
+
+## How light falls on dirty glass, shared by the windows (GLASS_SHADER), the scout's canopy and the
+## helmet's visor; each of those shaders sets `glass_film` (how much grease, grime, fog or cracking
+## there is: 0..1) and `glass_alpha` (its ALPHA) in fragment(). Glass mirrors a lamp as a dim copy
+## of it (about 4% of it, head on) and grease smears that copy out; and a lamp beyond the glass
+## shines through it, the grease scattering some of that light on to the eye, mostly close round
+## the lamp, so the smears round it light up (a dirty windscreen at night):
+## - A light on the eye's side of the glass: a soft glint off clean glass (its lobe never sharper
+##   than GLINT_ROUGH, so never a pinpoint), spread into a dull sheen by the grease and never much
+##   brighter than GLINT_MAX on screen; the grease is lit as well. With HELMET_VISOR defined nothing
+##   on the eye's side reaches the glass at all: the helmet round it stops that light.
+## - A light on the far side: the grease scatters GLARE of it on to the eye, nearly all of it
+##   within a few degrees of the line from the eye to the light, and a little in a wider halo.
+## The light added is divided by the glass's alpha, since blending it in multiplies it by that.
+const GLASS_LIGHT := """
+const float GLINT_MAX = 0.5;
+const float GLINT_ROUGH = 0.12;
+const float GLARE = 0.25;
+
+// The Henyey-Greenstein phase function: the share of the light the grease scatters that leaves it at
+// an angle (cosine c) from the way it was going; g is how much of it keeps going forward.
+float glass_phase(float c, float g) {
+	float gg = g * g;
+	return (1.0 - gg) / (12.566371 * pow(max(1.0 + gg - 2.0 * g * c, 0.0001), 1.5));
+}
+
+void light() {
+	vec3 lc = LIGHT_COLOR * ATTENUATION;
+	// (Both faces are drawn: NORMAL always faces the eye.)
+	float nl = dot(NORMAL, LIGHT);
+	float a = max(glass_alpha, 0.005);
+	if (nl > 0.0) {
+#ifndef HELMET_VISOR
+		float r = max(ROUGHNESS, GLINT_ROUGH);
+		float r2 = r * r;
+		float a2 = r2 * r2;
+		vec3 h = normalize(LIGHT + VIEW);
+		float nh = max(dot(NORMAL, h), 0.0);
+		float nv = max(dot(NORMAL, VIEW), 0.02);
+		float dd = nh * nh * (a2 - 1.0) + 1.0;
+		float d = a2 / (PI * dd * dd);
+		float k = r2 * 0.5;
+		float vis = 0.25 / ((nl * (1.0 - k) + k) * (nv * (1.0 - k) + k));
+		float f = 0.04 + 0.96 * pow(1.0 - clamp(dot(LIGHT, h), 0.0, 1.0), 5.0);
+		vec3 glint = lc * SPECULAR_AMOUNT * d * vis * f * nl;
+		SPECULAR_LIGHT += GLINT_MAX * (vec3(1.0) - exp(-glint / GLINT_MAX)) / a;
+		DIFFUSE_LIGHT += lc * nl / PI;
+#endif
+	} else {
+		float c = dot(-LIGHT, VIEW);
+		float ph = glass_phase(c, 0.9) * 0.8 + glass_phase(c, 0.6) * 0.2;
+		SPECULAR_LIGHT += lc * glass_film * ph * GLARE / a;
+	}
 }
 """
 
@@ -140,6 +212,9 @@ void fragment() {
 }
 """
 
+## The Blender-made model (res://assets/models/gun_pod).
+const ASSET := "gun_pod"
+
 const GREEN := Color(0.45, 1.35, 0.5)
 const AMBER := Color(1.4, 0.85, 0.2)
 const RED := Color(1.5, 0.3, 0.2)
@@ -156,6 +231,8 @@ var ammo := BELT
 var heat := 0.0
 var reload_left := 0.0
 var online := true
+## The ship itself is in the line of fire: the interrupter holds the guns (Mothership.fire_masked).
+var masked := false
 var _sys_hp := 100.0
 ## The local crew member is the gunner: sounds play in 2D and the view shakes.
 var _local := false
@@ -165,7 +242,12 @@ var _flashes: Array[MeshInstance3D] = []
 var _flash_t: Array[float] = [0.0, 0.0, 0.0, 0.0]
 var _lights: Array[OmniLight3D] = []
 var _casings: Array[CPUParticles3D] = []
-var _smoke: Array[CPUParticles3D] = []
+## Smoke rising off each barrel, and puffing from each muzzle while firing (their process
+## materials are shared by the four barrels).
+var _smoke: Array[GPUParticles3D] = []
+var _puffs: Array[GPUParticles3D] = []
+var _smoke_pm: ParticleProcessMaterial
+var _puff_pm: ParticleProcessMaterial
 var _sparks: CPUParticles3D
 var _barrel_mat: StandardMaterial3D
 var _screens: Array[MeshInstance3D] = []
@@ -197,51 +279,22 @@ func build(def: Dictionary) -> void:
 	muzzle = Vector3(0, 0, (BARRELS[0] as Vector3).z - BARREL_LEN)
 	camera_offset = EYE
 	var heavy := style == "heavy"
-	var shell := _shell_mat(paint.darkened(0.45 if heavy else 0.3))
-	# Painted steel, light and barely metallic: the strips only catch the cabin lamp, and must
-	# still stand out against the dark cave.
-	var frame := Models.mat(Color(0.37, 0.37, 0.32), 0.15, 0.62)
-	var bolt := Models.mat(Color(0.5, 0.49, 0.45), 0.5, 0.45)
-	var gunmetal := Models.mat(Color(0.09, 0.09, 0.1), 0.7, 0.45)
-	var steel := Models.mat(Color(0.5, 0.51, 0.5), 0.8, 0.35)
-	var olive := Models.panel_mat(Color(0.27, 0.29, 0.24), 0.35, 0.75, 3.0)
-	var dark := Models.mat(Color(0.07, 0.075, 0.08), 0.4, 0.7)
-	var b := Models.Batch.new()
-	# The ball: glass in front, a riveted shell behind, held together by metal strips. Seen from
-	# the gunner's eye near the centre, every strip (a great circle) reads as a straight frame bar.
-	b.add(_hemisphere(RADIUS, true), Transform3D.IDENTITY, _glass_mat())
-	b.add(_hemisphere(RADIUS + 0.004, false), Transform3D.IDENTITY, shell)
-	b.add(_band(Vector3.RIGHT, Vector3.UP, 0.0, TAU, RADIUS + 0.012, 0.09, 0.05, 64), Transform3D.IDENTITY, frame)
-	for yaw: float in [-1.08, -0.52, 0.52, 1.08]:
-		var d := Vector3(sin(yaw), 0, -cos(yaw))
-		b.add(_band(Vector3.DOWN, d, 0.0, PI, RADIUS + 0.01, 0.065, 0.04, 32), Transform3D.IDENTITY, frame)
-		_bolts(b, Vector3.DOWN, d, RADIUS + 0.01, 0.04, 8, bolt)
-	for elev: float in [0.45, -0.37]:
-		var e := Vector3(0, sin(elev), -cos(elev))
-		b.add(_band(Vector3.LEFT, e, 0.0, PI, RADIUS + 0.01, 0.065, 0.04, 32), Transform3D.IDENTITY, frame)
-		_bolts(b, Vector3.LEFT, e, RADIUS + 0.01, 0.04, 8, bolt)
-	_bolts(b, Vector3.RIGHT, Vector3.UP, RADIUS + 0.012, 0.05, 24, bolt, true)
-	# Ribs on the shell, and armour plates on a heavy pod.
-	b.add(_band(Vector3.DOWN, Vector3.BACK, 0.0, PI, RADIUS + 0.01, 0.07, 0.04, 24), Transform3D.IDENTITY, frame)
-	b.add(_band(Vector3.LEFT, Vector3.BACK, 0.0, PI, RADIUS + 0.01, 0.07, 0.04, 24), Transform3D.IDENTITY, frame)
+	# The ball, its frame, the receivers and the cabin are a Blender-made model (tools/blender/
+	# gun_pod.py), its shell painted in the ship's colour. The glass, the sight's glass and the
+	# instruments are made here.
+	var tint := {"Paint": paint.darkened(0.45 if heavy else 0.3)}
+	Models.asset_mesh(pitch_pivot, ASSET, "Pod", tint)
 	if heavy:
-		for x: float in [-0.48, 0.48]:
-			b.box(Vector3(x, 0.42, 0.88), Vector3(0.5, 0.42, 0.08), frame, Vector3(-25, -x * 55.0, 0))
-			b.box(Vector3(x, -0.4, 0.9), Vector3(0.5, 0.36, 0.08), frame, Vector3(22, -x * 55.0, 0))
-	# The cap on top and the trunnions on each side, where the guns are fixed to the ball.
-	b.cyl(Vector3(0, RADIUS - 0.005, 0), 0.22, 0.05, frame, Vector3.ZERO, -1.0, 20)
-	b.box(Vector3(0, RADIUS + 0.04, 0.08), Vector3(0.1, 0.08, 0.16), dark)
-	for s: float in [-1.0, 1.0]:
-		b.cyl(Vector3(s * (RADIUS - 0.01), 0, 0), 0.32, 0.08, frame, Vector3(0, 0, 90), -1.0, 24)
-		b.cyl(Vector3(s * 1.1, 0, 0), 0.15, 0.12, steel, Vector3(0, 0, 90), -1.0, 16)
-		for i in 8:
-			var a := TAU * i / 8.0
-			b.cyl(Vector3(s * (RADIUS + 0.035), sin(a) * 0.26, cos(a) * 0.26), 0.016, 0.02, bolt, Vector3(0, 0, 90), -1.0, 6)
-	_build_guns(b, gunmetal, steel, dark, frame)
-	_build_cabin(b, olive, dark, steel, frame)
-	b.commit(pitch_pivot, "Pod")
+		Models.asset_mesh(pitch_pivot, ASSET, "Armour", tint)
+	var b := Models.Batch.new()
+	b.add(_hemisphere(RADIUS, true), Transform3D.IDENTITY, _glass_mat())
+	_build_guns()
+	_build_cabin(b)
+	for mi in b.commit(pitch_pivot, "Glass", false):
+		if mi.material_override == _glass_mat():
+			mi.layers = Game.VIS_GLASS
 	_build_displays()
-	_build_collar(heavy)
+	_build_collar()
 	_build_figure()
 	eye = Node3D.new()
 	eye.name = "Eye"
@@ -260,30 +313,15 @@ func build(def: Dictionary) -> void:
 	_servo.position = Vector3(0, -0.75, 0)
 	_servo.unit_size = 5.0
 	yaw_pivot.add_child(_servo)
+	Sfx.track(_servo)
 
 
-## The two receivers with their twin barrels, the muzzle flashes and lights, ejected casings and
-## smoke from hot barrels.
-func _build_guns(b: Models.Batch, gunmetal: Material, steel: Material, dark: Material, frame: Material) -> void:
+## The muzzle lights, ejected casings and smoke from hot barrels of the two guns, and the four
+## barrels (the receivers are part of the pod's model).
+func _build_guns() -> void:
 	var brass := Models.mat(Color(0.78, 0.58, 0.26), 0.85, 0.35)
 	for s: float in [-1.0, 1.0]:
 		var x := s * 1.27
-		b.box(Vector3(s * 1.11, 0, 0), Vector3(0.14, 0.2, 0.26), frame)
-		b.box(Vector3(x, 0, -0.05), Vector3(0.24, 0.46, 0.9), gunmetal)
-		b.box(Vector3(x, 0.245, -0.05), Vector3(0.2, 0.03, 0.78), steel)
-		b.box(Vector3(x, 0, -0.5), Vector3(0.26, 0.48, 0.04), frame)
-		b.box(Vector3(x, -0.235, -0.15), Vector3(0.12, 0.02, 0.18), dark)
-		for z: float in [-0.35, -0.05, 0.25]:
-			b.box(Vector3(s * 1.395, 0, z), Vector3(0.012, 0.4, 0.04), frame)
-		# Charging handle on the outboard side.
-		b.box(Vector3(s * 1.41, 0.1, 0.22), Vector3(0.04, 0.05, 0.14), steel)
-		b.sphere(Vector3(s * 1.44, 0.1, 0.3), 0.025, dark)
-		# The belt chute from the receiver back into the pod (the rounds come from inside the ship).
-		var chute: Array[Vector3] = [Vector3(s * 1.13, -0.06, 0.3), Vector3(s * 1.02, -0.13, 0.47), Vector3(s * 0.84, -0.2, 0.62)]
-		for i in chute.size() - 1:
-			b.beam(chute[i], chute[i + 1], 0.11, 0.09, dark)
-		for c: Vector3 in chute:
-			b.box(c, Vector3(0.13, 0.11, 0.025), brass)
 		var light := OmniLight3D.new()
 		light.position = Vector3(x, 0, -2.75)
 		light.omni_range = 5.5
@@ -314,34 +352,10 @@ func _build_guns(b: Models.Batch, gunmetal: Material, steel: Material, dark: Mat
 		casings.particle_flag_rotate_y = true
 		pitch_pivot.add_child(casings)
 		_casings.append(casings)
-		var smoke := CPUParticles3D.new()
-		smoke.position = Vector3(x, 0.0, -2.3)
-		smoke.emitting = false
-		smoke.local_coords = false
-		smoke.amount = 10
-		smoke.lifetime = 1.6
-		smoke.mesh = _smoke_mesh()
-		smoke.direction = Vector3.UP
-		smoke.spread = 25.0
-		smoke.initial_velocity_min = 0.2
-		smoke.initial_velocity_max = 0.5
-		smoke.gravity = Vector3(0, 0.5, 0)
-		smoke.scale_amount_min = 0.6
-		smoke.scale_amount_max = 1.4
-		var fade := Gradient.new()
-		fade.offsets = PackedFloat32Array([0.0, 0.25, 1.0])
-		fade.colors = PackedColorArray([Color(0.5, 0.5, 0.5, 0.0), Color(0.45, 0.45, 0.45, 0.22), Color(0.4, 0.4, 0.4, 0.0)])
-		smoke.color_ramp = fade
-		var grow := Curve.new()
-		grow.add_point(Vector2(0.0, 0.4))
-		grow.add_point(Vector2(1.0, 1.0))
-		smoke.scale_amount_curve = grow
-		pitch_pivot.add_child(smoke)
-		_smoke.append(smoke)
-	_barrel_mat = StandardMaterial3D.new()
-	_barrel_mat.albedo_color = Color(0.12, 0.11, 0.1)
-	_barrel_mat.metallic = 0.7
-	_barrel_mat.roughness = 0.45
+	_smoke_pm = _smoke_process(false)
+	_puff_pm = _smoke_process(true)
+	# The bare barrels and flash hiders glow when hot: the model's "Hot" material with emission.
+	_barrel_mat = (Models.asset_material(ASSET, "BarrelHot", "Hot") as StandardMaterial3D).duplicate()
 	_barrel_mat.emission_enabled = true
 	_barrel_mat.emission = Color(0.9, 0.18, 0.04)
 	_barrel_mat.emission_energy_multiplier = 0.0
@@ -350,18 +364,9 @@ func _build_guns(b: Models.Batch, gunmetal: Material, steel: Material, dark: Mat
 		node.position = BARRELS[i]
 		pitch_pivot.add_child(node)
 		_barrel_nodes.append(node)
-		var bb := Models.Batch.new()
-		# Perforated cooling jacket, the bare barrel and a flared flash hider.
-		bb.cyl(Vector3(0, 0, -0.55), 0.072, 1.1, gunmetal, Vector3(90, 0, 0), -1.0, 14)
-		for z: float in [-0.03, -1.08]:
-			bb.cyl(Vector3(0, 0, z), 0.082, 0.04, steel, Vector3(90, 0, 0), -1.0, 14)
-		for k in 4:
-			var a := TAU * k / 4.0 + PI / 4.0
-			for j in 5:
-				bb.box(Vector3(cos(a) * 0.07, sin(a) * 0.07, -0.18 - j * 0.19), Vector3(0.02, 0.02, 0.075), dark, Vector3(0, 0, rad_to_deg(a)))
-		bb.cyl(Vector3(0, 0, -1.47), 0.036, 0.74, _barrel_mat, Vector3(90, 0, 0), -1.0, 12)
-		bb.cyl(Vector3(0, 0, -1.9), 0.075, 0.2, _barrel_mat, Vector3(90, 0, 0), 0.052, 12)
-		bb.commit(node, "Barrel", false)
+		# Perforated cooling jacket, the bare barrel inside it and a slotted flash hider.
+		Models.asset_mesh(node, ASSET, "Barrel", {}, Transform3D.IDENTITY, false)
+		Models.asset_mesh(node, ASSET, "BarrelHot", {"Hot": _barrel_mat}, Transform3D.IDENTITY, false)
 		var flash := MeshInstance3D.new()
 		flash.mesh = _flash_mesh()
 		flash.material_override = _flash_mat()
@@ -370,43 +375,20 @@ func _build_guns(b: Models.Batch, gunmetal: Material, steel: Material, dark: Mat
 		flash.visible = false
 		node.add_child(flash)
 		_flashes.append(flash)
+		# Smoke off the whole hot barrel, and from the muzzle while it fires.
+		var smoke := _smoke_emitter(_smoke_pm, 28, 2.6)
+		smoke.position = Vector3(0, 0.02, -1.05)
+		node.add_child(smoke)
+		_smoke.append(smoke)
+		var puff := _smoke_emitter(_puff_pm, 18, 1.5)
+		puff.position = Vector3(0, 0, -BARREL_LEN - 0.05)
+		node.add_child(puff)
+		_puffs.append(puff)
 
 
-## The gunner's seat, the control panel with its grips, and the reflector sight.
-func _build_cabin(b: Models.Batch, olive: Material, dark: Material, steel: Material, frame: Material) -> void:
-	var leather := Models.mat(Color(0.2, 0.14, 0.1), 0.1, 0.8)
-	var hazard := Models.mat(Color(0.9, 0.7, 0.1), 0.2, 0.6)
-	b.cyl(Vector3(0, -0.84, 0), 0.62, 0.03, Models.panel_mat(Color(0.2, 0.2, 0.19), 0.6, 0.6, 4.0), Vector3.ZERO, -1.0, 24)
-	b.box(Vector3(0, -0.72, -0.45), Vector3(0.36, 0.03, 0.06), steel)
-	b.cyl(Vector3(0, -0.71, 0.16), 0.04, 0.24, steel)
-	b.box(Vector3(0, -0.57, 0.16), Vector3(0.44, 0.07, 0.4), leather)
-	b.box(Vector3(0, -0.24, 0.4), Vector3(0.42, 0.55, 0.07), leather, Vector3(12, 0, 0))
-	b.box(Vector3(0, 0.2, 0.26), Vector3(0.24, 0.15, 0.07), leather, Vector3(12, 0, 0))
-	for x: float in [-0.23, 0.23]:
-		b.box(Vector3(x, -0.4, 0.3), Vector3(0.03, 0.06, 0.5), steel, Vector3(-30, 0, 0))
-	# The control panel: a sloping desk with switches, the fascia below it and two spade grips.
-	var desk := Transform3D(Basis(Vector3.RIGHT, deg_to_rad(29.4)), Vector3(0, -0.31, -0.54))
-	b.add(_box_mesh(Vector3(0.92, 0.05, 0.37)), desk, olive)
-	b.add(_box_mesh(Vector3(0.94, 0.012, 0.02)), desk * Transform3D(Basis.IDENTITY, Vector3(0, 0.02, 0.18)), hazard)
-	b.box(Vector3(0, -0.42, -0.74), Vector3(0.8, 0.38, 0.06), olive)
-	for i in 6:
-		var x := -0.36 + i * 0.065 if i < 3 else 0.17 + (i - 3) * 0.065
-		b.add(_box_mesh(Vector3(0.022, 0.03, 0.04)), desk * Transform3D(Basis.IDENTITY, Vector3(x, 0.035, 0.07)), dark)
-		b.add(_box_mesh(Vector3(0.008, 0.04, 0.008)), desk * Transform3D(Basis(Vector3.RIGHT, -0.5), Vector3(x, 0.06, 0.065)), steel)
-	for x: float in [-0.3, 0.3]:
-		b.add(_cyl_mesh(0.03, 0.025), desk * Transform3D(Basis.IDENTITY, Vector3(x, 0.035, -0.08)), dark)
-	b.box(Vector3(0, -0.33, -0.42), Vector3(0.44, 0.03, 0.03), steel)
-	for x: float in [-0.19, 0.19]:
-		b.cyl(Vector3(x, -0.27, -0.42), 0.022, 0.13, Models.mat(Color(0.1, 0.08, 0.06), 0.1, 0.9))
-		b.sphere(Vector3(x, -0.2, -0.42), 0.017, Models.emissive(Color(1.0, 0.15, 0.08), 1.5))
-	# The reflector sight: a slim lamp housing on a post, well below the line of sight, and a
-	# U-shaped holder for the tilted glass the reticle shows on.
-	b.cyl(Vector3(0, -0.148, -0.49), 0.011, 0.325, steel)
-	b.box(Vector3(0, 0.0375, -0.47), Vector3(0.05, 0.045, 0.12), frame)
-	b.box(Vector3(0, 0.045, -0.4095), Vector3(0.03, 0.006, 0.002), Models.emissive(Color(1.0, 0.55, 0.15), 0.8))
-	b.box(Vector3(0, 0.063, -0.45), Vector3(0.132, 0.008, 0.02), frame)
-	for x: float in [-0.063, 0.063]:
-		b.box(Vector3(x, 0.145, -0.45), Vector3(0.007, 0.17, 0.01), frame)
+## The reflector sight's glass and glowing reticle, and the sparks off the panel when the guns
+## overheat (the seat, the panel and the sight's housing are part of the pod's model).
+func _build_cabin(b: Models.Batch) -> void:
 	b.add(_box_mesh(Vector3(0.12, 0.11, 0.004)), Transform3D(Basis(Vector3.RIGHT, deg_to_rad(40.0)), Vector3(0, 0.18, -0.45)),
 		Models.glass(Color(0.75, 0.8, 0.7, 0.1)))
 	_reticle = MeshInstance3D.new()
@@ -437,22 +419,11 @@ func _build_cabin(b: Models.Batch, olive: Material, dark: Material, steel: Mater
 	pitch_pivot.add_child(_sparks)
 
 
-## The display housing on top of the control panel: the ammo counter and the heat gauge on two
-## green screens, the lamps either side of them and a stencilled placard below.
+## On the display housing on top of the control panel (part of the pod's model): the ammo counter
+## and the heat gauge on two green screens, the lamps either side of them and a stencilled placard
+## below.
 func _build_displays() -> void:
 	var disp := Transform3D(Basis(Vector3.RIGHT, deg_to_rad(-23.0)), Vector3(0, -0.13, -0.745))
-	var b := Models.Batch.new()
-	var frame := Models.mat(Color(0.11, 0.115, 0.12), 0.7, 0.5)
-	b.add(_box_mesh(Vector3(0.9, 0.2, 0.1)), disp, Models.panel_mat(Color(0.25, 0.27, 0.22), 0.35, 0.75, 3.0))
-	b.add(_box_mesh(Vector3(0.92, 0.016, 0.07)), disp * Transform3D(Basis.IDENTITY, Vector3(0, 0.104, 0.03)), frame)
-	# The screens sit either side of the sight's post, clear of it from the gunner's eye.
-	for x: float in [-0.228, 0.228]:
-		b.add(_box_mesh(Vector3(0.33, 0.16, 0.004)), disp * Transform3D(Basis.IDENTITY, Vector3(x, -0.01, 0.051)), frame)
-		for y: float in [-0.085, 0.065]:
-			for bx: float in [-0.155, 0.155]:
-				b.add(_cyl_mesh(0.006, 0.006), disp * Transform3D(Basis(Vector3.RIGHT, PI / 2.0), Vector3(x + bx, y, 0.054)),
-					Models.mat(Color(0.5, 0.5, 0.47), 0.85, 0.35))
-	b.commit(pitch_pivot, "Displays", false)
 	for x: float in [-0.228, 0.228]:
 		var screen := MeshInstance3D.new()
 		var quad := QuadMesh.new()
@@ -499,24 +470,10 @@ func _build_displays() -> void:
 		_lamps[str(lamp[0])] = m
 
 
-## The ring the ball sits in (it turns with the pod's yaw), on top of the mount.
-func _build_collar(heavy: bool) -> void:
-	var b := Models.Batch.new()
-	var dark := Models.mat(Color(0.12, 0.125, 0.13), 0.7, 0.45)
-	var torus := TorusMesh.new()
-	torus.inner_radius = 0.79
-	torus.outer_radius = 0.99 if heavy else 0.97
-	torus.rings = 32
-	torus.ring_segments = 8
-	b.add(torus, Transform3D(Basis.from_scale(Vector3(1.0, 0.6, 1.0)), Vector3(0, -0.76, 0)), dark)
-	b.add(_band(Vector3.FORWARD, Vector3.RIGHT, 0.0, TAU, 0.985 if heavy else 0.965, 0.03, 0.01, 40), Transform3D(Basis.IDENTITY, Vector3(0, -0.76, 0)),
-		Models.mat(accent, 0.3, 0.5))
-	for i in 4:
-		var a := TAU * i / 4.0 + PI / 4.0
-		var dir := Vector3(cos(a), 0, sin(a))
-		b.box(dir * 0.92 + Vector3(0, -0.76, 0), Vector3(0.16, 0.12, 0.16), dark, Vector3(0, -rad_to_deg(a), 0))
-		b.strut(dir * 0.86 + Vector3(0, -0.8, 0), dir * 0.42 + Vector3(0, -MOUNT_TOP, 0), 0.045, dark)
-	b.commit(yaw_pivot, "Collar")
+## The ring the ball sits in (it turns with the pod's yaw), on top of the mount, with a band in the
+## ship's accent colour.
+func _build_collar() -> void:
+	Models.asset_mesh(yaw_pivot, ASSET, "Collar", {"Accent": accent})
 
 
 ## A figure of the gunner, seen by everyone else while someone sits in the pod.
@@ -626,11 +583,13 @@ func fire_fx(i: int, hot: bool, local: bool) -> void:
 	flash.reset_physics_interpolation()
 	_lights[0 if (BARRELS[i] as Vector3).x < 0.0 else 1].light_energy = randf_range(2.2, 3.2)
 	_since_shot = 0.0
+	# The bark rises in pitch as the barrels heat up.
+	var pitch := lerpf(1.0, HOT_PITCH, heat)
 	if local:
 		_kick = 1.0
-		Sfx.play("hmg", null, -7.0)
+		Sfx.play("hmg", null, -7.0, pitch)
 	else:
-		Sfx.play("hmg", _barrel_nodes[i].global_transform * Vector3(0, 0, -BARREL_LEN), -2.0)
+		Sfx.play("hmg", _barrel_nodes[i].global_transform * Vector3(0, 0, -BARREL_LEN), -2.0, pitch)
 	if hot and _hot_t <= 0.0:
 		_hot_t = 0.22
 		_sparks.restart()
@@ -666,8 +625,7 @@ func _physics_process(delta: float) -> void:
 		l.light_energy = maxf(0.0, l.light_energy - delta * 60.0)
 	for c in _casings:
 		c.emitting = _since_shot < 0.1
-	for s in _smoke:
-		s.emitting = heat > 0.5
+	_update_smoke()
 	# Hot barrels glow: dull red, then orange.
 	var glow := clampf((heat - 0.3) / 0.7, 0.0, 1.0)
 	_barrel_mat.emission = Color(0.9, 0.16, 0.03).lerp(Color(1.0, 0.5, 0.12), glow)
@@ -683,15 +641,32 @@ func _physics_process(delta: float) -> void:
 		_beep = 0.0
 
 
-## The traversing motors whine while the pod swings round.
+## The barrels smoke more the hotter they are: wisps from SMOKE_FROM heat, thick and dark at full
+## heat, and every burst puffs smoke out of the muzzles (thicker when hot).
+func _update_smoke() -> void:
+	var h := smoothstep(SMOKE_FROM, 1.0, heat)
+	var firing := _since_shot < 0.12
+	for s in _smoke:
+		s.emitting = h > 0.01
+		s.amount_ratio = maxf(h, 0.08)
+	for p in _puffs:
+		p.emitting = firing
+		p.amount_ratio = lerpf(0.25, 1.0, heat)
+	_smoke_pm.color = Color(1.0, 1.0, 1.0, lerpf(0.35, 1.0, h))
+	_smoke_pm.scale_min = lerpf(0.6, 1.2, h)
+	_smoke_pm.scale_max = lerpf(1.0, 2.1, h)
+	_puff_pm.color = Color(1.0, 1.0, 1.0, lerpf(0.3, 0.9, heat))
+
+
+## The traversing motors whine while the pod swings round: louder and higher the faster it turns.
 func _update_servo(delta: float) -> void:
-	var speed := (aim - _last_aim).length() / maxf(delta, 0.001)
+	var speed := aim_delta(_last_aim, aim).length() / maxf(delta, 0.001)
 	_last_aim = aim
 	_servo_level = move_toward(_servo_level, clampf(speed / TURN_RATE, 0.0, 1.0), delta * 6.0)
 	if _servo_level > 0.03:
 		if not _servo.playing:
 			_servo.play()
-		_servo.volume_db = linear_to_db(_servo_level) - 9.0
+		_servo.volume_db = linear_to_db(_servo_level) + SERVO_DB
 		_servo.pitch_scale = 0.8 + 0.35 * _servo_level
 	elif _servo.playing:
 		_servo.stop()
@@ -710,6 +685,9 @@ func _update_displays() -> void:
 		note_col = RED
 	elif reloading:
 		note = "LOADING %d%%" % int(progress * 100.0)
+		note_col = AMBER
+	elif masked:
+		note = "HULL IN LINE" if blink else ""
 		note_col = AMBER
 	_show(_ammo_note, note, note_col)
 	var belt := int(ceil(float(ammo) / BELT * 10.0)) if not reloading else int(progress * 10.0)
@@ -731,7 +709,7 @@ func _update_displays() -> void:
 		hnote = "COOLING"
 	_show(_heat_note, hnote, hcol)
 	_show(_sys_label, "SYS %3d%%" % int(round(_sys_hp)), GREEN if _sys_hp >= 50.0 else (AMBER if online else RED))
-	(_lamps["ready"] as StandardMaterial3D).emission_energy_multiplier = 3.0 if online and not reloading and heat < 0.97 else 0.0
+	(_lamps["ready"] as StandardMaterial3D).emission_energy_multiplier = 3.0 if online and not reloading and heat < 0.97 and not masked else 0.0
 	(_lamps["belt"] as StandardMaterial3D).emission_energy_multiplier = 3.0 if reloading and blink else 0.0
 	(_lamps["heat"] as StandardMaterial3D).emission_energy_multiplier = 3.5 if (heat >= 0.97 and fast) or (heat >= HEAT_WARN and heat < 0.97 and blink) else 0.0
 	(_lamps["sys"] as StandardMaterial3D).emission_energy_multiplier = 3.0 if not online or (_sys_hp < 50.0 and blink) else 0.0
@@ -759,6 +737,39 @@ func _fill(segs: Array[MeshInstance3D], count: int, key: String, level_of: Calla
 
 # --- Shared meshes and materials ---------------------------------------------------------------
 
+## The terminal font, the green screens' material and the grimy glass's shader, shared with the
+## cockpit (Cockpit) so the ship's instruments all look alike.
+static func mono_font() -> Font:
+	return _mono()
+
+
+static func crt_material() -> ShaderMaterial:
+	return _crt_mat()
+
+
+static func glass_shader() -> Shader:
+	return _glass_mat().shader
+
+
+## The soft round smoke puff, shared with the scouts' missile trails (Projectiles).
+static func smoke_mesh() -> QuadMesh:
+	return _smoke_mesh()
+
+
+## The reflector sight's glowing reticle (instance uniform `power`), shared with the scouts' gunsight.
+static func sight_material() -> ShaderMaterial:
+	return _sight_mat()
+
+
+## The muzzle flash's mesh and its glowing material, shared with the scouts' cannons.
+static func flash_mesh() -> ArrayMesh:
+	return _flash_mesh()
+
+
+static func flash_material() -> ShaderMaterial:
+	return _flash_mat()
+
+
 static func _mono() -> Font:
 	if not _shared.has("font"):
 		var f := SystemFont.new()
@@ -774,16 +785,6 @@ static func _seg_mat(level: int) -> Material:
 	return Models.emissive(cols[level], 0.25 if level == 0 else 2.6, Color(0.02, 0.03, 0.02))
 
 
-static func _shell_mat(color: Color) -> StandardMaterial3D:
-	var key := "shell" + color.to_html()
-	if not _shared.has(key):
-		# Seen from inside the pod too.
-		var m := Models.panel_mat(color, 0.55, 0.62, 1.6).duplicate() as StandardMaterial3D
-		m.cull_mode = BaseMaterial3D.CULL_DISABLED
-		_shared[key] = m
-	return _shared[key]
-
-
 static func _shader_mat(key: String, code: String) -> ShaderMaterial:
 	if not _shared.has(key):
 		var sh := Shader.new()
@@ -795,7 +796,7 @@ static func _shader_mat(key: String, code: String) -> ShaderMaterial:
 
 
 static func _glass_mat() -> ShaderMaterial:
-	return _shader_mat("glass", GLASS_SHADER)
+	return _shader_mat("glass", GLASS_SHADER + GLASS_LIGHT)
 
 
 static func _sight_mat() -> ShaderMaterial:
@@ -813,16 +814,6 @@ static func _flash_mat() -> ShaderMaterial:
 static func _box_mesh(size: Vector3) -> BoxMesh:
 	var m := BoxMesh.new()
 	m.size = size
-	return m
-
-
-static func _cyl_mesh(radius: float, height: float) -> CylinderMesh:
-	var m := CylinderMesh.new()
-	m.top_radius = radius
-	m.bottom_radius = radius
-	m.height = height
-	m.radial_segments = 10
-	m.rings = 1
 	return m
 
 
@@ -865,43 +856,6 @@ static func _hemisphere(radius: float, front: bool) -> ArrayMesh:
 	return mesh
 
 
-## A metal strip along a great circle of the ball: points u cos(a) + v sin(a) for a from a0 to a1
-## (u, v: unit vectors at right angles), `width` across and `thick` deep, centred on `radius`.
-static func _band(u: Vector3, v: Vector3, a0: float, a1: float, radius: float, width: float, thick: float, steps: int) -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var n := u.cross(v).normalized()
-	var prev: Array[Vector3] = []
-	var prev_c := Vector3.ZERO
-	for i in steps + 1:
-		var a := lerpf(a0, a1, float(i) / steps)
-		var r := (u * cos(a) + v * sin(a)).normalized()
-		var c := r * radius
-		var ring: Array[Vector3] = [c + r * thick * 0.5 + n * width * 0.5, c + r * thick * 0.5 - n * width * 0.5,
-			c - r * thick * 0.5 - n * width * 0.5, c - r * thick * 0.5 + n * width * 0.5]
-		if not prev.is_empty():
-			var mid := (prev_c + c) * 0.5
-			for k in 4:
-				var k2 := (k + 1) % 4
-				Models.tri(st, prev[k], ring[k], ring[k2], mid)
-				Models.tri(st, prev[k], ring[k2], prev[k2], mid)
-		prev = ring
-		prev_c = c
-	return st.commit()
-
-
-## Bolt heads along a strip (see _band), on its outer face and its inner face (seen from inside).
-## `full`: the strip is a whole circle.
-static func _bolts(b: Models.Batch, u: Vector3, v: Vector3, radius: float, thick: float, count: int, mat: Material, full := false) -> void:
-	for i in count:
-		var a := (TAU * i / count) if full else PI * (i + 0.5) / count
-		var r := (u * cos(a) + v * sin(a)).normalized()
-		var side := r.cross(Vector3.UP if absf(r.y) < 0.9 else Vector3.RIGHT).normalized()
-		var basis := Basis(side, r, side.cross(r))
-		for depth: float in [thick * 0.5 + 0.006, -thick * 0.5 - 0.006]:
-			b.add(_cyl_mesh(0.013, 0.014), Transform3D(basis, r * (radius + depth)), mat)
-
-
 ## Three flame blades round the bore and a burst facing forward (the flash shader fades each quad
 ## from its middle).
 static func _flash_mesh() -> ArrayMesh:
@@ -926,6 +880,70 @@ static func _quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector
 		st.add_vertex(pts[i])
 
 
+## How smoke moves: off a hot barrel it seeps out all along it and rises; out of a muzzle it puffs
+## forward and slows down. Grey puffs grow as they rise and fade away.
+static func _smoke_process(muzzle: bool) -> ParticleProcessMaterial:
+	var pm := ParticleProcessMaterial.new()
+	if muzzle:
+		pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+		pm.emission_sphere_radius = 0.04
+		pm.direction = Vector3(0, 0, -1)
+		pm.spread = 20.0
+		pm.initial_velocity_min = 1.2
+		pm.initial_velocity_max = 2.6
+		pm.damping_min = 2.2
+		pm.damping_max = 3.2
+		pm.gravity = Vector3(0, 0.35, 0)
+		pm.scale_min = 0.5
+		pm.scale_max = 1.0
+	else:
+		pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+		pm.emission_box_extents = Vector3(0.04, 0.04, 0.85)
+		pm.direction = Vector3.UP
+		pm.spread = 35.0
+		pm.initial_velocity_min = 0.1
+		pm.initial_velocity_max = 0.35
+		pm.damping_min = 0.3
+		pm.damping_max = 0.6
+		pm.gravity = Vector3(0, 0.55, 0)
+		pm.scale_min = 0.6
+		pm.scale_max = 1.0
+	var grow := Curve.new()
+	grow.add_point(Vector2(0.0, 0.35))
+	grow.add_point(Vector2(0.5, 0.85))
+	grow.add_point(Vector2(1.0, 1.25 if muzzle else 1.1))
+	var grow_tex := CurveTexture.new()
+	grow_tex.curve = grow
+	pm.scale_curve = grow_tex
+	var fade := Gradient.new()
+	fade.offsets = PackedFloat32Array([0.0, 0.12, 0.55, 1.0])
+	fade.colors = PackedColorArray([Color(0.62, 0.6, 0.57, 0.0), Color(0.5, 0.49, 0.47, 0.42), Color(0.4, 0.4, 0.39, 0.26),
+		Color(0.36, 0.36, 0.36, 0.0)])
+	var fade_tex := GradientTexture1D.new()
+	fade_tex.gradient = fade
+	pm.color_ramp = fade_tex
+	pm.angle_min = -180.0
+	pm.angle_max = 180.0
+	return pm
+
+
+## A smoke emitter (off until the heat calls for it). The smoke stays where it was let out, so it
+## trails behind as the pod and the ship move.
+static func _smoke_emitter(pm: ParticleProcessMaterial, amount: int, lifetime: float) -> GPUParticles3D:
+	var p := GPUParticles3D.new()
+	p.amount = amount
+	p.lifetime = lifetime
+	p.randomness = 0.5
+	p.local_coords = false
+	p.emitting = false
+	p.amount_ratio = 0.0
+	p.process_material = pm
+	p.draw_pass_1 = _smoke_mesh()
+	p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	p.visibility_aabb = AABB(Vector3(-15, -4, -15), Vector3(30, 14, 30))
+	return p
+
+
 ## A soft round puff for the smoke off hot barrels.
 static func _smoke_mesh() -> QuadMesh:
 	if _shared.has("smoke_mesh"):
@@ -946,7 +964,7 @@ static func _smoke_mesh() -> QuadMesh:
 	m.vertex_color_use_as_albedo = true
 	m.albedo_texture = tex
 	var q := QuadMesh.new()
-	q.size = Vector2(0.28, 0.28)
+	q.size = Vector2(0.4, 0.4)
 	q.material = m
 	_shared["smoke_mesh"] = q
 	return q

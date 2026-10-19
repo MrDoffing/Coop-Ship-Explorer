@@ -3,31 +3,41 @@ extends Node3D
 ## An alien on foot. It lives in ship-local space (under Interior/Boarders) and is simulated on the
 ## server along a waypoint graph. The crew kills it with hand weapons.
 ##
-## Kinds (KIND_STATS):
-## - "boarder": broke into the mothership through a roof hatch. It hunts crew members aboard and
-##   otherwise wrecks the engine and weapon systems.
-## - "skitter": small and fast, attacks in packs with its claws. Skitters crawl over the walls and
-##   ceilings of the station's rooms, which makes them hard to hit: they drop down to claw at their
-##   prey, then scuttle off and up a wall again (hit and run).
-## - "needler": keeps its distance and fires needles.
-## Aliens living in an abandoned station (`outside`) stay there: they guard their room, chase crew
-## members who come close and fight anyone out in the station, players and crew bots alike, but
-## never board the ship. While the ship is landed there, ship-local space covers the station too
-## (the ship is parked).
+## This class is the "boarder": an infiltrator that broke into the mothership through a roof hatch.
+## It hunts crew members aboard and otherwise wrecks the engine and weapon systems. The aliens
+## living in the abandoned stations (`outside`) are its subclasses, one per kind (make()):
+## - Stalker: bigger than a man; roams the station, rushes whoever it spots, claws them a few times
+##   and runs off to hide, and comes back; badly hurt, it flees to heal.
+## - Barnacle: hangs from a ceiling and catches whoever walks under it.
+## - Crawler: small, on the walls and ceilings round its nest (Hive), leaping at whoever comes into
+##   its room; shot at, the pack hunts the shooter out to some way from the nest.
+## - Spider: four legs that cling to any surface; it scurries about and stops to spit acid.
+## Aliens in a station stay there: they never board the ship. While the ship is landed there,
+## ship-local space covers the station too (the ship is parked).
+##
+## Everything shared lives here: replication, the hit area, damage and death, picking a target
+## among the crew out in the station (the closest, sticking to the one it is after, turning on
+## whoever shoots it, a pack spreading out over the crew), and walking the station's waypoint graph.
 
 const KIND_STATS := {
 	"boarder": {"hp": 55.0, "speed": 3.8, "damage": 13.0, "cooldown": 1.1, "reach": 1.7, "radius": 0.6, "height": 1.8,
 		"name": "Boarder"},
-	"skitter": {"hp": 20.0, "speed": 7.6, "damage": 3.0, "cooldown": 0.8, "reach": 1.25, "radius": 0.24, "height": 0.48,
-		"name": "Skitter"},
-	"needler": {"hp": 40.0, "speed": 2.8, "damage": 8.0, "cooldown": 1.8, "reach": 14.0, "radius": 0.55, "height": 1.9,
-		"name": "Needler"},
+	"stalker": {"hp": 400.0, "speed": 2.8, "damage": 10.0, "cooldown": 0.5, "reach": 2.0, "radius": 0.55, "height": 2.4,
+		"name": "Stalker"},
+	"barnacle": {"hp": 40.0, "speed": 0.0, "damage": 5.0, "cooldown": 0.9, "reach": 1.9, "radius": 0.5, "height": 1.0,
+		"name": "Barnacle"},
+	"crawler": {"hp": 14.0, "speed": 2.9, "damage": 7.0, "cooldown": 1.2, "reach": 4.6, "radius": 0.3, "height": 0.4,
+		"name": "Crawler"},
+	"hive": {"hp": 140.0, "speed": 0.0, "damage": 0.0, "cooldown": 1.0, "reach": 0.0, "radius": 0.85, "height": 1.3,
+		"name": "Crawler nest"},
+	"spider": {"hp": 50.0, "speed": 5.2, "damage": 9.0, "cooldown": 2.0, "reach": 16.0, "radius": 0.5, "height": 0.8,
+		"name": "Acid spider"},
 }
 const SABOTAGE_DPS := 6.0
 const HUNT_RANGE := 16.0
-## Aliens in an abandoned station notice crew within NOTICE_RANGE that they can see (or within
-## HEAR_RANGE regardless), and give up once their target is CHASE_RANGE away and out of sight for
-## FORGET_TIME seconds.
+## Aliens in an abandoned station notice crew within NOTICE_RANGE that they can see (or hear within
+## HEAR_RANGE: sound goes round by the open ways, see _hears()), and give up once their target is
+## CHASE_RANGE away and out of sight for FORGET_TIME seconds.
 const NOTICE_RANGE := 15.0
 const HEAR_RANGE := 4.0
 const CHASE_RANGE := 26.0
@@ -41,37 +51,27 @@ const STICKY := 0.75
 const PROVOKED := 0.6
 const PROVOKE_TIME := 4.0
 const CROWD := 1.6
-## Needlers: preferred distance band, needle speed and aim error (radians).
-const NEEDLE_NEAR := 5.5
-const NEEDLE_FAR := 11.0
-const NEEDLE_SPEED := 24.0
-const NEEDLE_SPREAD := 0.035
 ## Aliens push apart when closer than this.
 const PERSONAL_SPACE := 0.9
-## Skitters climb where the ceiling is at least CLIMB_CEILING above the floor (rooms, not the
-## doorways and corridors between them, which they cross on the floor; they look CLIMB_LOOKAHEAD
-## metres ahead along their path for those). Within POUNCE_RANGE of their prey they drop to the
-## floor to attack. On a wall they cling CLIMB_MIN..CLIMB_MAX above the floor; WALL_REACH is how
-## far a wall may be.
-const CLIMB_CEILING := 3.5
-const CLIMB_LOOKAHEAD := 2.6
-const POUNCE_RANGE := 3.2
-const CLIMB_MIN := 1.4
-const CLIMB_MAX := 3.4
-const WALL_REACH := 4.5
-## After a claw, a skitter scuttles away for this long (seconds) and up a wall or the ceiling.
-const RETREAT_TIME := Vector2(0.45, 0.85)
-## Skitters scale their critter model by this.
-const SKITTER_SCALE := 0.5
+## In a station an alien keeps its middle its radius (at most 0.5) plus WALL_GAP off the walls and
+## inside a doorway's jambs; a move into a wall or a shut door is undone (_keep_inside()), and one
+## blocked for BLOCKED_TIME makes it think again.
+const WALL_GAP := 0.12
+const BLOCKED_TIME := 0.8
+## A noise (hear()) draws it for this long, even while there's no way there yet.
+const HEARD_TIME := 20.0
 
-# Replicated (server authority), ship-local.
+# Replicated (server authority), ship-local. `mode` is what the alien is doing (each kind's own
+# states, for its animation); `grab` the peer id of the crew member a barnacle holds (0: none).
 var net_pos := Vector3.ZERO
 var net_rot := Quaternion.IDENTITY
 var hp := 55.0
 var max_hp := 55.0
 var attacking := false
+var mode := 0
+var grab := 0
 
-## From the spawn data.
+## From the spawn data (and kept for when the station is stowed, see save_data()).
 var kind := "boarder"
 var outside := false
 var dmg_mult := 1.0
@@ -84,6 +84,9 @@ var _anim_t := 0.0
 var _flash := 0.0
 var _last_hp := 0.0
 var _fall_v := 0.0
+## How fast it moves on the clients (from the replicated position), for the animation.
+var _speed_seen := 0.0
+var _last_pos := Vector3.ZERO
 # Server state.
 var _path: PackedVector3Array = PackedVector3Array()
 var _path_i := 0
@@ -99,27 +102,33 @@ var _provoker := 0
 var _provoke_t := 0.0
 var _wander := Vector3.ZERO
 var _wander_t := 0.0
-# Skitters (server): the floor track the pack logic moves along and its heading, the surface they
-# cling to (0 floor, 1 wall, 2 ceiling), where on it they are, and the cached wall and ceiling.
-var _ground := Vector3.ZERO
-var _heading := 0.0
-var _climb := 0
-var _climb_t := 0.0
-var _climb_h := 2.0
-var _wall_dir := Vector3.RIGHT
-var _surf_pos := Vector3.ZERO
-var _surf_up := Vector3.UP
-var _probe_t := 0.0
-var _ceil_h := 0.0
-var _ceil_ahead := 0.0
-var _wall_p := Vector3.ZERO
-var _wall_n := Vector3.ZERO
-var _retreat_t := 0.0
-var _retreat_dir := Vector3.ZERO
+## A noise it is going to have a look at, and for how much longer.
+var _heard := Vector3.ZERO
+var _heard_t := 0.0
+## The plan of the station it is in (cached by station) and how long its moves have been blocked.
+var _layout: Dictionary = {}
+var _layout_k := -1
+var _blocked_t := 0.0
+
+
+## A new alien of `kind` (its class).
+static func make(kind_id: String) -> Boarder:
+	match kind_id:
+		"stalker":
+			return Stalker.new()
+		"barnacle":
+			return Barnacle.new()
+		"crawler":
+			return Crawler.new()
+		"spider":
+			return Spider.new()
+		"hive":
+			return Hive.new()
+	return Boarder.new()
 
 
 func _init() -> void:
-	NetUtil.add_sync(self, ["net_pos", "net_rot"], ["hp", "attacking"], 0.05)
+	NetUtil.add_sync(self, ["net_pos", "net_rot"], ["hp", "attacking", "mode", "grab"], 0.05)
 
 
 func setup(data: Dictionary) -> void:
@@ -132,11 +141,22 @@ func setup(data: Dictionary) -> void:
 	position = data["pos"]
 	home = position
 	_wander = home
-	_ground = position
-	_surf_pos = position
 	net_pos = position
+	_last_pos = position
 	max_hp = float(data.get("max_hp", data.get("hp", 55.0)))
 	hp = float(data.get("hp", max_hp))
+	_setup(data)
+	net_rot = quaternion
+
+
+## Kind-specific spawn data (subclasses).
+func _setup(_data: Dictionary) -> void:
+	pass
+
+
+## What to keep of this alien when the station is stowed (merged into its spawn data next time).
+func save_data() -> Dictionary:
+	return {}
 
 
 func stat(key: String) -> float:
@@ -146,18 +166,9 @@ func stat(key: String) -> float:
 func _ready() -> void:
 	add_to_group("boarders")
 	var model := Node3D.new()
+	model.name = "Model"
 	add_child(model)
-	match kind:
-		"skitter":
-			model.position = Vector3(0, 0.42 * SKITTER_SCALE, 0)
-			_parts = Alien.build_model(model, Alien.Kind.CRITTER)
-			model.scale = Vector3.ONE * SKITTER_SCALE
-		"needler":
-			_parts = _build_needler(model)
-		_:
-			model.position = Vector3(0, 0.75, 0)
-			_parts = Alien.build_model(model, Alien.Kind.INFILTRATOR)
-			model.scale = Vector3.ONE * 0.85
+	_parts = _build(model)
 	Alien.collect_meshes(model, _meshes)
 	var area := Area3D.new()
 	area.collision_layer = Game.LAYER_BOARDER
@@ -165,11 +176,7 @@ func _ready() -> void:
 	area.monitoring = false
 	area.set_meta("boarder", str(name))
 	var cs := CollisionShape3D.new()
-	var cap := CapsuleShape3D.new()
-	cap.radius = stat("radius")
-	cap.height = maxf(stat("height"), cap.radius * 2.0)
-	cs.shape = cap
-	cs.position = Vector3(0, cap.height * 0.5 - 0.05, 0)
+	_hit_shape(cs)
 	area.add_child(cs)
 	add_child(area)
 	_last_hp = hp
@@ -177,43 +184,21 @@ func _ready() -> void:
 	_attack_cd = randf_range(0.6, 1.4)
 
 
-## A needler: a hunched, long-legged alien with a needle launcher growing out of its back.
-static func _build_needler(root: Node3D) -> Dictionary:
-	var parts := {}
-	var skin := Alien.organic(Color(0.24, 0.07, 0.2), Color(1.0, 0.3, 0.8), 2.4, 6.0)
-	var bone := Models.mat(Color(0.75, 0.7, 0.62), 0.1, 0.6)
-	var glow := Models.emissive(Color(1.0, 0.35, 0.85), 3.0)
-	var body := Node3D.new()
-	body.position = Vector3(0, 1.15, 0)
-	root.add_child(body)
-	Models.capsule(body, Vector3.ZERO, 0.32, 1.1, skin, Vector3(-25, 0, 0))
-	Models.sphere(body, Vector3(0, 0.55, -0.35), 0.27, skin, Vector3(0.9, 0.8, 1.2))
-	for side: float in [-1.0, 1.0]:
-		Models.sphere(body, Vector3(side * 0.11, 0.6, -0.6), 0.05, Models.emissive(Color(1.0, 0.85, 0.2), 6.0))
-	# The launcher: a bony tube over the shoulder fed by a glowing sac.
-	var launcher := Node3D.new()
-	launcher.position = Vector3(0.22, 0.55, 0.1)
-	body.add_child(launcher)
-	Models.cylinder(launcher, Vector3(0, 0, -0.35), 0.08, 1.0, bone, Vector3(90, 0, 0), 0.05)
-	Models.sphere(launcher, Vector3(0, 0, 0.25), 0.2, glow)
-	Models.sphere(launcher, Vector3(0, 0, -0.86), 0.06, glow)
-	parts["launcher"] = launcher
-	var legs: Array[Node3D] = []
-	for side: float in [-1.0, 1.0]:
-		var leg := Node3D.new()
-		leg.position = Vector3(side * 0.22, 0.85, 0.05)
-		root.add_child(leg)
-		Models.strut(leg, Vector3.ZERO, Vector3(side * 0.12, -0.45, -0.25), 0.07, skin)
-		Models.strut(leg, Vector3(side * 0.12, -0.45, -0.25), Vector3(side * 0.15, -0.85, 0.1), 0.05, skin)
-		legs.append(leg)
-		var arm := Node3D.new()
-		arm.position = Vector3(side * 0.3, 1.45, -0.25)
-		root.add_child(arm)
-		Models.strut(arm, Vector3.ZERO, Vector3(side * 0.15, -0.45, -0.3), 0.045, skin)
-		parts["arm_l" if side < 0 else "arm_r"] = arm
-	parts["legs"] = legs
-	parts["body"] = body
-	return parts
+## The hit area (node-local): a capsule of the kind's radius and height standing on the node's
+## origin (subclasses shape their own).
+func _hit_shape(cs: CollisionShape3D) -> void:
+	var cap := CapsuleShape3D.new()
+	cap.radius = stat("radius")
+	cap.height = maxf(stat("height"), cap.radius * 2.0)
+	cs.shape = cap
+	cs.position = Vector3(0, cap.height * 0.5 - 0.05, 0)
+
+
+## The boarder's model: an infiltrator on its feet.
+func _build(model: Node3D) -> Dictionary:
+	model.position = Vector3(0, 0.75, 0)
+	model.scale = Vector3.ONE * 0.85
+	return Alien.build_model(model, Alien.Kind.INFILTRATOR)
 
 
 func _ship() -> Mothership:
@@ -225,25 +210,24 @@ func _physics_process(delta: float) -> void:
 	if ship == null:
 		return
 	if multiplayer.is_server():
-		var crawler := outside and kind == "skitter"
-		if crawler:
-			# The pack logic works on the floor track; _crawl() puts the skitter on its surface.
-			position = _ground
-			basis = Basis(Vector3.UP, _heading)
-		if outside:
-			_think_outside(delta, ship)
-		else:
-			_think(delta, ship)
-		if crawler:
-			_ground = position
-			_heading = rotation.y
-			_crawl(delta, ship)
+		_server_tick(delta, ship)
 		net_pos = position
 		net_rot = quaternion
 	else:
 		var k := NetUtil.smooth(14.0, delta)
 		position = position.lerp(net_pos, k) if position.distance_to(net_pos) < 4.0 else net_pos
 		quaternion = quaternion.slerp(net_rot, k)
+	_speed_seen = lerpf(_speed_seen, position.distance_to(_last_pos) / maxf(delta, 0.0001), NetUtil.smooth(8.0, delta))
+	_last_pos = position
+
+
+func _server_tick(delta: float, ship: Mothership) -> void:
+	if outside:
+		var before := position
+		_think_outside(delta, ship)
+		_keep_inside(delta, ship, before)
+	else:
+		_think(delta, ship)
 
 
 func _process(delta: float) -> void:
@@ -255,18 +239,18 @@ func _process(delta: float) -> void:
 		_flash = maxf(0.0, _flash - delta * 5.0)
 		for m in _meshes:
 			m.set_instance_shader_parameter("flash", _flash)
+	_animate(delta)
+
+
+## The boarder's walk and claws.
+func _animate(_delta: float) -> void:
 	var legs: Array = _parts.get("legs", [])
-	var stride := 22.0 if kind == "skitter" else 11.0
 	for i in legs.size():
-		(legs[i] as Node3D).rotation.x = sin(_anim_t * stride + i * 1.7) * 0.4
+		(legs[i] as Node3D).rotation.x = sin(_anim_t * 11.0 + i * 1.7) * 0.4
 	var swing := sin(_anim_t * (16.0 if attacking else 4.0)) * (0.8 if attacking else 0.3)
 	if _parts.has("arm_l"):
 		(_parts["arm_l"] as Node3D).rotation.x = swing
 		(_parts["arm_r"] as Node3D).rotation.x = -swing
-	if _parts.has("launcher"):
-		(_parts["launcher"] as Node3D).position.z = 0.1 + (0.12 * absf(sin(_anim_t * 18.0)) if attacking else 0.0)
-	if _parts.has("body"):
-		(_parts["body"] as Node3D).rotation.z = sin(_anim_t * 2.0) * 0.05
 
 
 # --- Aboard the mothership ---------------------------------------------------------------------
@@ -314,8 +298,8 @@ func _closest_player(ship: Mothership) -> CrewMember:
 	var best_d := HUNT_RANGE
 	for c in ship.crew_root.get_children():
 		var p := c as CrewMember
-		# Crew out on a waystation pier are beyond reach.
-		if p == null or not p.alive or not ship.is_aboard(p.position):
+		# Crew out on a waystation pier, or out flying a scout, are beyond reach.
+		if p == null or not p.alive or not ship.is_aboard(p.position) or ship.is_scout_station(p.station):
 			continue
 		var d := p.position.distance_to(position)
 		if d < best_d:
@@ -341,67 +325,49 @@ func _panel_spot(i: int) -> Vector3:
 
 # --- In an abandoned station -------------------------------------------------------------------
 
+## A boarder that finds itself in a station just goes for the crew there with its claws.
 func _think_outside(delta: float, ship: Mothership) -> void:
 	_attack_cd = maxf(0.0, _attack_cd - delta)
 	_repath -= delta
 	attacking = false
 	var victim := _station_target(delta, ship)
 	if victim == null:
-		_idle(delta)
-		_separate(delta, ship)
+		if not _investigate(delta, ship):
+			_idle(delta)
+		_separate(delta)
 		return
 	var to := victim.position - position
 	to.y = 0.0
-	var dist := to.length()
-	if _retreat_t > 0.0:
-		# Hit and run: scuttle off (and up a wall, see _crawl) before the next pounce.
-		_retreat_t -= delta
-		_back_off(delta, ship, _retreat_dir)
-		_face(_retreat_dir)
-		_separate(delta, ship)
-		return
-	if kind == "needler":
-		var sees := _sees(ship, victim)
-		if sees and dist < stat("reach"):
-			_face(to)
-			if _attack_cd <= 0.0:
-				_attack_cd = stat("cooldown") * randf_range(0.85, 1.15)
-				_fire_needle(ship, victim)
-			attacking = _attack_cd > stat("cooldown") - 0.35
-			if dist < NEEDLE_NEAR:
-				_back_off(delta, ship, -to.normalized())
-			elif dist > NEEDLE_FAR:
-				_chase(delta, ship, victim)
-		else:
-			_chase(delta, ship, victim)
-	elif dist < stat("reach"):
+	if to.length() < stat("reach"):
 		attacking = true
 		_face(to)
 		if _attack_cd <= 0.0:
 			_attack_cd = stat("cooldown")
-			victim.hurt(stat("damage") * dmg_mult)
-			Game.mission.fx_event.rpc("claw", ship.to_global(victim.position + Vector3(0, 1.0, 0)), 0)
-			if kind == "skitter":
-				_retreat_t = randf_range(RETREAT_TIME.x, RETREAT_TIME.y)
-				_retreat_dir = Basis(Vector3.UP, randf_range(-1.1, 1.1)) * -to.normalized()
-				_climb_t = 0.0
+			_claw(ship, victim)
 	else:
 		_chase(delta, ship, victim)
-	_separate(delta, ship)
+	_separate(delta)
+
+
+## A claw at a crew member.
+func _claw(ship: Mothership, victim: CrewMember, damage := -1.0) -> void:
+	victim.hurt((stat("damage") if damage < 0.0 else damage) * dmg_mult)
+	Game.mission.fx_event.rpc("claw", ship.to_global(victim.position + Vector3(0, 1.0, 0)), 0)
 
 
 ## The crew member this alien is after: once noticed, it keeps chasing until the target gets away,
 ## but now and then it looks again and switches to someone better placed (see RETARGET_TIME).
-func _station_target(delta: float, ship: Mothership) -> CrewMember:
+## `notice` and `chase` override NOTICE_RANGE and CHASE_RANGE.
+func _station_target(delta: float, ship: Mothership, notice := NOTICE_RANGE, chase := CHASE_RANGE) -> CrewMember:
 	_provoke_t = maxf(0.0, _provoke_t - delta)
 	var current := _outside_crew(ship, _target_id)
 	if current:
 		var d := current.position.distance_to(position)
-		if d > CHASE_RANGE or not _sees(ship, current):
+		if d > chase or not _sees(ship, current):
 			_lost_t += delta
 		else:
 			_lost_t = 0.0
-		if _lost_t >= FORGET_TIME or d >= CHASE_RANGE * 1.5:
+		if _lost_t >= FORGET_TIME or d >= chase * 1.5:
 			current = null
 	if current == null:
 		_target_id = 0
@@ -418,7 +384,7 @@ func _station_target(delta: float, ship: Mothership) -> CrewMember:
 			continue
 		var d := p.position.distance_to(position)
 		var provoker := _provoke_t > 0.0 and p.get_instance_id() == _provoker
-		if d >= (CHASE_RANGE if provoker else NOTICE_RANGE) or not (d < HEAR_RANGE or _sees(ship, p)):
+		if d >= (chase if provoker else notice) or not (_sees(ship, p) or _hears(ship, p.position, HEAR_RANGE)):
 			continue
 		var score := _target_score(p, false)
 		if score < best_score:
@@ -431,13 +397,19 @@ func _station_target(delta: float, ship: Mothership) -> CrewMember:
 	_lost_t = 0.0
 	_repath = 0.0
 	if fresh:
-		# Its pack mates join in (and soon pick a target of their own among the crew).
-		for c in get_parent().get_children():
-			var mate := c as Boarder
-			if mate and mate != self and mate.outside and mate._target_id == 0 and mate.position.distance_to(position) < 7.0:
-				mate._target_id = _target_id
-				mate._retarget_t = randf_range(0.1, 0.4)
+		_alert_pack()
 	return best
+
+
+## A pack mate noticed someone: the others of the same kind within earshot join in (and soon pick
+## a target of their own among the crew).
+func _alert_pack() -> void:
+	var ship := _ship()
+	for c in get_parent().get_children():
+		var mate := c as Boarder
+		if mate and mate != self and mate.outside and mate.kind == kind and mate._target_id == 0 and mate._hears(ship, position, 7.0):
+			mate._target_id = _target_id
+			mate._retarget_t = randf_range(0.1, 0.4)
 
 
 ## A conscious crew member (player or bot) out in the station, by instance id, or null.
@@ -466,48 +438,119 @@ func _target_score(p: CrewMember, is_current: bool) -> float:
 	return score
 
 
-## Line of sight from this alien's eyes to a crew member's chest (station walls and the ship block
-## it).
+## Line of sight from this alien's eyes to a crew member's chest (station walls and doors and the
+## ship block it).
 func _sees(ship: Mothership, p: CrewMember) -> bool:
-	var up := ship.global_basis.y
-	var from := ship.to_global(position) + up * (stat("height") * 0.8)
-	var to := ship.to_global(p.position) + up * 1.2
+	return _clear_from(ship, center_global() + ship.global_basis.y * (stat("height") * 0.3), ship.to_global(p.position) + ship.global_basis.y * 1.2)
+
+
+func _clear_from(ship: Mothership, from: Vector3, to: Vector3) -> bool:
 	var q := PhysicsRayQueryParameters3D.create(from, to, Game.LAYER_STATION | Game.LAYER_INTERIOR | Game.LAYER_HULL)
 	return get_world_3d().direct_space_state.intersect_ray(q).is_empty()
 
 
-func _chase(delta: float, ship: Mothership, victim: CrewMember) -> void:
-	var graph: AStar3D = ship.derelict_nav if ship.derelict_nav else ship.nav
+## Whether it hears something at ship-local `p` within `reach`: sound goes round by the station's
+## open ways (walls and shut doors stop it), so the way there may be at most half as long again.
+func _hears(ship: Mothership, p: Vector3, reach: float) -> bool:
+	if p.distance_to(position) >= reach:
+		return false
+	var graph := _graph(ship)
+	var from := _nav_point(ship, graph, position)
+	var to := _nav_point(ship, graph, p)
+	if from < 0 or to < 0:
+		return false
+	if from == to:
+		return true
+	var way := graph.get_point_path(from, to)
+	if way.is_empty():
+		return false
+	var length := 0.0
+	for i in range(1, way.size()):
+		length += way[i - 1].distance_to(way[i])
+	return length < reach * 1.5 + OutpostLayout.CELL
+
+
+## The graph the aliens in a station walk on.
+func _graph(ship: Mothership) -> AStar3D:
+	return ship.derelict_nav if ship.derelict_nav else ship.nav
+
+
+## The waypoint for ship-local point p: in a station the one of the cell it is in (when that cell
+## has one; not under furniture), else the closest one in sight.
+func _nav_point(ship: Mothership, graph: AStar3D, p: Vector3) -> int:
+	if outside and graph == ship.derelict_nav:
+		var c := OutpostLayout.cell_at(p + Vector3(0, StationBuilder.LAND_HEIGHT, 0))
+		if OutpostLayout.inside(c) and graph.has_point(DerelictBuilder.NAV_CELL + OutpostLayout.idx(c)):
+			return DerelictBuilder.NAV_CELL + OutpostLayout.idx(c)
+	return ship.nav_closest(graph, p)
+
+
+## The plan of the station the ship is landed at ({} when none).
+func _station_layout(ship: Mothership) -> Dictionary:
+	if ship.derelict_k != _layout_k:
+		_layout_k = ship.derelict_k
+		_layout = {}
+		if _layout_k >= 0 and Game.mission:
+			_layout = (Game.mission.cave as CaveGen).derelict(_layout_k).get("layout", {})
+	return _layout
+
+
+## Server, in a station: undo a move through a wall or a shut door (the step from `before` to where
+## its thinking put it, see DerelictBuilder.step_clear()) and keep its body off the walls (WALL_GAP).
+## A move blocked for BLOCKED_TIME makes it think again: a new path, somewhere else to wander.
+func _keep_inside(delta: float, ship: Mothership, before: Vector3) -> void:
+	var layout := _station_layout(ship)
+	if layout.is_empty() or stat("speed") <= 0.0:
+		return
+	var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	var doors: PackedByteArray = ship.outpost_doors
+	if not DerelictBuilder.step_clear(layout, doors, before + lift, position + lift):
+		position = Vector3(before.x, position.y, before.z)
+		_blocked_t += delta
+		if _blocked_t > BLOCKED_TIME:
+			_blocked_t = 0.0
+			_repath = 0.0
+			_wander_t = 0.0
+			_path = PackedVector3Array()
+			_path_i = 0
+	else:
+		_blocked_t = maxf(0.0, _blocked_t - delta * 0.5)
+	var kept := DerelictBuilder.keep_off_walls(layout, doors, position + lift, minf(stat("radius"), 0.5) + WALL_GAP)
+	position.x = kept.x
+	position.z = kept.z
+
+
+func _chase(delta: float, ship: Mothership, victim: CrewMember, speed := -1.0) -> void:
 	if _repath <= 0.0 or _goal.distance_to(victim.position) > 1.5:
-		_set_goal(ship, graph, victim.position)
-	_follow_path(delta)
+		_set_goal(ship, _graph(ship), victim.position)
+	_follow_path(delta, speed)
 
 
-func _fire_needle(ship: Mothership, victim: CrewMember) -> void:
-	var up := ship.global_basis.y
-	var muzzle := ship.to_global(position + Basis(Vector3.UP, rotation.y) * Vector3(0.22, 1.75, -0.95))
-	var target := ship.to_global(victim.position) + up * 1.15
-	var dir := (target - muzzle).normalized()
-	dir = (dir + Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)) * NEEDLE_SPREAD).normalized()
-	Game.mission.projectiles.fire("needle", muzzle, dir * NEEDLE_SPEED, stat("damage") * dmg_mult)
-	Game.mission.fx_event.rpc("needle", muzzle, 0)
-
-
-## Step away from a crew member who came too close (unless a wall is in the way).
-func _back_off(delta: float, ship: Mothership, away: Vector3) -> void:
-	var step := away * stat("speed") * 0.8 * delta
+## Step away from a point (unless a wall is in the way).
+func _back_off(delta: float, ship: Mothership, away: Vector3, speed := -1.0) -> void:
+	var step := away * (stat("speed") if speed < 0.0 else speed) * 0.8 * delta
 	var from := ship.to_global(position + Vector3(0, 0.6, 0))
 	var q := PhysicsRayQueryParameters3D.create(from, from + ship.global_basis * (away * 1.2), Game.LAYER_STATION | Game.LAYER_INTERIOR | Game.LAYER_HULL)
 	if get_world_3d().direct_space_state.intersect_ray(q).is_empty():
 		position += step
 
 
-## Nobody around: shuffle about near the spot it guards.
-func _idle(delta: float) -> void:
+## Nobody around: shuffle about near the spot it guards, walking back there along the waypoints
+## first if it has strayed (a chase, a noise). Where there's no way back it makes its home where it is.
+func _idle(delta: float, roam := 2.0) -> void:
+	if outside and Vector2(position.x - home.x, position.z - home.z).length() > roam + 2.0:
+		if _repath <= 0.0 or _path_i >= _path.size():
+			var ship := _ship()
+			_set_goal(ship, _graph(ship), home)
+			_repath = 3.0
+			if _path.is_empty():
+				home = position
+		_follow_path(delta, stat("speed") * 0.6)
+		return
 	_wander_t -= delta
 	if _wander_t <= 0.0:
 		_wander_t = randf_range(2.5, 6.0)
-		_wander = home + Vector3(randf_range(-2.0, 2.0), 0.0, randf_range(-2.0, 2.0))
+		_wander = home + Vector3(randf_range(-roam, roam), 0.0, randf_range(-roam, roam))
 	var to := _wander - position
 	to.y = 0.0
 	if to.length() > 0.3:
@@ -516,11 +559,11 @@ func _idle(delta: float) -> void:
 
 
 ## Keep a little room between aliens so a pack doesn't merge into one.
-func _separate(delta: float, _ship: Mothership) -> void:
+func _separate(delta: float) -> void:
 	var push := Vector3.ZERO
 	for c in get_parent().get_children():
 		var mate := c as Boarder
-		if mate == null or mate == self:
+		if mate == null or mate == self or mate.stat("speed") <= 0.0:
 			continue
 		var d := position - mate.position
 		d.y = 0.0
@@ -531,115 +574,7 @@ func _separate(delta: float, _ship: Mothership) -> void:
 		position += push.limit_length(1.0) * 4.0 * delta
 
 
-# --- Skitters on the walls and ceilings ---------------------------------------------------------
-
-## Put the skitter on the surface it is crawling on: the floor, a wall beside its floor track or the
-## ceiling above it, turned to stand on that surface and face along its heading. It leaps between
-## surfaces, drops to the floor near doorways and corridors, and pounces when its prey is close.
-func _crawl(delta: float, ship: Mothership) -> void:
-	_probe_t -= delta
-	var heading := Basis(Vector3.UP, _heading) * Vector3.FORWARD
-	if _probe_t <= 0.0:
-		_probe_t = 0.1
-		_ceil_h = _ceiling_above(ship, _ground)
-		var ahead := _ground + heading * CLIMB_LOOKAHEAD * 0.6
-		if _path_i < _path.size():
-			ahead = _ground + (_path[_path_i] - _ground).limit_length(CLIMB_LOOKAHEAD)
-		_ceil_ahead = _ceiling_above(ship, ahead)
-		if _climb == 1:
-			_probe_wall(ship)
-	var prey: CrewMember = null
-	if _target_id != 0:
-		prey = instance_from_id(_target_id) as CrewMember
-	var retreating := _retreat_t > 0.0
-	var pounce := not retreating and prey != null and is_instance_valid(prey) \
-			and Vector2(prey.position.x - _ground.x, prey.position.z - _ground.z).length() < POUNCE_RANGE
-	var roomy := _ceil_h > CLIMB_CEILING and _ceil_ahead > CLIMB_CEILING
-	_climb_t -= delta
-	if pounce or not roomy:
-		_climb = 0
-	elif _climb_t <= 0.0:
-		_climb_t = randf_range(1.2, 3.0) if prey else randf_range(3.0, 7.0)
-		var r := randf()
-		_climb = 0 if r < (0.0 if retreating else (0.1 if prey else 0.25)) else (1 if r < 0.6 else 2)
-		if _climb == 1:
-			_climb_h = randf_range(CLIMB_MIN, CLIMB_MAX)
-			_wall_dir = heading.cross(Vector3.UP) * (1.0 if randf() < 0.5 else -1.0)
-			_probe_wall(ship)
-	var target := _ground
-	var up := Vector3.UP
-	if _climb == 1:
-		if _wall_n == Vector3.ZERO:
-			_climb = 2
-		else:
-			# The point on the wall's plane level with the floor track, at the climbing height.
-			var p := _ground + Vector3(0, _climb_h, 0)
-			target = p - _wall_n * _wall_n.dot(p - _wall_p) + _wall_n * 0.04
-			up = _wall_n
-	if _climb == 2:
-		target = _ground + Vector3(0, _ceil_h - 0.04, 0)
-		up = Vector3.DOWN
-	_surf_pos = _surf_pos.move_toward(target, stat("speed") * 2.4 * delta)
-	if _surf_up.dot(up) < -0.9:
-		# Turning right over (floor to ceiling): roll through the side first.
-		_surf_up = (_surf_up + heading.cross(Vector3.UP) * 0.4).normalized()
-	_surf_up = _surf_up.lerp(up, NetUtil.smooth(12.0, delta)).normalized()
-	position = _surf_pos
-	var fwd := heading - _surf_up * heading.dot(_surf_up)
-	if fwd.length_squared() < 0.0001:
-		fwd = Vector3.UP.cross(_surf_up).cross(_surf_up)
-	fwd = fwd.normalized()
-	var z := -fwd
-	basis = Basis(_surf_up.cross(z).normalized(), _surf_up, z)
-
-
-## Height of the ceiling above ship-local floor point p (0 when there is none within reach).
-func _ceiling_above(ship: Mothership, p: Vector3) -> float:
-	var from := ship.to_global(p + Vector3(0, 0.3, 0))
-	var q := PhysicsRayQueryParameters3D.create(from, from + ship.global_basis.y * 6.0, Game.LAYER_STATION)
-	var hit := get_world_3d().direct_space_state.intersect_ray(q)
-	return 0.0 if hit.is_empty() else ship.to_local(hit["position"]).y - p.y
-
-
-## Find the wall to cling to beside the floor track (in _wall_dir, or the other way): its point and
-## inward normal (ship-local), or a zero normal when there is none in reach. Where the wall has a
-## doorway at the climbing height, the skitter climbs above it.
-func _probe_wall(ship: Mothership) -> void:
-	_wall_n = Vector3.ZERO
-	var space := get_world_3d().direct_space_state
-	for dir: Vector3 in [_wall_dir, -_wall_dir]:
-		# Above the lintels the room's own wall is always there; lower down a ray can pass through
-		# a doorway and find a wall further off (in the corridor or the next room).
-		var top := _wall_hit(space, ship, dir, CLIMB_MAX)
-		if top.is_empty():
-			continue
-		var low := _wall_hit(space, ship, dir, _climb_h)
-		var use := top
-		if not low.is_empty() and float(low["dist"]) < float(top["dist"]) + 0.3:
-			use = low
-		else:
-			_climb_h = CLIMB_MAX
-		_wall_p = use["pos"]
-		_wall_n = use["normal"]
-		_wall_dir = dir
-		return
-
-
-## A wall `h` above the floor track in direction `dir` (ship-local): {pos, normal, dist}, or {}.
-func _wall_hit(space: PhysicsDirectSpaceState3D, ship: Mothership, dir: Vector3, h: float) -> Dictionary:
-	var from := ship.to_global(_ground + Vector3(0, h, 0))
-	var q := PhysicsRayQueryParameters3D.create(from, from + ship.global_basis * dir * WALL_REACH, Game.LAYER_STATION)
-	var hit := space.intersect_ray(q)
-	if hit.is_empty():
-		return {}
-	var n := ship.global_basis.inverse() * (hit["normal"] as Vector3)
-	if absf(n.y) > 0.3:
-		return {}
-	return {"pos": ship.to_local(hit["position"]), "normal": Vector3(n.x, 0, n.z).normalized(),
-		"dist": from.distance_to(hit["position"])}
-
-
-## Where the middle of the body is (global): skitters on a wall or ceiling hang off it.
+## Where the middle of the body is (global): aliens on a wall or ceiling hang off it.
 func center_global() -> Vector3:
 	return global_transform * Vector3(0, stat("height") * 0.5, 0)
 
@@ -649,9 +584,13 @@ func center_global() -> Vector3:
 func _set_goal(ship: Mothership, graph: AStar3D, goal: Vector3) -> void:
 	_repath = 0.6
 	_goal = goal
-	var from := ship.nav_closest(graph, position)
-	var to := ship.nav_closest(graph, goal)
-	_path = graph.get_point_path(from, to)
+	var from := _nav_point(ship, graph, position)
+	var to := _nav_point(ship, graph, goal)
+	_path = graph.get_point_path(from, to) if from >= 0 and to >= 0 else PackedVector3Array()
+	_path_i = 0
+	if _path.is_empty():
+		# Out of reach (behind a shut door): stay put rather than walk through the walls.
+		return
 	_path.append(goal)
 	_path_i = 0
 	# Skip waypoints behind us.
@@ -659,21 +598,23 @@ func _set_goal(ship: Mothership, graph: AStar3D, goal: Vector3) -> void:
 		_path_i = 1
 
 
-func _follow_path(delta: float) -> void:
+## Walk the path (at `speed`, or the kind's own); true once at its end.
+func _follow_path(delta: float, speed := -1.0) -> bool:
 	if _path_i >= _path.size():
-		return
+		return true
 	var wp := _path[_path_i]
 	var to := wp - position
 	to.y = 0.0
 	if to.length() < 0.35:
 		_path_i += 1
-		return
-	var step := minf(stat("speed") * delta, to.length())
+		return _path_i >= _path.size()
+	var step := minf((stat("speed") if speed < 0.0 else speed) * delta, to.length())
 	position += to.normalized() * step
 	if outside:
 		# Follow the floor (the pier, the station and their small steps).
 		position.y = move_toward(position.y, wp.y, 3.0 * delta)
 	_face(to)
+	return false
 
 
 func _face(dir: Vector3) -> void:
@@ -681,24 +622,51 @@ func _face(dir: Vector3) -> void:
 		rotation.y = atan2(-dir.x, -dir.z)
 
 
+## Server: a noise at ship-local `pos` (Mothership.alert_outpost): it goes to have a look, along the
+## waypoints (while there's no way there yet, a shut door, it tries again now and then).
+func hear(pos: Vector3) -> void:
+	if _target_id == 0:
+		_heard = pos
+		_heard_t = HEARD_TIME
+		_repath = 0.0
+
+
+## On its way to look at a noise it heard (false when there's none): once there it stays about.
+func _investigate(delta: float, ship: Mothership) -> bool:
+	if _heard_t <= 0.0:
+		return false
+	_heard_t -= delta
+	if _repath <= 0.0:
+		_set_goal(ship, _graph(ship), _heard)
+		_repath = 2.0
+	if position.distance_to(_heard) < 2.0 or (not _path.is_empty() and _follow_path(delta, stat("speed") * 0.7)):
+		_heard_t = 0.0
+		home = position
+		_wander_t = 0.0
+	return true
+
+
 ## Server: damage from the crew. `info["by"]` is the shooter's peer id (crew bots included) when known.
 func take_damage(amount: float, info: Dictionary) -> void:
 	if not multiplayer.is_server() or hp <= 0.0:
 		return
 	hp -= amount
+	var shooter: CrewMember = null
 	if outside:
 		var ship := _ship()
-		var shooter := ship.crew_root.get_node_or_null(str(info.get("by", 0))) as CrewMember
-		if shooter and shooter.alive and not ship.is_aboard(shooter.position):
+		shooter = ship.crew_root.get_node_or_null(str(info.get("by", 0))) as CrewMember
+		if shooter and (not shooter.alive or ship.is_aboard(shooter.position)):
+			shooter = null
+		if shooter:
 			# Shot at: the shooter becomes the prime suspect for a while.
 			_provoker = shooter.get_instance_id()
 			_provoke_t = PROVOKE_TIME
 			_retarget_t = 0.0
-		if _target_id == 0:
+		if _target_id == 0 and stat("speed") > 0.0:
 			# Go and find the shooter (or whoever is closest if it doesn't know who).
 			_wander_t = 0.0
-			if _provoke_t > 0.0 and _outside_crew(ship, _provoker):
-				_target_id = _provoker
+			if shooter:
+				_target_id = shooter.get_instance_id()
 			else:
 				var best_d := CHASE_RANGE
 				for c in ship.crew_root.get_children():
@@ -707,9 +675,19 @@ func take_damage(amount: float, info: Dictionary) -> void:
 						best_d = p.position.distance_to(position)
 						_target_id = p.get_instance_id()
 	if hp <= 0.0:
-		var mission := Game.mission as MissionLevel
-		if mission:
-			mission.kills += 1
-			var size := 0.45 if kind == "skitter" else (1.1 if kind == "needler" else 1.0)
-			mission.fx_event.rpc("boarder_die", center_global(), size)
-		queue_free()
+		_die()
+		return
+	_hurt(amount, shooter)
+
+
+## A hit that didn't kill it (subclasses react).
+func _hurt(_amount: float, _shooter: CrewMember) -> void:
+	pass
+
+
+func _die() -> void:
+	var mission := Game.mission as MissionLevel
+	if mission:
+		mission.kills += 1
+		mission.fx_event.rpc("boarder_die", center_global(), clampf(stat("radius") * 1.7, 0.4, 1.6))
+	queue_free()

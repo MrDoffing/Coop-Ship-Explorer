@@ -4,7 +4,8 @@ extends RefCounted
 ## the dive's credits (salvage is free), carries the crates aboard and fits them: guns at a gun
 ## console, everything else at the install hub. Hand weapons for the crew ("crew:<id>", see
 ## CrewWeapons) are not installed: look at the crate and press F to swap weapons. Everything only
-## lasts for the current dive.
+## lasts for the current dive. Credit boxes ("credits:<amount>", only found in abandoned stations)
+## aren't fitted either: carried aboard the ship and put down, they pay into the dive's credits.
 ##
 ## Every shop stocks SHOP_SIZE items: a hull repair kit, a gun when it is given any (none while
 ## the gun pods carry their own heavy machine guns) and random upgrades and hand weapons. Auto
@@ -20,14 +21,17 @@ const PRICE_STEP := 0.25
 const SELL_SHARE := 0.25
 ## How much more likely an auto turret is than another upgrade while a turret slot is free.
 const TURRET_WEIGHT := 3.0
-## How likely each hand weapon is compared with an upgrade (shops and salvage).
-const CREW_WEAPON_WEIGHT := 1.0
+## How likely each hand weapon is compared with an upgrade (shops and salvage). With eight of them
+## (all but the Pistol) a little over a fifth of a shop's random picks is a hand weapon, as when
+## there were five at 1.0.
+const CREW_WEAPON_WEIGHT := 0.7
 
 const SHIP_COLOR := Color(0.35, 0.8, 1.0)
 const SCOUT_COLOR := Color(0.75, 0.55, 1.0)
 const CREW_COLOR := Color(0.5, 1.0, 0.45)
 const WEAPON_COLOR := Color(1.0, 0.3, 0.25)
 const CREW_WEAPON_COLOR := Color(1.0, 0.45, 0.85)
+const CREDITS_COLOR := Color(1.0, 0.74, 0.28)
 
 ## Item id -> name, description, base price and crate colour. Guns use ids "weapon:<id>" (Game.GUNS).
 const ITEMS := {
@@ -50,7 +54,7 @@ const ITEMS := {
 	"scout_guns": {"name": "Scout Blasters", "desc": "+25% scout weapon damage", "price": 90, "color": SCOUT_COLOR},
 	"scout_cargo": {"name": "Scout Cargo Pods", "desc": "+20 scout fuel cargo", "price": 60, "color": SCOUT_COLOR},
 	"scout_thrusters": {"name": "Scout Thrusters", "desc": "+12% scout speed", "price": 70, "color": SCOUT_COLOR},
-	"blaster_mod": {"name": "Blaster Overcharge", "desc": "+25% damage for every crew hand weapon", "price": 70, "color": CREW_COLOR},
+	"blaster_mod": {"name": "Gunsmith Kit", "desc": "+25% damage for every crew hand weapon", "price": 70, "color": CREW_COLOR},
 	"power_tools": {"name": "Power Tools", "desc": "+30% repair speed", "price": 70, "color": CREW_COLOR},
 	"crew_armor": {"name": "Crew Armor", "desc": "+20 crew health", "price": 60, "color": CREW_COLOR},
 }
@@ -84,11 +88,27 @@ static func crew_weapon_item(id: String) -> String:
 	return "crew:" + id
 
 
+## A box of credits ("credits:<amount>").
+static func is_credits(item: String) -> bool:
+	return item.begins_with("credits:")
+
+
+## What a credit box is worth (0 for anything else).
+static func credits_of(item: String) -> int:
+	return int(item.substr(8)) if is_credits(item) else 0
+
+
+static func credits_item(amount: int) -> String:
+	return "credits:%d" % amount
+
+
 static func display_name(item: String) -> String:
 	if is_weapon(item):
 		return str(Game.GUNS.get(weapon_of(item), {}).get("name", "Gun"))
 	if is_crew_weapon(item):
 		return CrewWeapons.display_name(crew_weapon_of(item))
+	if is_credits(item):
+		return "Credit Box"
 	return str(ITEMS.get(item, {}).get("name", item))
 
 
@@ -97,6 +117,8 @@ static func describe(item: String) -> String:
 		return "%s - mount it at a gun console" % str(Game.GUNS.get(weapon_of(item), {}).get("short", "Gun"))
 	if is_crew_weapon(item):
 		return "Hand weapon: %s" % str(CrewWeapons.def(crew_weapon_of(item))["short"]).to_lower()
+	if is_credits(item):
+		return "Worth %d CR" % credits_of(item)
 	return str(ITEMS.get(item, {}).get("desc", ""))
 
 
@@ -105,6 +127,8 @@ static func color(item: String) -> Color:
 		return WEAPON_COLOR
 	if is_crew_weapon(item):
 		return CREW_WEAPON_COLOR
+	if is_credits(item):
+		return CREDITS_COLOR
 	return ITEMS.get(item, {}).get("color", Color.WHITE)
 
 
@@ -114,11 +138,15 @@ static func install_hint(item: String, hub_room := "engine room") -> String:
 		return "mount it at a GUN console"
 	if is_crew_weapon(item):
 		return "put it down and press F to equip it"
+	if is_credits(item):
+		return "carry it aboard the ship and put it down to deposit it"
 	return "fit it at the INSTALL HUB in the %s" % hub_room
 
 
 ## Shop price of an item at waystation k (k = 0 is the first one).
 static func price(item: String, k: int) -> int:
+	if is_credits(item):
+		return credits_of(item)
 	var base := 100
 	if is_weapon(item):
 		base = int(WEAPON_PRICES.get(weapon_of(item), 150))
@@ -131,6 +159,8 @@ static func price(item: String, k: int) -> int:
 
 ## What the buyback counter at waystation k pays for an item.
 static func sell_price(item: String, k: int) -> int:
+	if is_credits(item):
+		return credits_of(item)
 	return maxi(1, int(round(price(item, k) * SELL_SHARE)))
 
 
