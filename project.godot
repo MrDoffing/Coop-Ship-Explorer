@@ -51,3 +51,4 @@ common/physics_interpolation=true
 rendering_device/driver.windows="d3d12"
 lights_and_shadows/positional_shadow/atlas_16_bits=false
 anti_aliasing/quality/msaa_3d=2
+occlusion_culling/use_occlusion_culling=true

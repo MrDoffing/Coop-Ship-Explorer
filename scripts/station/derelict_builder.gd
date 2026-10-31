@@ -37,15 +37,21 @@ const CHAMFER_BOTTOM := 0.35
 const FRAME_T := 0.2
 const FRAME_D := 0.36
 const LAMP_EVERY := 2
+## The trench down the middle of a corridor's floor, grated over.
+const TRENCH_W := 1.3
 ## Lamps: warm working light, the red emergency lamps, and how far they reach.
-const LAMP_COLOR := Color(1.0, 0.64, 0.3)
-const EMERGENCY_COLOR := Color(1.0, 0.16, 0.08)
+const LAMP_COLOR := Color(1.0, 0.79, 0.52)
+const EMERGENCY_COLOR := Color(1.0, 0.27, 0.1)
+## What the emergency lamps throw: more orange than their red glass, so the dark keeps some colour.
+const EMERGENCY_LIGHT := Color(1.0, 0.4, 0.17)
 ## Doors: a sealed door's slab slides up into the wall over the doorway; a lockdown shutter drops
 ## in front of it on the corridor side (SHUTTER_OUT from the wall's middle).
 const SLAB_T := 0.18
 const SHUTTER_OUT := 0.42
 ## Waypoint ids (see build_nav): cells, doorways and the pier.
 const NAV_CELL := 200000
+## The station's merged surfaces are committed in cubes this big (m), each culled on its own.
+const CHUNK := 9.0
 const NAV_DOOR := 100000
 const NAV_PIER := 300000
 
@@ -156,10 +162,35 @@ static func build(parent: Node3D, d: Dictionary) -> Derelict:
 	root.layout = d["layout"]
 	root.transform = d["xform"]
 	parent.add_child(root)
+	var b := Models.Batch.new()
+	var shell := Models.Batch.new()
+	# (In cubes: what is out of view or out of a flashlight's reach is culled.)
+	b.cell = CHUNK
+	shell.cell = CHUNK
+	var strips := Models.Batch.new()
+	var out := build_parts(root, b, strips, d, shell)
+	root.add_child(_occluder(_occluders))
+	_occluders.clear()
+	for mi in b.commit(root, "Derelict"):
+		# (Station surfaces take the decals the cave's rock does: grime here, mining burns.)
+		mi.layers |= Game.VIS_ROCK
+	for mi in shell.commit(root, "Shell"):
+		mi.layers |= Game.VIS_ROCK | Game.VIS_SHELL
+	var powered := int((d["layout"] as Dictionary)["generator"]) >= 0
+	root.add_strips(strips.commit(root, "Strips", false), Derelict.EMERGENCY if powered else Derelict.ALWAYS)
+	root.setup(out)
+	return root
+
+
+## Everything of the station built under `root`, its batched surfaces into `b` (its walls, floors
+## and ceilings into `shell`, when given) and its emergency strips into `strips` (not committed yet);
+## returns what Derelict.setup() needs.
+static func build_parts(root: Derelict, b: Models.Batch, strips: Models.Batch, d: Dictionary, shell: Models.Batch = null) -> Dictionary:
+	_occluders.clear()
+	_shell = shell if shell else b
 	var rng := RandomNumberGenerator.new()
 	rng.seed = int(d["seed"])
 	var m := _materials()
-	var b := Models.Batch.new()
 	var body := StaticBody3D.new()
 	body.collision_layer = Game.LAYER_CAVE | Game.LAYER_STATION
 	body.collision_mask = 0
@@ -169,16 +200,24 @@ static func build(parent: Node3D, d: Dictionary) -> Derelict:
 	_build_pier(root, b, m)
 	var layout: Dictionary = d["layout"]
 	var powered := int(layout["generator"]) >= 0
-	_build_shell(b, body, layout, m)
-	_build_halls(root, b, layout, m, rng, powered)
+	_build_shell(_shell, body, layout, m)
+	# Corridor cells with a keypad on their wall keep that wall clear of struts and fittings, and
+	# nothing built from here on may stand in front of a keypad, between it and the close look at it
+	# (HackPanel.clear_box), so its wiring is never hidden.
+	var clear := {}
+	for dd: Dictionary in layout["doors"]:
+		if str(dd["kind"]) == "hack":
+			var spot := _keypad_spot(layout, dd)
+			clear[OutpostLayout.cell_at(spot.origin)] = true
+			b.keep_clear(spot, HackPanel.clear_box())
+	_build_halls(root, b, layout, m, rng, powered, strips, clear)
 	var out := {"tanks": [], "subjects": [], "screens": [], "generator": {}}
 	var rooms: Array = layout["rooms"]
 	for ri in rooms.size():
 		_build_room(root, b, body, layout, ri, m, rng, powered, out)
 	_build_doors(root, b, layout, m, rng)
-	b.commit(root, "Derelict")
-	root.setup(out)
-	return root
+	_shell = null
+	return out
 
 
 static func _materials() -> Dictionary:
@@ -188,29 +227,88 @@ static func _materials() -> Dictionary:
 		"floor": surface_mat("outpost_floor", Color(1, 1, 1), 0.5, false),
 		"grate": surface_mat("outpost_grate", Color(1, 1, 1), 1.0, false),
 		"ceiling": surface_mat("outpost_wall", Color(0.5, 0.5, 0.5), 0.5, false),
-		"steel": Models.mat(Color(0.3, 0.31, 0.31), 0.75, 0.45),
-		"gunmetal": Models.mat(Color(0.14, 0.15, 0.16), 0.8, 0.4),
-		"olive": Models.mat(Color(0.3, 0.32, 0.2), 0.3, 0.68),
-		"bronze": Models.mat(Color(0.55, 0.38, 0.19), 0.85, 0.38),
-		"dark": Models.mat(Color(0.08, 0.08, 0.085), 0.5, 0.7),
-		"mid": Models.mat(Color(0.27, 0.27, 0.26), 0.6, 0.55),
-		"rust": Models.mat(Color(0.34, 0.2, 0.12), 0.3, 0.85),
-		"yellow": Models.mat(Color(0.72, 0.56, 0.12), 0.3, 0.7),
-		"red_paint": Models.mat(Color(0.5, 0.1, 0.07), 0.3, 0.65),
+		# Worn paint and bare metal (tools/blender/outpost.py), tinted: every fitting and piece of
+		# furniture gets chips, scratches and grime, none is a flat colour.
+		"steel": surface_mat("outpost_bare", Color(0.6, 0.6, 0.58), 1.0, false),
+		"gunmetal": surface_mat("outpost_bare", Color(0.3, 0.31, 0.32), 1.0, false),
+		"olive": surface_mat("outpost_paint", Color(0.4, 0.46, 0.26), 1.0, false),
+		"olive_dark": surface_mat("outpost_paint", Color(0.27, 0.31, 0.18), 1.0, false),
+		"bronze": surface_mat("outpost_bare", Color(0.66, 0.51, 0.3), 1.0, false),
+		"dark": surface_mat("outpost_bare", Color(0.14, 0.14, 0.14), 1.0, false),
+		"mid": surface_mat("outpost_paint", Color(0.44, 0.44, 0.41), 1.0, false),
+		"rust": surface_mat("outpost_paint", Color(0.56, 0.33, 0.19), 1.0, false),
+		"yellow": surface_mat("outpost_paint", Color(0.9, 0.68, 0.2), 1.0, false),
+		"hazard": surface_mat("outpost_hazard", Color(0.8, 0.8, 0.8), 2.0, false),
+		"red_paint": surface_mat("outpost_paint", Color(0.66, 0.14, 0.09), 1.0, false),
 		"black": Models.mat(Color(0.06, 0.06, 0.06), 0.4, 0.7),
-		"crate": Models.panel_mat(Color(0.3, 0.33, 0.22), 0.2, 0.8, 1.0),
-		"white": Models.mat(Color(0.62, 0.62, 0.58), 0.15, 0.55),
+		"crate": surface_mat("outpost_paint", Color(0.35, 0.4, 0.23), 1.0, false),
+		"white": surface_mat("outpost_paint", Color(0.88, 0.87, 0.8), 1.0, false),
 		"cloth": Models.mat(Color(0.33, 0.34, 0.3), 0.0, 0.95),
 		"rubber": Models.mat(Color(0.05, 0.05, 0.05), 0.0, 0.8),
 		"stain": Models.mat(Color(0.08, 0.1, 0.06), 0.1, 0.35),
 		"glass": Models.glass(Color(0.55, 0.7, 0.68, 0.22)),
-		"liquid": Models.emissive(Color(0.3, 0.95, 0.4), 1.1, Color(0.06, 0.2, 0.08)),
+		"liquid": Models.emissive(Color(0.35, 0.5, 0.18), 0.22, Color(0.1, 0.13, 0.05)),
 		"dead_glass": Models.mat(Color(0.05, 0.07, 0.09), 0.6, 0.15),
-		"amber": Models.emissive(Color(1.0, 0.55, 0.15), 2.5),
-		"red": Models.emissive(Color(1.0, 0.12, 0.06), 3.0),
-		"screen": Models.emissive(Color(0.25, 0.7, 0.55), 0.7, Color(0.02, 0.03, 0.03)),
-		"goo": Alien.organic(Color(0.16, 0.07, 0.18), Color(0.6, 1.0, 0.25), 1.2, 5.0),
+		"amber": Models.emissive(Color(1.0, 0.62, 0.25), 1.6),
+		"red": Models.emissive(Color(1.0, 0.15, 0.06), 2.0),
+		"screen": crt_mat(),
+		"goo": Alien.organic(Color(0.17, 0.13, 0.08), Color(0.16, 0.19, 0.04), 1.2, 4.0, 0.82),
 	}
+
+
+## Old monitors still running: dim amber phosphor behind curved dark glass, with scanlines, rows of
+## text that scroll now and then and a faint flicker. Mapped from the face's own plane (whatever way
+## the screen faces), so it works on the batched boxes.
+const CRT_SHADER := """
+shader_type spatial;
+render_mode specular_schlick_ggx;
+uniform vec3 phosphor : source_color = vec3(1.0, 0.62, 0.22);
+uniform float glow = 0.55;
+varying vec3 lp;
+varying vec3 ln;
+
+float hash(vec2 p) {
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+void vertex() {
+	lp = VERTEX;
+	ln = NORMAL;
+}
+
+void fragment() {
+	vec3 a = abs(ln);
+	vec2 q = a.z > a.x ? lp.xy : lp.zy;
+	if (a.y > a.x && a.y > a.z) q = lp.xz;
+	// Scanlines and text fade to their average where they would be finer than a few pixels.
+	float px = max(fwidth(q.y), fwidth(q.x));
+	float fine = 1.0 - smoothstep(0.002, 0.006, px);
+	float scan = mix(0.82, 0.65 + 0.35 * sin(q.y * 900.0), 1.0 - smoothstep(0.0012, 0.003, px));
+	// Text: rows 3.2 cm tall, characters 1.8 cm wide, some rows blank, line lengths at random.
+	float row = floor(q.y / 0.032 - TIME * 0.6 * step(0.8, hash(vec2(floor(TIME * 0.25), 3.0))));
+	vec2 ch = vec2(floor(q.x / 0.018), row);
+	float r = hash(vec2(row, 7.0));
+	float text = step(0.45, hash(ch)) * step(0.3, r) * step(fract(q.y / 0.032), 0.65) * step(fract(q.x / 0.018), 0.75);
+	text *= step(fract(q.x * 2.0 + r * 9.0), 0.75 + r * 0.25);
+	text = mix(0.22, text, fine);
+	float flick = 0.92 + 0.08 * sin(TIME * 47.0 + q.y * 3.0);
+	vec3 e = phosphor * (0.12 + text * 0.9) * scan * flick * glow;
+	ALBEDO = vec3(0.02, 0.025, 0.02);
+	EMISSION = e;
+	ROUGHNESS = 0.12;
+	SPECULAR = 0.6;
+}
+"""
+
+
+static func crt_mat() -> ShaderMaterial:
+	if not _surfaces.has("crt"):
+		var sh := Shader.new()
+		sh.code = CRT_SHADER
+		var mat := ShaderMaterial.new()
+		mat.shader = sh
+		_surfaces["crt"] = mat
+	return _surfaces["crt"]
 
 
 ## A tiling outpost surface (res://assets/textures/<texture>_*, made by tools/blender/outpost.py):
@@ -235,6 +333,11 @@ static func surface_mat(texture: String, tint: Color, scale: float, deck_seams: 
 	if deck_seams:
 		m.uv1_offset = Vector3(0, -StationBuilder.DECK_Y * scale, 0)
 	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+	if texture == "outpost_grate":
+		# The gaps between the bars are cut out.
+		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+		m.alpha_scissor_threshold = 0.5
+		m.alpha_antialiasing_mode = BaseMaterial3D.ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE
 	_surfaces[key] = m
 	return m
 
@@ -257,8 +360,41 @@ static func _solid(b: Models.Batch, body: StaticBody3D, pos: Vector3, size: Vect
 	_shape(body, pos, size)
 
 
+## A solid wall block from `lo` to `hi`; it also hides what is behind it (see _occluder()).
 static func _block(b: Models.Batch, body: StaticBody3D, lo: Vector3, hi: Vector3, material: Material) -> void:
-	_solid(b, body, (lo + hi) * 0.5, hi - lo, material)
+	_solid(_shell if _shell else b, body, (lo + hi) * 0.5, hi - lo, material)
+	_occluders.append(AABB(lo, hi - lo).grow(-0.05))
+
+
+## One occluder for the station's walls, front wall and ceilings (boxes, station-local, each a little
+## inside its own surface): the renderer skips whatever they hide from the camera, so from a room
+## only that room and what shows through its doorways is drawn.
+static func _occluder(boxes: Array[AABB]) -> OccluderInstance3D:
+	var verts := PackedVector3Array()
+	var idx := PackedInt32Array()
+	# The box's faces as corner indices (0..7: x, y, z bits), each wound outwards.
+	var faces := [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]]
+	for bx in boxes:
+		if bx.size.x <= 0.0 or bx.size.y <= 0.0 or bx.size.z <= 0.0:
+			continue
+		var base := verts.size()
+		for c in 8:
+			verts.append(bx.position + bx.size * Vector3(c & 1, (c >> 1) & 1, (c >> 2) & 1))
+		for f: Array in faces:
+			for k: int in [0, 1, 2, 0, 2, 3]:
+				idx.append(base + int(f[k]))
+	var occ := ArrayOccluder3D.new()
+	occ.set_arrays(verts, idx)
+	var oi := OccluderInstance3D.new()
+	oi.name = "Occluder"
+	oi.occluder = occ
+	return oi
+
+
+## The occluder boxes of the station being built (see _block()).
+static var _occluders: Array[AABB] = []
+## Where the station being built puts its walls, floors and ceilings (see build_parts()).
+static var _shell: Models.Batch
 
 
 static func _label(root: Node3D, text: String, pos: Vector3, size: int, pixel: float, color: Color, yaw := PI) -> Label3D:
@@ -297,8 +433,20 @@ static func _growth(root: Node3D, pos: Vector3, normal: Vector3, m: Dictionary, 
 		mi.material_override = m["goo"]
 		var off := side * rng.randf_range(-0.9, 0.9) + fwd * rng.randf_range(-0.9, 0.9)
 		var r := rng.randf_range(0.25, 0.6) * scale
-		mi.transform = Transform3D(Basis(side * r * 1.4, up * r * 0.5, fwd * r * 1.2), pos + off * scale)
+		# (Each lump sits a little out from the surface, so it never pokes out through the far side of
+		# a wall: the blob reaches 1.35 times its size.)
+		mi.transform = Transform3D(Basis(side * r * 1.4, up * r * 0.4, fwd * r * 1.2), pos + off * scale + up * r * 0.3)
 		root.add_child(mi)
+	_grime(root, "grime_c", pos, up, side, Vector2(3.2, 3.2) * scale, 0.85)
+
+
+## A grime decal (res://assets/decals) on the station's surfaces at `pos`, facing `normal`, `size`
+## across (width along `right`, height), `alpha` opaque.
+static func _grime(root: Node3D, tex: String, pos: Vector3, normal: Vector3, right: Vector3, size: Vector2, alpha: float) -> void:
+	var d := Marks.make(tex, Marks.on_surface(pos, normal, right), Vector3(size.x, 0.6, size.y), Game.VIS_ROCK, Color(1, 1, 1, alpha), "orm_matte")
+	d.distance_fade_begin = 40.0
+	d.distance_fade_length = 15.0
+	root.add_child(d)
 
 
 # --- Hangar ------------------------------------------------------------------------------------
@@ -377,8 +525,7 @@ static func _build_facade(root: Derelict, b: Models.Batch, body: StaticBody3D, d
 	# Door frame with hazard stripes, a jammed door panel and a blinking warning light.
 	for side: float in [-1.0, 1.0]:
 		b.box(Vector3(side * (dw + 0.25), deck + dh * 0.5, fz - 0.05), Vector3(0.5, dh, 0.12), m["black"])
-		for i in 4:
-			b.box(Vector3(side * (dw + 0.25), deck + 0.4 + i * 0.7, fz - 0.12), Vector3(0.52, 0.28, 0.02), m["yellow"], Vector3(0, 0, 35))
+		b.box(Vector3(side * (dw + 0.25), deck + dh * 0.5, fz - 0.12), Vector3(0.44, dh - 0.2, 0.02), m["hazard"])
 	b.box(Vector3(0, deck + dh + 0.25, fz - 0.05), Vector3(OutpostLayout.DOOR_W + 1.0, 0.5, 0.12), m["black"])
 	_solid(b, body, Vector3(-dw - 0.05, deck + dh * 0.5, z1 + 0.15), Vector3(0.9, dh, 0.2), m["mid"])
 	Models.sphere(root, Vector3(0, deck + dh + 0.75, fz - 0.15), 0.22, Models.blink(Color(1.0, 0.15, 0.05), 0.8, 0.0, 0.3))
@@ -571,9 +718,13 @@ static func _build_shell(b: Models.Batch, body: StaticBody3D, layout: Dictionary
 			var p1 := OutpostLayout.cell_pos(Vector2i(e, j))
 			var mid := (p0 + p1) * 0.5
 			var size := Vector3(p1.x - p0.x + cell, 0.3, cell)
-			var hall := k == OutpostLayout.HALL
-			_solid(b, body, Vector3(mid.x, deck - 0.15, mid.z), size, m["grate"] if hall else m["floor"])
+			# (A corridor's floor is only its collision here: _hall_floor draws its plates and trench.)
+			if k == OutpostLayout.HALL:
+				_shape(body, Vector3(mid.x, deck - 0.15, mid.z), size)
+			else:
+				_solid(b, body, Vector3(mid.x, deck - 0.15, mid.z), size, m["floor"])
 			_solid(b, body, Vector3(mid.x, deck + h + 0.15, mid.z), size, m["ceiling"])
+			_occluders.append(AABB(Vector3(mid.x, deck + h + 0.15, mid.z) - size * 0.5, size).grow(-0.05))
 			i = e + 1
 	# Walls along x (between rows j and j + 1) and along z (between columns i and i + 1).
 	for axis in 2:
@@ -653,11 +804,17 @@ static func _hall_opens(layout: Dictionary, c: Vector2i) -> int:
 	return bits
 
 
-## The corridors: straight runs get octagonal frames, chamfered corners, pipes and lamps; corners
-## and junctions a frame in the ceiling and a lamp.
-static func _build_halls(root: Derelict, b: Models.Batch, layout: Dictionary, m: Dictionary, rng: RandomNumberGenerator, powered: bool) -> void:
+## The corridors: straight runs get octagonal frames (and a lighter rib between them), chamfers,
+## stiffened walls, a pipe bundle and a cable tray, fittings here and there and hydraulic struts;
+## corners and junctions corner posts, a frame in the ceiling and a lamp. Every corridor's floor is
+## tread plate either side of a grated trench with pipes in it. Low on the chamfers run emergency
+## strips (`strips`, a batch the Derelict lights while the power is out).
+static func _build_halls(root: Derelict, b: Models.Batch, layout: Dictionary, m: Dictionary, rng: RandomNumberGenerator, powered: bool,
+		strips: Models.Batch, clear := {}) -> void:
 	var h := OutpostLayout.CORRIDOR_H
 	var w := OutpostLayout.CELL * 0.5 - OutpostLayout.WALL_T * 0.5
+	var cell := OutpostLayout.CELL
+	var strip_mat := Derelict.strip_material()
 	for c: Vector2i in OutpostLayout.corridor_cells(layout):
 		var bits := _hall_opens(layout, c)
 		var p := OutpostLayout.cell_pos(c)
@@ -665,41 +822,73 @@ static func _build_halls(root: Derelict, b: Models.Batch, layout: Dictionary, m:
 		var straight_z := bits == 12
 		if straight_x or straight_z:
 			var x := Transform3D(Basis(Vector3.UP, PI / 2.0) if straight_x else Basis.IDENTITY, p)
+			var ahead := Vector2i(1, 0) if straight_x else Vector2i(0, 1)
 			_octagon_frame(b, x, m)
+			_rib_ring(b, x * Transform3D(Basis.IDENTITY, Vector3(0, 0, -cell * 0.5)), m)
 			for e: Array in _octagon_edges():
 				var a: Vector2 = e[0]
 				var f: Vector2 = e[1]
 				if a.y > 0.01 and f.y > 0.01 and absf(a.x - f.x) > 0.01 and absf(a.y - f.y) > 0.01:
-					_panel_along(b, x, a, f, OutpostLayout.CELL, m["hall_wall"])
+					_panel_along(b, x, a, f, cell, m["hall_wall"])
 				elif a.y < 0.01 != (f.y < 0.01):
-					_panel_along(b, x, a, f, OutpostLayout.CELL, m["steel"])
-			# Pipes along the right-hand wall under the chamfer, a cable tray on the left.
-			var pv := h - CHAMFER_TOP - 0.2
-			b.cyl_at(x * Transform3D(Basis(Vector3.RIGHT, PI / 2.0), Vector3(w - 0.14, pv, 0)), 0.075, OutpostLayout.CELL, m["bronze"], -1.0, 8)
-			b.cyl_at(x * Transform3D(Basis(Vector3.RIGHT, PI / 2.0), Vector3(w - 0.12, pv - 0.24, 0)), 0.05, OutpostLayout.CELL, m["olive"], -1.0, 8)
-			b.box(x * Vector3(-w + 0.12, pv + 0.05, 0), Vector3(0.18, 0.06, OutpostLayout.CELL) if straight_z else Vector3(OutpostLayout.CELL, 0.06, 0.18), m["steel"])
-			for i in 3:
-				b.cyl_at(x * Transform3D(Basis(Vector3.RIGHT, PI / 2.0), Vector3(-w + 0.08 + i * 0.05, pv + 0.1, 0)), 0.022, OutpostLayout.CELL, m["rubber"], -1.0, 8)
-			# A grate down the middle of the floor and steel plates either side.
-			b.box(x * Vector3(0, 0.005, 0), Vector3(1.3, 0.012, OutpostLayout.CELL) if straight_z else Vector3(OutpostLayout.CELL, 0.012, 1.3), m["dark"])
+					_panel_along(b, x, a, f, cell, m["steel"])
+					# An emergency strip along the chamfer, just above the floor.
+					var s0 := a.lerp(f, 0.62)
+					var dir := (f - a).normalized()
+					var sb := Basis(Vector3(0, 0, 1), atan2(dir.y, dir.x))
+					var hq := s0 + _inward(a, f) * 0.022
+					var sq := s0 + _inward(a, f) * 0.036
+					for k in 4:
+						var z := -cell * 0.5 + 0.45 + k * (cell - 0.9) / 3.0
+						b.box_at(x * Transform3D(sb, Vector3(hq.x, hq.y, z)), Vector3(0.07, 0.03, 0.42), m["gunmetal"])
+						strips.box_at(x * Transform3D(sb, Vector3(sq.x, sq.y, z)), Vector3(0.03, 0.008, 0.34), strip_mat)
+			_hall_walls(b, x, m, not clear.has(c))
+			_hall_pipes(b, x, m, rng, not clear.has(c))
+			# Where the corridor carries on into a corner or a junction, the pipes turn up into the
+			# ceiling (the corner's own frame has none).
+			for k: int in [1, -1]:
+				var n := c + ahead * k
+				if _walkable(layout, n) and (layout["kind"] as PackedByteArray)[OutpostLayout.idx(n)] == OutpostLayout.HALL \
+						and _open_edge(layout, c, n) and _hall_opens(layout, n) != bits:
+					_pipe_risers(b, x, float(k), m)
+			_hall_floor(b, x, layout, c, ahead, m)
+			if rng.randf() < 0.4:
+				_grime(root, "grime_" + ["a", "b", "c"][rng.randi() % 3], x * Vector3(rng.randf_range(-0.4, 0.4), 0, rng.randf_range(-1.0, 1.0)), Vector3.UP,
+					x.basis * Vector3(0, 0, 1), Vector2(rng.randf_range(1.4, 2.2), rng.randf_range(1.8, 3.0)), rng.randf_range(0.5, 0.8))
+			if rng.randf() < 0.35:
+				var wn := x.basis * Vector3(-1, 0, 0)
+				_grime(root, "streaks_" + ["a", "b"][rng.randi() % 2], x * Vector3(w - 0.05, 1.3, rng.randf_range(-0.8, 0.8)), wn, Marks.right_of(wn, Vector3.UP),
+					Vector2(rng.randf_range(1.0, 1.8), 2.0), rng.randf_range(0.5, 0.8))
 			if (c.x + c.y) % LAMP_EVERY == 0:
 				_hall_lamp(root, b, x * Vector3(0, h, 0.9), straight_x, m, rng, powered, c)
 			elif rng.randf() < 0.3:
 				_emergency_lamp(root, b, x * Vector3(-w + 0.02, 2.2, 0.0), x.basis * Vector3(1, 0, 0), m, rng, powered, c)
 		else:
-			# A corner or junction: a square frame in the ceiling round a lamp.
+			# A corner or junction: a square frame in the ceiling round a lamp, posts in its corners.
 			for i in 4:
 				var a := Vector3(-1.0, 0, -1.0).rotated(Vector3.UP, i * PI / 2.0)
 				var e := Vector3(1.0, 0, -1.0).rotated(Vector3.UP, i * PI / 2.0)
 				b.beam(p + a * w + Vector3(0, h - 0.12, 0), p + e * w + Vector3(0, h - 0.12, 0), FRAME_T, 0.24, m["bronze"])
+				var corner := p + a * (w - 0.14)
+				b.box(corner + Vector3(0, h * 0.5, 0), Vector3(0.28, h, 0.28), m["olive"])
+				b.box(corner - a * 0.15 + Vector3(0, h * 0.5, 0), Vector3(0.08, h - 0.3, 0.08), m["olive_dark"])
+				b.box(corner + Vector3(0, 0.12, 0), Vector3(0.34, 0.24, 0.34), m["gunmetal"])
 			for d in 4:
-				if bits & (1 << d) != 0:
-					continue
-				# A closed side: a ribbed bulkhead panel on the wall.
 				var dv := Vector3(OutpostLayout.DIRS[d].x, 0, OutpostLayout.DIRS[d].y)
 				var wx := Transform3D(Basis.looking_at(dv, Vector3.UP), p + dv * (w - 0.04))
+				if bits & (1 << d) != 0:
+					continue
+				# A closed side: a ribbed bulkhead with stiffeners, a kick plate and a chamfer at
+				# the top, the octagon carried on.
 				for r in 5:
-					b.box(wx * Vector3(0, 0.45 + r * 0.55, 0), Vector3(2.2, 0.08, 0.08), m["steel"])
+					b.box_at(wx * Transform3D(Basis.IDENTITY, Vector3(0, 0.45 + r * 0.55, 0)), Vector3(2.1, 0.08, 0.08), m["steel"])
+				for sx: float in [-0.75, 0.0, 0.75]:
+					b.box_at(wx * Transform3D(Basis.IDENTITY, Vector3(sx, 1.5, 0.01)), Vector3(0.1, 2.6, 0.1), m["olive_dark"])
+				b.box_at(wx * Transform3D(Basis.IDENTITY, Vector3(0, 0.12, 0.0)), Vector3(2.2, 0.24, 0.06), m["hazard"])
+				var side := Transform3D(Basis(dv, Vector3.UP, dv.cross(Vector3.UP)), p)
+				var ct := CHAMFER_TOP
+				_panel_along(b, side, Vector2(w, h - ct), Vector2(w - ct, h), 2.0 * (w - 0.28), m["hall_wall"])
+			_junction_floor(b, layout, c, bits, m)
 			_hall_lamp(root, b, p + Vector3(0, h, 0), false, m, rng, powered, c)
 
 
@@ -715,29 +904,245 @@ static func _octagon_edges() -> Array:
 	return [[p[0], p[1]], [p[2], p[3]], [p[3], p[4]], [p[4], p[5]], [p[5], p[6]], [p[6], p[7]], [p[7], p[0]]]
 
 
-## An octagonal frame round a corridor at local z = 0 of `x`: heavy bronze-edged beams on every side
-## but the floor, with a threshold plate across it.
+## The unit normal of octagon side a-f pointing into the corridor.
+static func _inward(a: Vector2, f: Vector2) -> Vector2:
+	var dir := (f - a).normalized()
+	var inward := Vector2(-dir.y, dir.x)
+	if inward.dot(Vector2(0, OutpostLayout.CORRIDOR_H * 0.5) - (a + f) * 0.5) < 0.0:
+		inward = -inward
+	return inward
+
+
+## An octagonal frame round a corridor at local z = 0 of `x`: heavy stepped beams on every side but
+## the floor, bronze lips and bolts along their flanges, gusset plates at the joints, and a hazard
+## striped threshold across the floor.
 static func _octagon_frame(b: Models.Batch, x: Transform3D, m: Dictionary) -> void:
-	var centre := Vector2(0, OutpostLayout.CORRIDOR_H * 0.5)
+	var edges := _octagon_edges()
+	for e: Array in edges:
+		var a: Vector2 = e[0]
+		var f: Vector2 = e[1]
+		var dir := (f - a).normalized()
+		var inward := _inward(a, f)
+		var length := a.distance_to(f)
+		var basis := Basis(Vector3(0, 0, 1), atan2(dir.y, dir.x))
+		var at := func(off: float, z: float) -> Transform3D:
+			var q := (a + f) * 0.5 + inward * off
+			return x * Transform3D(basis, Vector3(q.x, q.y, z))
+		b.box_at(at.call(FRAME_T * 0.5, 0.0), Vector3(length + 0.12, FRAME_T, FRAME_D), m["olive"])
+		b.box_at(at.call(FRAME_T + 0.035, 0.0), Vector3(length - 0.1, 0.07, FRAME_D - 0.16), m["olive_dark"])
+		for side: float in [-1.0, 1.0]:
+			b.box_at(at.call(FRAME_T - 0.02, side * (FRAME_D * 0.5 + 0.01)), Vector3(length + 0.06, 0.035, 0.02), m["bronze"])
+			# Bolts along the flange.
+			var n := maxi(1, int(length / 0.45))
+			for i in n:
+				var t := (i + 0.5) / n - 0.5
+				var q := (a + f) * 0.5 + dir * t * length + inward * FRAME_T * 0.45
+				b.cyl_at(x * Transform3D(Basis(Vector3.RIGHT, PI / 2.0), Vector3(q.x, q.y, side * (FRAME_D * 0.5 + 0.012))), 0.03, 0.03, m["bronze"], -1.0, 6)
+	# Gussets where the beams meet (not at the floor).
+	for i in edges.size():
+		var e0: Array = edges[i]
+		var e1: Array = edges[(i + 1) % edges.size()]
+		var v: Vector2 = e0[1]
+		if not v.is_equal_approx(e1[0]) or v.y < 0.01:
+			continue
+		var bis := (_inward(e0[0], e0[1]) + _inward(e1[0], e1[1])).normalized()
+		var q := v + bis * 0.17
+		for side: float in [-1.0, 1.0]:
+			b.box_at(x * Transform3D(Basis(Vector3(0, 0, 1), atan2(bis.y, bis.x) + PI / 4.0), Vector3(q.x, q.y, side * (FRAME_D * 0.5 + 0.012))),
+				Vector3(0.3, 0.3, 0.024), m["olive_dark"])
+			for k: float in [-1.0, 1.0]:
+				var bq := q + Vector2(-bis.y, bis.x) * 0.08 * k
+				b.cyl_at(x * Transform3D(Basis(Vector3.RIGHT, PI / 2.0), Vector3(bq.x, bq.y, side * (FRAME_D * 0.5 + 0.03))), 0.028, 0.03, m["bronze"], -1.0, 6)
+	var w := OutpostLayout.CELL * 0.5 - OutpostLayout.WALL_T * 0.5
+	b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, 0.014, 0)), Vector3(2.0 * (w - CHAMFER_BOTTOM), 0.028, FRAME_D), m["hazard"])
+
+
+## A lighter rib round the corridor at local z = 0 of `x` (halfway between two frames).
+static func _rib_ring(b: Models.Batch, x: Transform3D, m: Dictionary) -> void:
 	for e: Array in _octagon_edges():
 		var a: Vector2 = e[0]
 		var f: Vector2 = e[1]
 		var dir := (f - a).normalized()
-		var inward := Vector2(-dir.y, dir.x)
-		if inward.dot(centre - (a + f) * 0.5) < 0.0:
-			inward = -inward
-		var mid := (a + f) * 0.5 + inward * FRAME_T * 0.5
-		var basis := Basis(Vector3(0, 0, 1), atan2(dir.y, dir.x))
-		b.box_at(x * Transform3D(basis, Vector3(mid.x, mid.y, 0)), Vector3(a.distance_to(f) + 0.12, FRAME_T, FRAME_D), m["olive"])
-		var edge := (a + f) * 0.5 + inward * (FRAME_T + 0.02)
-		b.box_at(x * Transform3D(basis, Vector3(edge.x, edge.y, 0)), Vector3(a.distance_to(f) + 0.1, 0.05, FRAME_D + 0.06), m["bronze"])
+		var q := (a + f) * 0.5 + _inward(a, f) * 0.045
+		b.box_at(x * Transform3D(Basis(Vector3(0, 0, 1), atan2(dir.y, dir.x)), Vector3(q.x, q.y, 0)), Vector3(a.distance_to(f) + 0.04, 0.09, 0.14), m["steel"])
+
+
+## A straight corridor cell's side walls: flat-bar stiffeners every half metre between the frame and
+## the ribs, a rub rail at hip height, and a hydraulic strut each side bracing the frame.
+static func _hall_walls(b: Models.Batch, x: Transform3D, m: Dictionary, struts: bool) -> void:
 	var w := OutpostLayout.CELL * 0.5 - OutpostLayout.WALL_T * 0.5
-	b.box(x * Vector3(0, 0.012, 0), Vector3(2.0 * (w - CHAMFER_BOTTOM), 0.025, FRAME_D) if x.basis.z.z != 0.0 \
-		else Vector3(FRAME_D, 0.025, 2.0 * (w - CHAMFER_BOTTOM)), m["yellow"])
-	# Bolts on the wall beams.
+	var h := OutpostLayout.CORRIDOR_H
+	var y0 := CHAMFER_BOTTOM
+	var y1 := h - CHAMFER_TOP
 	for side: float in [-1.0, 1.0]:
-		for y: float in [0.8, 1.6, 2.4]:
-			b.cyl_at(x * Transform3D(Basis(Vector3(0, 0, 1), PI / 2.0), Vector3(side * (w - FRAME_T - 0.02), y, 0.0)), 0.035, 0.05, m["bronze"], -1.0, 8)
+		for z: float in [-1.0, -0.5, 0.5, 1.0]:
+			b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(side * (w - 0.025), (y0 + y1) * 0.5, z)), Vector3(0.05, y1 - y0 - 0.06, 0.07), m["olive"])
+		b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(side * (w - 0.06), 1.05, 0)), Vector3(0.07, 0.13, OutpostLayout.CELL), m["gunmetal"])
+		b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(side * (w - 0.1), 1.05, 0)), Vector3(0.012, 0.05, OutpostLayout.CELL), m["bronze"])
+		if not struts:
+			continue
+		# The strut: a cylinder from a bracket on the frame's wall beam down to a foot on the
+		# chamfer, its rod shining where it slides.
+		var top := Vector3(side * (w - 0.12), 1.45, FRAME_D * 0.5 + 0.08)
+		var foot := Vector3(side * (w - 0.22), 0.17, 0.95)
+		var mid := top.lerp(foot, 0.55)
+		b.box_at(x * Transform3D(Basis.IDENTITY, top + Vector3(side * 0.04, 0, -0.02)), Vector3(0.12, 0.14, 0.14), m["gunmetal"])
+		b.strut(x * top, x * mid, 0.055, m["olive_dark"])
+		b.strut(x * mid.lerp(top, 0.08), x * foot, 0.026, m["steel"])
+		b.box_at(x * Transform3D(Basis.IDENTITY, foot), Vector3(0.14, 0.07, 0.14), m["gunmetal"])
+
+
+## The pipe bundle under the right-hand chamfer (a big bronze main, two smaller lines, a low one by
+## the floor) with collars through the frame, clamps to the wall, flanged joints at the cell's ends;
+## the cable tray on the left; now and then a valve wheel, a gauge or a junction box.
+static func _hall_pipes(b: Models.Batch, x: Transform3D, m: Dictionary, rng: RandomNumberGenerator, fittings: bool) -> void:
+	var w := OutpostLayout.CELL * 0.5 - OutpostLayout.WALL_T * 0.5
+	var cell := OutpostLayout.CELL
+	var pv := OutpostLayout.CORRIDOR_H - CHAMFER_TOP - 0.2
+	var along := Basis(Vector3.RIGHT, PI / 2.0)
+	for pp: Array in _pipe_runs(m):
+		var px: float = pp[0]
+		var py: float = pp[1]
+		var r: float = pp[2]
+		b.cyl_at(x * Transform3D(along, Vector3(px, py, 0)), r, cell, pp[3], -1.0, 10)
+		b.cyl_at(x * Transform3D(along, Vector3(px, py, 0)), r + 0.03, FRAME_D + 0.1, m["gunmetal"], -1.0, 10)
+		for z: float in [-cell * 0.5 + 0.06, cell * 0.5 - 0.06]:
+			b.cyl_at(x * Transform3D(along, Vector3(px, py, z)), r + 0.035, 0.05, pp[3], -1.0, 10)
+		for z: float in [-1.0, 1.0]:
+			b.cyl_at(x * Transform3D(along, Vector3(px, py, z)), r + 0.014, 0.05, m["dark"], -1.0, 10)
+			b.box_at(x * Transform3D(Basis.IDENTITY, Vector3((w + px) * 0.5, py, z)), Vector3(w - px, 0.03, 0.05), m["dark"])
+	# The cable tray, hung from the chamfer on brackets.
+	var ty := pv + 0.05
+	b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(-w + 0.13, ty, 0)), Vector3(0.2, 0.025, cell), m["steel"])
+	for sx: float in [-1.0, 1.0]:
+		b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(-w + 0.13 + sx * 0.1, ty + 0.04, 0)), Vector3(0.012, 0.08, cell), m["steel"])
+	for i in 4:
+		b.cyl_at(x * Transform3D(along, Vector3(-w + 0.06 + i * 0.045, ty + 0.035, 0)), 0.02, cell, m["rubber"], -1.0, 6)
+	for z: float in [-1.0, 1.0]:
+		b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(-w + 0.13, ty - 0.02, z)), Vector3(0.26, 0.03, 0.04), m["gunmetal"])
+	# Fittings.
+	var roll := rng.randf() if fittings else 1.0
+	if roll < 0.3:
+		# A valve on the main, its wheel facing into the corridor.
+		var vp := Vector3(w - 0.17, pv, 0.8)
+		b.cyl_at(x * Transform3D(Basis.IDENTITY, vp), 0.12, 0.22, m["bronze"], -1.0, 10)
+		var face := Basis(Vector3(0, 0, 1), PI / 2.0)
+		b.cyl_at(x * Transform3D(face, vp + Vector3(-0.15, 0, 0)), 0.03, 0.16, m["steel"], -1.0, 8)
+		b.cyl_at(x * Transform3D(face, vp + Vector3(-0.24, 0, 0)), 0.16, 0.025, m["red_paint"], -1.0, 14)
+		b.cyl_at(x * Transform3D(face, vp + Vector3(-0.24, 0, 0)), 0.13, 0.03, m["dark"], -1.0, 14)
+		for k in 3:
+			b.box_at(x * Transform3D(Basis(Vector3(1, 0, 0), k * PI / 3.0), vp + Vector3(-0.245, 0, 0)), Vector3(0.02, 0.27, 0.02), m["red_paint"])
+	elif roll < 0.5:
+		# A pressure gauge teed off the steel line.
+		var gp := Vector3(w - 0.07, 1.65, -0.8)
+		var face := Basis(Vector3(0, 0, 1), PI / 2.0)
+		b.cyl_at(x * Transform3D(Basis.IDENTITY, Vector3(w - 0.13, (1.65 + pv - 0.25) * 0.5, -0.8)), 0.015, pv - 0.25 - 1.65, m["bronze"], -1.0, 6)
+		b.cyl_at(x * Transform3D(face, gp), 0.1, 0.06, m["bronze"], -1.0, 14)
+		b.cyl_at(x * Transform3D(face, gp + Vector3(-0.032, 0, 0)), 0.085, 0.006, m["white"], -1.0, 14)
+		b.box_at(x * Transform3D(Basis(Vector3(1, 0, 0), rng.randf_range(-1.2, 1.2)), gp + Vector3(-0.037, 0.025, 0)), Vector3(0.004, 0.06, 0.008), m["black"])
+	elif roll < 0.7:
+		# A junction box on the left wall with a conduit up to the tray.
+		var jp := Vector3(-w + 0.08, 1.55, 0.8)
+		b.box_at(x * Transform3D(Basis.IDENTITY, jp), Vector3(0.16, 0.5, 0.38), m["olive"])
+		b.box_at(x * Transform3D(Basis.IDENTITY, jp + Vector3(0.085, 0.0, 0)), Vector3(0.012, 0.44, 0.32), m["olive_dark"])
+		b.box_at(x * Transform3D(Basis.IDENTITY, jp + Vector3(0.092, 0.12, 0)), Vector3(0.006, 0.08, 0.2), m["hazard"])
+		b.cyl_at(x * Transform3D(Basis.IDENTITY, Vector3(-w + 0.06, (1.8 + ty) * 0.5, 0.8)), 0.025, ty - 1.8, m["dark"], -1.0, 6)
+
+
+## The pipes along a corridor's right-hand chamfer: [x, y, radius, material] each (corridor frame).
+static func _pipe_runs(m: Dictionary) -> Array:
+	var w := OutpostLayout.CELL * 0.5 - OutpostLayout.WALL_T * 0.5
+	var pv := OutpostLayout.CORRIDOR_H - CHAMFER_TOP - 0.2
+	return [[w - 0.17, pv, 0.085, m["bronze"]], [w - 0.13, pv - 0.25, 0.055, m["steel"]], [w - 0.36, pv + 0.04, 0.05, m["olive"]]]
+
+
+## The end of a straight corridor cell's pipes at local z = `k` * half a cell (where it meets a corner
+## or a junction): each pipe turns up through an elbow into the chamfer over it, through a collar,
+## and the cable tray's cables go up into the other chamfer.
+static func _pipe_risers(b: Models.Batch, x: Transform3D, k: float, m: Dictionary) -> void:
+	var w := OutpostLayout.CELL * 0.5 - OutpostLayout.WALL_T * 0.5
+	var h := OutpostLayout.CORRIDOR_H
+	var pv := h - CHAMFER_TOP - 0.2
+	for pp: Array in _pipe_runs(m):
+		var px: float = pp[0]
+		var py: float = pp[1]
+		var r: float = pp[2]
+		var z := k * (OutpostLayout.CELL * 0.5 - r - 0.04)
+		# (The chamfer over the pipe: from (w, h - CHAMFER_TOP) to (w - CHAMFER_TOP, h).)
+		var top := h - CHAMFER_TOP + (w - px)
+		b.sphere(x * Vector3(px, py, z), r * 1.08, pp[3], Vector3.ONE, 10)
+		b.cyl_at(x * Transform3D(Basis.IDENTITY, Vector3(px, (py + top) * 0.5 + 0.03, z)), r, top - py + 0.06, pp[3], -1.0, 10)
+		b.cyl_at(x * Transform3D(Basis.IDENTITY, Vector3(px, top - 0.05, z)), r + 0.035, 0.07, m["gunmetal"], -1.0, 10)
+	var ty := pv + 0.05
+	var ttop := h - CHAMFER_TOP + 0.13
+	for i in 4:
+		var cx := -w + 0.06 + i * 0.045
+		var cz := k * (OutpostLayout.CELL * 0.5 - 0.06)
+		b.cyl_at(x * Transform3D(Basis.IDENTITY, Vector3(cx, (ty + ttop) * 0.5 + 0.06, cz)), 0.02, ttop - ty + 0.08, m["rubber"], -1.0, 6)
+	b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(-w + 0.13, ttop - 0.04, k * (OutpostLayout.CELL * 0.5 - 0.06))), Vector3(0.26, 0.06, 0.1), m["gunmetal"])
+
+
+## A straight corridor cell's floor (`ahead`: the grid step along local +z): tread plate either side
+## of a trench down the middle, grated over, with a pipe and cables in it, closed off at an end that
+## no corridor carries on from.
+static func _hall_floor(b: Models.Batch, x: Transform3D, layout: Dictionary, c: Vector2i, ahead: Vector2i, m: Dictionary) -> void:
+	var w := OutpostLayout.CELL * 0.5 - OutpostLayout.WALL_T * 0.5
+	var cell := OutpostLayout.CELL
+	var tw := TRENCH_W * 0.5
+	for side: float in [-1.0, 1.0]:
+		b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(side * (tw + w) * 0.5, -0.15, 0)), Vector3(w - tw + 0.02, 0.3, cell), m["floor"])
+	_trench(b, x, cell, m)
+	for k: int in [1, -1]:
+		var n := c + ahead * k
+		if not (_walkable(layout, n) and (layout["kind"] as PackedByteArray)[OutpostLayout.idx(n)] == OutpostLayout.HALL and _open_edge(layout, c, n)):
+			b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, -0.2, k * (cell * 0.5 - 0.02))), Vector3(TRENCH_W, 0.4, 0.04), m["steel"])
+
+
+## A trench `length` long along local z of `x` (its middle at x's origin): its floor, the angles the
+## grating rests on, the grating, a pipe and a cable bundle on supports.
+static func _trench(b: Models.Batch, x: Transform3D, length: float, m: Dictionary, sides := true) -> void:
+	var tw := TRENCH_W * 0.5
+	var along := Basis(Vector3.RIGHT, PI / 2.0)
+	b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, -0.43, 0)), Vector3(TRENCH_W, 0.06, length), m["gunmetal"])
+	b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, -0.012, 0)), Vector3(TRENCH_W - 0.02, 0.024, length), m["grate"])
+	if not sides:
+		return
+	for side: float in [-1.0, 1.0]:
+		b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(side * (tw - 0.015), -0.2, 0)), Vector3(0.03, 0.42, length), m["steel"])
+		b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(side * (tw - 0.03), -0.045, 0)), Vector3(0.06, 0.03, length), m["gunmetal"])
+	b.cyl_at(x * Transform3D(along, Vector3(-0.22, -0.28, 0)), 0.075, length, m["bronze"], -1.0, 10)
+	b.cyl_at(x * Transform3D(along, Vector3(0.2, -0.32, 0)), 0.045, length, m["olive"], -1.0, 8)
+	for i in 3:
+		b.cyl_at(x * Transform3D(along, Vector3(0.42 + i * 0.05, -0.37, 0)), 0.02, length, m["rubber"], -1.0, 6)
+	var n := maxi(1, int(length / 1.0))
+	for i in n:
+		var z := ((i + 0.5) / n - 0.5) * length
+		b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, -0.375, z)), Vector3(TRENCH_W - 0.04, 0.03, 0.05), m["steel"])
+
+
+## A corner or junction's floor: tread plate in its corners and on its closed sides, the trench
+## under a grating in the middle and out to every open side.
+static func _junction_floor(b: Models.Batch, layout: Dictionary, c: Vector2i, bits: int, m: Dictionary) -> void:
+	var p := OutpostLayout.cell_pos(c)
+	var cell := OutpostLayout.CELL
+	var tw := TRENCH_W * 0.5
+	var arm := cell * 0.5 - tw
+	for sx: float in [-1.0, 1.0]:
+		for sz: float in [-1.0, 1.0]:
+			b.box(p + Vector3(sx * (tw + arm * 0.5), -0.15, sz * (tw + arm * 0.5)), Vector3(arm + 0.02, 0.3, arm + 0.02), m["floor"])
+	_trench(b, Transform3D(Basis.IDENTITY, p), TRENCH_W, m, false)
+	for d in 4:
+		var dv := Vector3(OutpostLayout.DIRS[d].x, 0, OutpostLayout.DIRS[d].y)
+		var x := Transform3D(Basis(Vector3.UP, atan2(dv.x, dv.z)), p + dv * (tw + arm * 0.5))
+		if bits & (1 << d) == 0:
+			b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, -0.15, 0)), Vector3(TRENCH_W + 0.02, 0.3, arm + 0.02), m["floor"])
+			# The middle's wall on this side.
+			b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, -0.2, -arm * 0.5 + 0.015)), Vector3(TRENCH_W, 0.42, 0.03), m["steel"])
+			continue
+		_trench(b, x, arm, m)
+		var n: Vector2i = c + OutpostLayout.DIRS[d]
+		if not (_walkable(layout, n) and (layout["kind"] as PackedByteArray)[OutpostLayout.idx(n)] == OutpostLayout.HALL and _open_edge(layout, c, n)):
+			b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, -0.2, arm * 0.5 - 0.02)), Vector3(TRENCH_W, 0.4, 0.04), m["steel"])
 
 
 ## A flat panel along the corridor over the octagon side a-b (a chamfer), `length` long.
@@ -770,8 +1175,8 @@ static func _hall_lamp(root: Derelict, b: Models.Batch, at: Vector3, across_x: b
 static func _emergency_lamp(root: Derelict, b: Models.Batch, at: Vector3, facing: Vector3, m: Dictionary, rng: RandomNumberGenerator,
 		powered: bool, c: Vector2i) -> void:
 	b.box(at, Vector3(0.22, 0.14, 0.22), m["dark"])
-	root.add_lamp(at + facing * 0.1, Vector3(0.14, 0.08, 0.14), EMERGENCY_COLOR, 0.55, 4.5,
-		Derelict.EMERGENCY if powered else Derelict.ALWAYS, c, rng.randf() < 0.3, rng)
+	root.add_lamp(at + facing * 0.1, Vector3(0.14, 0.08, 0.14), EMERGENCY_LIGHT, 0.55, 4.5,
+		Derelict.EMERGENCY if powered else Derelict.ALWAYS, c, rng.randf() < 0.3, rng, EMERGENCY_COLOR)
 
 
 ## A room: ribbed walls with pilasters, beams under the ceiling, lamps, its furniture, signs over its
@@ -783,16 +1188,30 @@ static func _build_room(root: Derelict, b: Models.Batch, body: StaticBody3D, lay
 	var deck := StationBuilder.DECK_Y
 	var cell := OutpostLayout.CELL
 	var cells: Array = room["cells"]
-	# Ribbed lower panels and a cornice along each stretch of wall, pilasters where they meet.
+	# Ribbed lower panels over a kick plate along each stretch of wall, a 45 degree cove up to the
+	# ceiling (the corridors' octagon carried on), a duct along the walls on one side of the room,
+	# pilasters where the stretches meet.
 	var pilasters := {}
+	var duct_dir: int = rng.randi() % 4
+	var cove := 0.6
 	for s: Dictionary in OutpostLayout.wall_slots(layout, ri):
 		var inward: Vector3 = s["inward"]
 		var along := Vector3(inward.z, 0, -inward.x)
 		var p: Vector3 = s["pos"]
 		for r in 4:
-			b.box(p + inward * 0.03 + Vector3(0, 0.2 + r * 0.26, 0), _along_size(along, cell - 0.3, 0.07, 0.06), m["olive"])
+			b.box(p + inward * 0.03 + Vector3(0, 0.36 + r * 0.24, 0), _along_size(along, cell - 0.3, 0.07, 0.06), m["olive"])
 		b.box(p + inward * 0.04 + Vector3(0, 1.22, 0), _along_size(along, cell - 0.3, 0.06, 0.08), m["bronze"])
-		b.box(p + inward * 0.06 + Vector3(0, h - 0.3, 0), _along_size(along, cell, 0.22, 0.12), m["steel"])
+		b.box(p + inward * 0.03 + Vector3(0, 0.12, 0), _along_size(along, cell - 0.3, 0.24, 0.06), m["gunmetal"])
+		var n := (inward - Vector3.UP).normalized()
+		b.box_at(Transform3D(Basis(along, n, along.cross(n)), p + inward * (cove * 0.5) + Vector3(0, h - cove * 0.5, 0)),
+			Vector3(cell, 0.06, cove * sqrt(2.0)), m["hall_wall"])
+		b.box(p + inward * 0.05 + Vector3(0, h - cove - 0.02, 0), _along_size(along, cell, 0.06, 0.1), m["bronze"])
+		if int(s["dir"]) == duct_dir:
+			b.box(p + inward * 0.26 + Vector3(0, h - cove - 0.42, 0), _along_size(along, cell, 0.42, 0.4), m["steel"])
+			for e: float in [-0.75, 0.75]:
+				b.box(p + inward * 0.26 + along * e + Vector3(0, h - cove - 0.42, 0), _along_size(along, 0.07, 0.48, 0.46), m["gunmetal"])
+			for e: float in [-1.2, 0.0, 1.2]:
+				b.box(p + inward * 0.16 + along * e + Vector3(0, h - cove - 0.1, 0), _along_size(along, 0.05, 0.25, 0.32), m["dark"])
 		for side: float in [-1.0, 1.0]:
 			var q := p + along * side * cell * 0.5
 			var key := Vector2i(roundi(q.x * 10.0), roundi(q.z * 10.0))
@@ -801,13 +1220,21 @@ static func _build_room(root: Derelict, b: Models.Batch, body: StaticBody3D, lay
 			pilasters[key] = true
 			b.box(q + inward * 0.09 + Vector3(0, h * 0.5, 0), Vector3(0.3, h, 0.3) if absf(inward.x) < 0.5 else Vector3(0.3, h, 0.3), m["olive"])
 			b.box(q + inward * 0.25 + Vector3(0, h * 0.5, 0), _along_size(along, 0.12, h, 0.04), m["bronze"])
-	# Beams under the ceiling across every cell boundary along z inside the room.
+	# Beams under the ceiling across every cell boundary along z inside the room, lighter ones
+	# across them at the boundaries along x: coffers.
 	for c: Vector2i in cells:
 		var n := c + Vector2i(0, 1)
 		if n in cells:
 			var p := OutpostLayout.cell_pos(c) + Vector3(0, h - 0.2, cell * 0.5)
 			b.box(p, Vector3(cell + 0.02, 0.4, 0.3), m["olive"])
 			b.box(p + Vector3(0, -0.21, 0), Vector3(cell + 0.02, 0.04, 0.34), m["bronze"])
+			for sx: float in [-1.0, 1.0]:
+				b.box(p + Vector3(sx * 0.6, -0.14, 0), Vector3(0.04, 0.2, 0.42), m["olive_dark"])
+		var e := c + Vector2i(1, 0)
+		if e in cells:
+			var q := OutpostLayout.cell_pos(c) + Vector3(cell * 0.5, h - 0.14, 0)
+			b.box(q, Vector3(0.22, 0.28, cell - 0.3), m["olive_dark"])
+			b.box(q + Vector3(0, -0.15, 0), Vector3(0.26, 0.03, cell - 0.3), m["steel"])
 	# Lamps: up to three over the core, spread out; one gets a light.
 	var core: Rect2i = room["core"]
 	var spots: Array[Vector2i] = []
@@ -816,10 +1243,20 @@ static func _build_room(root: Derelict, b: Models.Batch, body: StaticBody3D, lay
 			if (i + j) % 2 == 0 and (i % 2 == 0):
 				spots.append(core.position + Vector2i(i, j))
 	OutpostLayout._shuffle(spots, rng)
+	# The first one, nearest the middle (over the room's main piece), always works.
+	var centre := Vector2(core.get_center())
+	var best := 0
+	for i in spots.size():
+		if Vector2(spots[i]).distance_to(centre) < Vector2(spots[best]).distance_to(centre):
+			best = i
+	if not spots.is_empty():
+		var hero := spots[best]
+		spots.remove_at(best)
+		spots.insert(0, hero)
 	var lamps := mini(spots.size(), 2 + (1 if core.get_area() > 12 else 0))
 	for i in lamps:
 		var lp := OutpostLayout.cell_pos(spots[i]) + Vector3(0, h, 0)
-		_room_lamp(root, b, lp, m, rng, powered, spots[i], str(room["theme"]) == "generator")
+		_room_lamp(root, b, lp, m, rng, powered, spots[i], str(room["theme"]) == "generator", i == 0)
 	if powered:
 		# A dim emergency lamp by the room's first doorway, so it can be found in the dark.
 		var dd: Dictionary = layout["doors"][(room["doors"] as Array)[0]]
@@ -827,7 +1264,7 @@ static func _build_room(root: Derelict, b: Models.Batch, body: StaticBody3D, lay
 		_emergency_lamp(root, b, ep, -(dd["normal"] as Vector3), m, rng, powered, dd["cell"])
 	# Furniture.
 	for p: Dictionary in room["props"]:
-		OutpostProps.build(root, b, body, p, m, out)
+		OutpostProps.build(root, b, body, p, m, out, float(room["h"]))
 	# Signs over the doorways (above their frames), on the corridor side.
 	for di: int in room["doors"]:
 		var dd: Dictionary = layout["doors"][di]
@@ -846,6 +1283,24 @@ static func _build_room(root: Derelict, b: Models.Batch, body: StaticBody3D, lay
 		var slots := OutpostLayout.wall_slots(layout, ri)
 		var s: Dictionary = slots[rng.randi() % slots.size()]
 		_growth(root, (s["pos"] as Vector3) + Vector3(0, rng.randf_range(0.3, 2.5), 0), s["inward"], m, rng, 1.1)
+	# Grime: dirt trodden into the floor, streaks run down the walls from the cove, rust. (Its own
+	# random numbers, so the rooms' other rolls stay as they were.)
+	var grng := RandomNumberGenerator.new()
+	grng.seed = rng.seed + ri * 977
+	for i in 2 + cells.size() / 3:
+		var c: Vector2i = cells[grng.randi() % cells.size()]
+		var gp := OutpostLayout.cell_pos(c) + Vector3(grng.randf_range(-1.0, 1.0), 0, grng.randf_range(-1.0, 1.0))
+		_grime(root, "grime_" + ["a", "b", "c"][grng.randi() % 3], gp, Vector3.UP, Vector3.RIGHT.rotated(Vector3.UP, grng.randf() * TAU),
+			Vector2(grng.randf_range(1.6, 3.2), grng.randf_range(1.6, 3.2)), grng.randf_range(0.45, 0.8))
+	for s: Dictionary in OutpostLayout.wall_slots(layout, ri):
+		var inward: Vector3 = s["inward"]
+		var roll := grng.randf()
+		if roll < 0.45:
+			_grime(root, "streaks_" + ["a", "b"][grng.randi() % 2], (s["pos"] as Vector3) + inward * 0.15 + Vector3(0, h - cove - 1.3, 0),
+				inward, Marks.right_of(inward, Vector3.UP), Vector2(grng.randf_range(1.4, 2.6), 2.6), grng.randf_range(0.5, 0.85))
+		elif roll < 0.6:
+			_grime(root, "rust", (s["pos"] as Vector3) + inward * 0.15 + Vector3(0, grng.randf_range(0.5, 2.0), 0), inward, Marks.right_of(inward, Vector3.UP),
+				Vector2(grng.randf_range(0.8, 1.6), grng.randf_range(0.8, 1.6)), 0.7)
 
 
 ## A box `length` long along `along` (x or z), `height` tall and `depth` deep across it.
@@ -855,27 +1310,31 @@ static func _along_size(along: Vector3, length: float, height: float, depth: flo
 
 ## A hanging industrial lamp over a room (`at`: the ceiling point).
 static func _room_lamp(root: Derelict, b: Models.Batch, at: Vector3, m: Dictionary, rng: RandomNumberGenerator, powered: bool,
-		c: Vector2i, emergency_too: bool) -> void:
+		c: Vector2i, emergency_too: bool, hero := false) -> void:
 	var drop := 0.9
 	b.box(at + Vector3(0, -drop * 0.5, 0), Vector3(0.04, drop, 0.04), m["dark"])
 	b.cyl_at(Transform3D(Basis.IDENTITY, at + Vector3(0, -drop - 0.12, 0)), 0.45, 0.3, m["olive"], 0.12, 12)
 	var circuit := Derelict.POWER if powered else Derelict.ALWAYS
-	if rng.randf() < (0.1 if powered else 0.25):
+	if rng.randf() < (0.1 if powered else 0.25) and not hero:
 		circuit = Derelict.DEAD
+	var flickers := rng.randf() < (0.2 if powered else 0.45) and not hero
 	root.add_lamp(at + Vector3(0, -drop - 0.28, 0), Vector3(0.36, 0.06, 0.36), LAMP_COLOR, rng.randf_range(2.2, 2.8), 10.5, circuit, c,
-		rng.randf() < (0.2 if powered else 0.45), rng)
+		flickers, rng)
 	if emergency_too:
-		root.add_lamp(at + Vector3(0.6, -0.1, 0), Vector3(0.18, 0.08, 0.18), EMERGENCY_COLOR, 0.8, 7.0, Derelict.ALWAYS, c, true, rng)
+		root.add_lamp(at + Vector3(0.6, -0.1, 0), Vector3(0.18, 0.08, 0.18), EMERGENCY_LIGHT, 0.8, 7.0, Derelict.ALWAYS, c, true, rng, EMERGENCY_COLOR)
 
 
 ## Doorways: a heavy frame on both faces of every doorway; sealed doors get their door (sliding up
 ## into the wall), a lamp over it on the corridor side, and a keypad lock its keypad and lockdown
-## shutter. Some open doorways have a door jammed half way up.
+## shutter. Some open doorways have a door jammed half way up. With a control hub every doorway has
+## a working door (open ones start open; the hub locks and unlocks them), its id on a plate on the
+## lintel's both faces.
 static func _build_doors(root: Derelict, b: Models.Batch, layout: Dictionary, m: Dictionary, rng: RandomNumberGenerator) -> void:
 	var doors: Array = layout["doors"]
 	var deck := StationBuilder.DECK_Y
 	var dw := OutpostLayout.DOOR_W * 0.5
 	var dh := OutpostLayout.DOOR_H
+	var hub := int(layout.get("hub", -1)) >= 0
 	for di in range(1, doors.size()):
 		var d: Dictionary = doors[di]
 		var n: Vector3 = d["normal"]
@@ -886,16 +1345,26 @@ static func _build_doors(root: Derelict, b: Models.Batch, layout: Dictionary, m:
 			var fp := pos + n * face * (OutpostLayout.WALL_T * 0.5 + 0.06)
 			var x := Transform3D(Basis(Vector3.UP, yaw if face > 0.0 else yaw + PI), fp)
 			for side: float in [-1.0, 1.0]:
-				b.box(x * Vector3(side * (dw + 0.14), dh * 0.5, 0), Vector3(0.3, dh, 0.14), m["gunmetal"])
-				b.box(x * Vector3(side * (dw + 0.02), dh * 0.5, 0.05), Vector3(0.06, dh - 0.1, 0.06), m["bronze"])
+				b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(side * (dw + 0.14), dh * 0.5, 0)), Vector3(0.3, dh, 0.14), m["gunmetal"])
+				b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(side * (dw + 0.02), dh * 0.5, 0.05)), Vector3(0.06, dh - 0.1, 0.06), m["bronze"])
 				for y: float in [0.5, 1.4, 2.3]:
 					b.cyl_at(x * Transform3D(Basis(Vector3.RIGHT, PI / 2.0), Vector3(side * (dw + 0.2), y, 0.08)), 0.035, 0.05, m["bronze"], -1.0, 8)
-			b.box(x * Vector3(0, dh + 0.17, 0), Vector3(OutpostLayout.DOOR_W + 0.88, 0.34, 0.16), m["gunmetal"])
-			for i in 7:
-				b.box(x * Vector3(-dw - 0.2 + i * (OutpostLayout.DOOR_W + 0.4) / 6.0, dh + 0.17, 0.09), Vector3(0.16, 0.26, 0.01), m["yellow"] if i % 2 == 0 else m["black"],
-					Vector3(0, rad_to_deg(yaw if face > 0.0 else yaw + PI), 30))
+			b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, dh + 0.17, 0)), Vector3(OutpostLayout.DOOR_W + 0.88, 0.34, 0.16), m["gunmetal"])
+			b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, dh + 0.17, 0.085)), Vector3(OutpostLayout.DOOR_W + 0.4, 0.22, 0.012), m["hazard"])
+			if hub and str(d.get("id", "")) != "":
+				b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, dh + 0.17, 0.1)), Vector3(0.66, 0.27, 0.02), m["dark"])
+				var plate := Label3D.new()
+				plate.text = str(d["id"])
+				plate.font = GunPod.mono_font()
+				plate.font_size = 64
+				plate.pixel_size = 0.0034
+				plate.outline_size = 0
+				plate.double_sided = false
+				plate.modulate = Color(1.0, 0.86, 0.42)
+				plate.transform = x * Transform3D(Basis.IDENTITY, Vector3(0, dh + 0.17, 0.112))
+				root.add_child(plate)
 		var kind := str(d["kind"])
-		if kind == "open":
+		if kind == "open" and not hub:
 			if rng.randf() < 0.22:
 				# A door jammed most of the way up.
 				var stuck := rng.randf_range(0.78, 0.9)
@@ -906,7 +1375,8 @@ static func _build_doors(root: Derelict, b: Models.Batch, layout: Dictionary, m:
 		root.add_child(slab)
 		var sb := Models.Batch.new()
 		_door_slab(sb, Transform3D.IDENTITY, m)
-		sb.commit(slab, "Door")
+		for mi in sb.commit(slab, "Door"):
+			mi.layers |= Game.VIS_SHELL
 		var sbody := StaticBody3D.new()
 		sbody.collision_layer = Game.LAYER_CAVE | Game.LAYER_STATION
 		sbody.collision_mask = 0
@@ -930,7 +1400,9 @@ static func _build_doors(root: Derelict, b: Models.Batch, layout: Dictionary, m:
 		var rec := {"slab": slab, "body": sbody, "shape": cs, "lamp": lamp_mat, "pos": pos, "normal": n}
 		if kind == "power":
 			_label(slab, "NO POWER", Vector3(0, 1.75, SLAB_T * 0.5 + 0.035), 44, 0.006, Color(1.0, 0.75, 0.25), 0.0)
-		else:
+		elif kind == "hub":
+			_label(slab, "CONTROL LOCK", Vector3(0, 1.75, SLAB_T * 0.5 + 0.035), 40, 0.006, Color(1.0, 0.75, 0.25), 0.0)
+		elif kind == "hack":
 			_lockdown_gear(root, b, d, rec, m)
 			var panel := HackPanel.new()
 			root.add_child(panel)
@@ -945,14 +1417,12 @@ static func _build_doors(root: Derelict, b: Models.Batch, layout: Dictionary, m:
 static func _door_slab(b: Models.Batch, x: Transform3D, m: Dictionary) -> void:
 	var w := OutpostLayout.DOOR_W + 0.1
 	var dh := OutpostLayout.DOOR_H
-	b.box(x * Vector3(0, dh * 0.5, 0), Vector3(w, dh, SLAB_T), m["gunmetal"])
+	b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, dh * 0.5, 0)), Vector3(w, dh, SLAB_T), m["gunmetal"])
 	for side: float in [-1.0, 1.0]:
 		for r in 6:
-			b.box(x * Vector3(0, 0.5 + r * 0.38, side * (SLAB_T * 0.5 + 0.015)), Vector3(w - 0.3, 0.1, 0.03), m["olive"])
-		for i in 5:
-			b.box(x * Vector3(-w * 0.4 + i * w * 0.2, 0.16, side * (SLAB_T * 0.5 + 0.01)), Vector3(0.22, 0.24, 0.02), m["yellow"] if i % 2 == 0 else m["black"],
-				Vector3(0, 0, 35))
-		b.box(x * Vector3(0, dh * 0.5, side * (SLAB_T * 0.5 + 0.02)), Vector3(0.06, dh - 0.4, 0.02), m["bronze"])
+			b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, 0.5 + r * 0.38, side * (SLAB_T * 0.5 + 0.015))), Vector3(w - 0.3, 0.1, 0.03), m["olive"])
+		b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, 0.16, side * (SLAB_T * 0.5 + 0.01))), Vector3(w - 0.08, 0.24, 0.02), m["hazard"])
+		b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, dh * 0.5, side * (SLAB_T * 0.5 + 0.02))), Vector3(0.06, dh - 0.4, 0.02), m["bronze"])
 
 
 ## A keypad lock's lockdown gear on the corridor side: the shutter (hidden up in the ceiling until
@@ -965,8 +1435,8 @@ static func _lockdown_gear(root: Derelict, b: Models.Batch, d: Dictionary, rec: 
 	var sw := OutpostLayout.DOOR_W + 0.6
 	var x := Transform3D(Basis(Vector3.UP, yaw), pos + n * SHUTTER_OUT)
 	for side: float in [-1.0, 1.0]:
-		b.box(x * Vector3(side * (sw * 0.5 + 0.06), dh * 0.5 + 0.2, 0), Vector3(0.12, dh + 0.4, 0.3), m["steel"])
-	b.box(x * Vector3(0, OutpostLayout.CORRIDOR_H - 0.12, 0), Vector3(sw + 0.3, 0.24, 0.36), m["gunmetal"])
+		b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(side * (sw * 0.5 + 0.06), dh * 0.5 + 0.2, 0)), Vector3(0.12, dh + 0.4, 0.3), m["steel"])
+	b.box_at(x * Transform3D(Basis.IDENTITY, Vector3(0, OutpostLayout.CORRIDOR_H - 0.12, 0)), Vector3(sw + 0.3, 0.24, 0.36), m["gunmetal"])
 	var shutter := Node3D.new()
 	shutter.transform = x
 	root.add_child(shutter)
@@ -974,9 +1444,9 @@ static func _lockdown_gear(root: Derelict, b: Models.Batch, d: Dictionary, rec: 
 	sb.box(Vector3(0, (dh + 0.25) * 0.5, 0), Vector3(sw, dh + 0.25, 0.22), m["gunmetal"])
 	for r in 7:
 		sb.box(Vector3(0, 0.3 + r * 0.42, 0.12), Vector3(sw - 0.2, 0.16, 0.04), m["steel"])
-	for i in 6:
-		sb.box(Vector3(-sw * 0.42 + i * sw * 0.168, 0.18, 0.12), Vector3(0.26, 0.3, 0.02), m["yellow"] if i % 2 == 0 else m["black"], Vector3(0, 0, 35))
-	sb.commit(shutter, "Shutter")
+	sb.box(Vector3(0, 0.18, 0.12), Vector3(sw - 0.1, 0.3, 0.02), m["hazard"])
+	for mi in sb.commit(shutter, "Shutter"):
+		mi.layers |= Game.VIS_SHELL
 	var sbody := StaticBody3D.new()
 	sbody.collision_layer = Game.LAYER_CAVE | Game.LAYER_STATION
 	sbody.collision_mask = 0

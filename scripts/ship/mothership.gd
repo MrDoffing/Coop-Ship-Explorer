@@ -74,6 +74,10 @@ const DERELICT_CLEAR_RANGE := 60.0
 const SALVAGE_CHANCE := 0.65
 const CREDITS_CHANCE := 0.4
 const STALKER_CHANCE := 0.75
+## At most this many sentry turrets in a station (see _derelict_contents).
+const SENTRY_MAX := 3
+## Boarders shut in behind each door locked from a control hub (a few more deeper down).
+const HORDE := Vector2i(4, 6)
 ## Auto turrets: reach, turn rate, rate of fire and damage per bolt.
 const AUTO_RANGE := 75.0
 const AUTO_TURN := 3.0
@@ -106,7 +110,7 @@ const SCRAPE_SPEED := 0.6
 const BURN_STEP := 0.4
 const BURN_GLOW := 3.0
 const BURN_COOL := 2.2
-const BURN_LIFE := 150.0
+const BURN_LIFE := 30.0
 const ROCK_MARKS := 160
 ## How far along a gun pod's sight line (m) the ship itself holds its fire (see fire_masked).
 const MASK_RANGE := 45.0
@@ -140,14 +144,17 @@ var aims := PackedVector2Array()
 ## Where each mining laser's beam ends (layout["lasers"] order) and which ones fire (bit mask).
 var beam_ends := PackedVector3Array()
 var beams := 0
-## Gun station -> mounted weapon (Game.GUNS id). Shelved for now: the gun pods only carry their
-## heavy machine guns, so shops and salvage don't offer guns and this stays at the Pulse Cannon.
+## Gun station -> what its pod carries (GunPod.WEAPONS: "hmg", the heavy machine gun every pod
+## launches with, or "mrls", the rocket launchers; mounted at the gun console from a shop's crate).
 var gun_weapons: Dictionary = {}
 ## Gun pods, in layout["guns"] order: rounds left in the belt, heat (0..1) and seconds left of a
-## belt change (0: not reloading). See GunPod for the numbers.
+## belt change (0: not reloading). See GunPod for the numbers. Carrying rockets: the rockets
+## loaded, no heat, the seconds until the loader puts the next one in (0: every tube full), and
+## (gun_tube) the tube that fires next.
 var gun_ammo := PackedInt32Array()
 var gun_heat := PackedFloat32Array()
 var gun_reload := PackedFloat32Array()
+var gun_tube := PackedInt32Array()
 var hull := 400.0
 var shield := 120.0
 var shield_down := false
@@ -314,7 +321,7 @@ func _init() -> void:
 		"weapons_online", "fuel", "throttle", "autopilot", "occupants", "beams", "gun_weapons", "credits", "ore",
 		"depth", "alive", "boarders", "frozen", "blast_cd", "landing", "station_k", "gate_k", "gate_entry",
 		"gate_exit", "stations_docked", "hostility", "derelict_k", "derelicts_docked", "hostiles", "stats", "max_hull", "max_shield",
-		"max_fuel", "run_mods", "autocannons", "auto_aim", "gun_ammo", "gun_heat", "gun_reload", "outpost_k", "outpost_power",
+		"max_fuel", "run_mods", "autocannons", "auto_aim", "gun_ammo", "gun_heat", "gun_reload", "gun_tube", "outpost_k", "outpost_power",
 		"outpost_doors", "outpost_tries"], 1.0 / 30.0)
 
 
@@ -338,7 +345,7 @@ func setup(data: Dictionary) -> void:
 	beam_ends.resize((layout["lasers"] as Array).size())
 	var w := {}
 	for g: String in layout["guns"]:
-		w[g] = "pulse"
+		w[g] = "hmg"
 		_fire_cd[g] = 0.0
 	gun_weapons = w
 	var guns := (layout["guns"] as Array).size()
@@ -348,6 +355,8 @@ func setup(data: Dictionary) -> void:
 	gun_heat.fill(0.0)
 	gun_reload.resize(guns)
 	gun_reload.fill(0.0)
+	gun_tube.resize(guns)
+	gun_tube.fill(0)
 	_next_barrel.resize(guns)
 	_next_barrel.fill(0)
 	_hot_told.resize(guns)
@@ -534,7 +543,7 @@ func _spawn_boarder(data: Variant) -> Node:
 
 
 func _spawn_crate(data: Variant) -> Node:
-	var c := SupplyCrate.new()
+	var c := Sentry.new() if str((data as Dictionary).get("item", "")) == "sentry" else SupplyCrate.new()
 	c.setup(data)
 	return c
 
@@ -589,7 +598,7 @@ func aim_of(id: String) -> Vector2:
 
 
 func gun_weapon(id: String) -> String:
-	return str(gun_weapons.get(id, "pulse"))
+	return str(gun_weapons.get(id, "hmg"))
 
 
 ## A gun station's index in layout["guns"] (gun_ammo, gun_heat, gun_reload), or -1.
@@ -903,15 +912,43 @@ func _gate_brake(desired: Vector3) -> Vector3:
 
 
 ## Server: the gun pods. Heat bleeds off all the time; a pod whose gunner holds the trigger fires
-## its barrels in turn until the belt runs dry, and then a new belt is loaded by itself.
+## its barrels in turn until the belt runs dry, and then a new belt is loaded by itself. A pod
+## carrying rockets looses one from each box in turn while the trigger is held, as long as any are
+## loaded; its loader puts a rocket back in an empty tube every GunPod.MRLS_LOAD seconds, one at a
+## time, firing or not (turret coolant speeds both up).
 func _server_weapons(delta: float) -> void:
 	var guns: Array = layout["guns"]
 	var rate := float(stats["turret_rate"])
 	var ammo := gun_ammo.duplicate()
 	var heat := gun_heat.duplicate()
 	var reload := gun_reload.duplicate()
+	var tubes := gun_tube.duplicate()
 	for i in guns.size():
 		var id: String = guns[i]
+		if gun_weapon(id) == "mrls":
+			heat[i] = 0.0
+			if ammo[i] < GunPod.MRLS_TUBES and weapons_online:
+				if reload[i] <= 0.0:
+					reload[i] = GunPod.MRLS_LOAD
+				reload[i] = maxf(0.0, reload[i] - delta * rate)
+				if reload[i] <= 0.0:
+					ammo[i] += 1
+					if ammo[i] < GunPod.MRLS_TUBES:
+						reload[i] = GunPod.MRLS_LOAD
+			elif ammo[i] >= GunPod.MRLS_TUBES:
+				reload[i] = 0.0
+			var rcd := float(_fire_cd.get(id, 0.0)) - delta
+			var rin: Dictionary = _inputs.get(id, {})
+			if occupants.has(id) and weapons_online and alive and bool(rin.get("fire", false)) and not fire_masked(id, aim_of(id)):
+				while rcd <= 0.0 and ammo[i] > 0:
+					ammo[i] -= 1
+					_fire_rocket(id, i, tubes[i])
+					tubes[i] = (tubes[i] + 1) % GunPod.MRLS_TUBES
+					rcd += GunPod.MRLS_INTERVAL / rate
+					if reload[i] <= 0.0:
+						reload[i] = GunPod.MRLS_LOAD
+			_fire_cd[id] = maxf(rcd, 0.0)
+			continue
 		heat[i] = maxf(0.0, heat[i] - GunPod.HEAT_COOL * rate * delta)
 		if reload[i] > 0.0:
 			reload[i] = maxf(0.0, reload[i] - delta)
@@ -936,6 +973,24 @@ func _server_weapons(delta: float) -> void:
 	gun_ammo = ammo
 	gun_heat = heat
 	gun_reload = reload
+	if tubes != gun_tube:
+		gun_tube = tubes
+
+
+## Server: gun pod `id` (index `i`) looses the rocket in `tube` (GunPod.mrls_mouth): out of the
+## tube's mouth along the pod's line, up to GunPod.MRLS_SPREAD off it, with a crooked curve of its own
+## that dies away; once it comes close to an alien it homes in on it (Projectiles.fire_rocket).
+func _fire_rocket(id: String, i: int, tube: int) -> void:
+	var pod: GunPod = turrets[id]
+	var a := aim_of(id)
+	var b := pod.aim_basis_local(a)
+	var muzzle := to_global(pod.transform.origin + b * GunPod.mrls_mouth(tube))
+	var dir := scatter(-(global_basis * b).z, deg_to_rad(GunPod.MRLS_SPREAD))
+	var side := dir.cross(Vector3.UP if absf(dir.y) < 0.9 else Vector3.RIGHT).normalized()
+	var curve := side.rotated(dir, randf() * TAU) * randf_range(Projectiles.ROCKET_CURVE * 0.4, Projectiles.ROCKET_CURVE)
+	var dmg := GunPod.MRLS_DAMAGE * float(stats["turret_damage"]) * (1.25 if style_of(id) == "heavy" else 1.0)
+	Game.mission.projectiles.fire_rocket(muzzle, dir * GunPod.MRLS_SPEED + velocity, dmg, curve)
+	_fx_pod_shot.rpc(i, tube, false)
 
 
 ## True while gun pod `id`'s sight line at aim `a` runs into the ship itself (only a mount that
@@ -978,6 +1033,26 @@ func _fire_round(id: String, i: int, hot: bool) -> void:
 		if _time - _hot_told[i] > 4.0:
 			_hot_told[i] = _time
 			notify.rpc("%s OVERHEATING - firing it hot damages the weapon systems!" % station_name(id).to_upper(), 1)
+
+
+## Server: gun pod `i` has had a weapon mounted: loaded full (a belt, or every tube) and cold.
+func _reset_gun(i: int) -> void:
+	if i < 0 or i >= gun_ammo.size():
+		return
+	var rockets := gun_weapon(layout["guns"][i]) == "mrls"
+	var ammo := gun_ammo.duplicate()
+	ammo[i] = GunPod.MRLS_TUBES if rockets else GunPod.BELT
+	gun_ammo = ammo
+	var heat := gun_heat.duplicate()
+	heat[i] = 0.0
+	gun_heat = heat
+	var reload := gun_reload.duplicate()
+	reload[i] = 0.0
+	gun_reload = reload
+	var tubes := gun_tube.duplicate()
+	tubes[i] = 0
+	gun_tube = tubes
+	_next_barrel[i] = 0
 
 
 ## A random direction within `cone` radians of `dir` (spread evenly over the cone's disc).
@@ -1763,7 +1838,7 @@ func _unload_derelict(d: Dictionary) -> void:
 	for rec: Dictionary in state["crates"]:
 		_crate_seq += 1
 		cargo_spawner.spawn({"name": "C%d" % _crate_seq, "item": rec["item"], "price": 0,
-			"pos": (rec["pos"] as Vector3) - lift, "yaw": rec["yaw"]})
+			"pos": (rec["pos"] as Vector3) - lift, "yaw": rec["yaw"], "sentry": rec.get("sentry", {})})
 	for rec: Dictionary in state["enemies"]:
 		var data := rec.duplicate()
 		data["pos"] = (rec["pos"] as Vector3) - lift
@@ -1799,7 +1874,8 @@ func outpost_hp_mult() -> float:
 ## by the walls (RunItems.roll_salvage; the armory's are mostly hand weapons, and a room behind a
 ## sealed door holds more), and the aliens living there, tougher deeper down: a stalker roaming it
 ## (shut in behind a door that needs the generator's power, if there is one), barnacles on the
-## ceilings, crawler nests with their packs, and acid spiders. The first room is always clear.
+## ceilings, crawler nests with their packs, acid spiders, and a horde of boarders behind every door
+## locked from the control hub. The first room is always clear.
 func _derelict_contents(d: Dictionary) -> Dictionary:
 	var mission: MissionLevel = Game.mission
 	var k := int(d["k"])
@@ -1809,7 +1885,7 @@ func _derelict_contents(d: Dictionary) -> Dictionary:
 	var hp_mult := mission.hp_mult(s)
 	# Their bites hurt more deeper down, but less steeply than the aliens in the tunnels.
 	var dmg_mult := 1.0 + (mission.dmg_mult(s) - 1.0) * 0.5
-	# No ship guns: the gun pods carry their heavy machine guns (see gun_weapons).
+	# (Guns for the gun pods only come from the waystations' shops.)
 	var guns: Array = []
 	var free := turret_slots() - autocannons - _crates_of("autocannon")
 	var layout: Dictionary = d["layout"]
@@ -1820,6 +1896,8 @@ func _derelict_contents(d: Dictionary) -> Dictionary:
 	var weapons: Array = CrewWeapons.ORDER.filter(func(w): return w != CrewWeapons.DEFAULT)
 	var cash_rng := RandomNumberGenerator.new()
 	cash_rng.seed = hash([int(mission.mission_seed), k, "credits"])
+	# The spots by the walls each room has left once its salvage and credit boxes are out.
+	var left_spots: Array = []
 	for i in rooms.size():
 		var room: Dictionary = rooms[i]
 		var theme := str(room["theme"])
@@ -1855,6 +1933,23 @@ func _derelict_contents(d: Dictionary) -> Dictionary:
 			var worth := _credit_box(cash_rng, s) * (1.5 if theme == "vault" else (1.25 if str(room["seal"]) != "" else 1.0))
 			crates.append({"item": RunItems.credits_item(int(round(worth / 5.0)) * 5),
 				"pos": (spot["pos"] as Vector3) + Vector3(0, SupplyCrate.SIZE.y * 0.5, 0), "yaw": spot["yaw"]})
+		left_spots.append(spots.slice(mini(loot + boxes, spots.size())))
+	# Sentry turrets (rolled apart too): one or two in the rooms nearest the front door, and one more
+	# for every room locked from the control hub, to hold its door with when it opens. Each faces into
+	# its room (a sentry's front is its +x).
+	var guard_rng := RandomNumberGenerator.new()
+	guard_rng.seed = hash([int(mission.mission_seed), k, "sentry"])
+	var sentries := mini(1 + (1 if guard_rng.randf() < 0.5 else 0) + OutpostLayout._seals(rooms, "hub"), SENTRY_MAX)
+	for ri in rooms.size():
+		if sentries <= 0:
+			break
+		var free_spots: Array = left_spots[ri]
+		if str(rooms[ri]["seal"]) != "" or free_spots.is_empty():
+			continue
+		var spot: Dictionary = free_spots.pop_back()
+		crates.append({"item": "sentry", "pos": (spot["pos"] as Vector3) + Vector3(0, SupplyCrate.SIZE.y * 0.5, 0),
+			"yaw": float(spot["yaw"]) - PI / 2.0})
+		sentries -= 1
 	var add := func(kind: String, pos: Vector3, more: Dictionary) -> void:
 		var hp := float(Boarder.KIND_STATS[kind]["hp"]) * hp_mult
 		var rec := {"kind": kind, "pos": pos, "hp": hp, "max_hp": hp, "dmg": dmg_mult}
@@ -1943,6 +2038,14 @@ func _derelict_contents(d: Dictionary) -> Dictionary:
 		var count := (2 if str(rooms[ri]["seal"]) != "" else rng.randi_range(1, 2)) + (1 if extra > 0 and rng.randf() < 0.5 else 0)
 		for j in count:
 			add.call("spider", _free_spot(rooms[ri], used, rng), {})
+	# The hordes behind the doors locked from the control hub (rolled apart, so the rest is as it
+	# was without them).
+	var horde_rng := RandomNumberGenerator.new()
+	horde_rng.seed = hash([int(mission.mission_seed), k, "horde"])
+	for ri in range(1, rooms.size()):
+		if str(rooms[ri]["seal"]) == "hub":
+			for j in horde_rng.randi_range(HORDE.x, HORDE.y) + extra:
+				add.call("boarder", _free_spot(rooms[ri], used, horde_rng), {})
 	return {"crates": crates, "enemies": enemies}
 
 
@@ -1955,7 +2058,8 @@ static func _barnacle_spot(layout: Dictionary, c: Vector2i, rng: RandomNumberGen
 		var lamp := (c.x + c.y) % DerelictBuilder.LAMP_EVERY == 0
 		var s := -rng.randf_range(0.45, 0.8) if lamp else rng.randf_range(-0.8, 0.8)
 		return along * s + Vector3(along.z, 0, along.x) * rng.randf_range(-0.12, 0.12)
-	return Vector3(rng.randf_range(0.55, 0.75) * signf(rng.randf() - 0.5), 0, rng.randf_range(0.55, 0.75) * signf(rng.randf() - 0.5))
+	# (Its crust reaches up to about 0.68 m from its middle where the lumps bulge.)
+	return Vector3(rng.randf_range(0.5, 0.62) * signf(rng.randf() - 0.5), 0, rng.randf_range(0.5, 0.62) * signf(rng.randf() - 0.5))
 
 
 ## What a credit box found in a station `s` metres down is worth (before the vault's and the sealed
@@ -1988,7 +2092,10 @@ func _stow_derelict(d: Dictionary) -> void:
 		var crate := c as SupplyCrate
 		if crate == null or crate.carrier != 0 or is_aboard(crate.net_pos):
 			continue
-		(state["crates"] as Array).append({"item": crate.item, "pos": crate.net_pos + lift, "yaw": crate.net_yaw})
+		var rec := {"item": crate.item, "pos": crate.net_pos + lift, "yaw": crate.net_yaw}
+		if crate is Sentry:
+			rec["sentry"] = (crate as Sentry).save_data()
+		(state["crates"] as Array).append(rec)
 		crate.queue_free()
 	for c in boarder_root.get_children():
 		var b := c as Boarder
@@ -2118,13 +2225,113 @@ static func _door_room_name(d: Dictionary, di: int) -> String:
 	return str(d["layout"]["rooms"][room]["name"]).to_lower() if room >= 0 else "door"
 
 
-## Ship-local spots at the landed outpost: "generator" (its starter) or "keypad" (door `di`'s).
+## Whether the landed outpost's control hub works (with a generator, once it runs).
+func hub_powered() -> bool:
+	var d := _landed_outpost()
+	return not d.is_empty() and (outpost_power or int((d["layout"] as Dictionary)["generator"]) < 0)
+
+
+## A crew member (any peer) at the control hub's computer sends the line typed there (see
+## _hub_command); the answer goes onto its screen on every peer. Only while the hub has power.
+@rpc("any_peer", "call_local", "reliable")
+func request_hub_command(line: String) -> void:
+	if not multiplayer.is_server():
+		return
+	var d := _landed_outpost()
+	if d.is_empty() or int((d["layout"] as Dictionary).get("hub", -1)) < 0 or not hub_powered():
+		return
+	var p := crew_root.get_node_or_null(str(Game.sender_id())) as CrewMember
+	var at := _outpost_spot("hub")
+	if p == null or not p.alive or at.distance_to(p.position + Vector3(0, 1.2, 0)) > 3.5:
+		return
+	var text := line.strip_edges().to_upper().left(HubConsole.TYPED_MAX)
+	if text.is_empty():
+		return
+	var answer := _hub_command(d, text)
+	var lines := PackedStringArray(["> " + text])
+	lines.append_array(answer[0])
+	fx_hub_log.rpc(lines, bool(answer[1]))
+
+
+## Server: what a command typed at the control hub does, and its answer ([lines, whether it did
+## what was asked]): HELP; DOORS, every door and its state; LOCK <id> and UNLOCK <id>, any door but
+## the front door, not one locked down for good, and a door only comes down on an empty doorway.
+## Whatever was shut in behind a door hears it open.
+func _hub_command(d: Dictionary, text: String) -> Array:
+	var layout: Dictionary = d["layout"]
+	var doors: Array = layout["doors"]
+	var words := text.split(" ", false)
+	var verb := words[0]
+	match verb:
+		"HELP", "?":
+			return [PackedStringArray(HubConsole.HELP), true]
+		"DOORS", "LIST", "STATUS":
+			var out := PackedStringArray()
+			for di in range(1, doors.size()):
+				out.append("%-4s %-9s %s" % [doors[di]["id"], ["LOCKED", "OPEN", "LOCKDOWN"][outpost_doors[di]],
+					_door_room_name(d, di).to_upper()])
+			return [out, true]
+		"LOCK", "UNLOCK", "OPEN", "CLOSE":
+			var lock := verb in ["LOCK", "CLOSE"]
+			if words.size() < 2:
+				return [PackedStringArray(["USAGE: %s <DOOR ID>, E.G. %s D23" % [verb, verb]]), false]
+			var di := OutpostLayout.door_by_id(layout, words[1])
+			if di < 0:
+				return [PackedStringArray(["NO DOOR %s - THE IDS ARE ON THE MAP" % words[1].left(8)]), false]
+			var id := str(doors[di]["id"])
+			var state := int(outpost_doors[di])
+			if state == Derelict.DOOR_LOCKDOWN:
+				return [PackedStringArray(["%s IS IN LOCKDOWN - NO OVERRIDE" % id]), false]
+			if (state == Derelict.DOOR_CLOSED) == lock:
+				return [PackedStringArray(["%s IS ALREADY %s" % [id, "LOCKED" if lock else "OPEN"]]), false]
+			if lock and _doorway_blocked(layout, di):
+				return [PackedStringArray(["%s OBSTRUCTED - CLEAR THE DOORWAY" % id]), false]
+			_set_door(di, Derelict.DOOR_CLOSED if lock else Derelict.DOOR_OPEN)
+			if not lock:
+				var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+				alert_outpost(DerelictBuilder.door_inside(doors[di], 2.0) - lift, 18.0)
+			return [PackedStringArray(["%s %s - %s" % [id, "LOCKED" if lock else "UNLOCKED", _door_room_name(d, di).to_upper()]]), true]
+	return [PackedStringArray(["UNKNOWN COMMAND %s - TYPE HELP" % verb.left(12)]), false]
+
+
+## Whether anything stands in door `di`'s doorway (a crew member, an alien, a crate or a turret),
+## so its door can't come down.
+func _doorway_blocked(layout: Dictionary, di: int) -> bool:
+	var dd: Dictionary = layout["doors"][di]
+	var pos := (dd["pos"] as Vector3) - Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	var n: Vector3 = dd["normal"]
+	var across := n.cross(Vector3.UP)
+	var things: Array = crew_root.get_children() + boarder_root.get_children() + cargo_root.get_children()
+	for c in things:
+		var node := c as Node3D
+		if node == null or (node is CrewMember and not (node as CrewMember).alive):
+			continue
+		var off := node.position - pos
+		if absf(off.dot(n)) < 0.8 and absf(off.dot(across)) < OutpostLayout.DOOR_W * 0.5 + 0.3 \
+				and off.y > -1.0 and off.y < OutpostLayout.DOOR_H:
+			return true
+	return false
+
+
+## Every peer: the answer to a command typed at the control hub, onto its screen.
+@rpc("authority", "call_local", "reliable")
+func fx_hub_log(lines: PackedStringArray, ok: bool) -> void:
+	var node: Derelict = Derelict.live.get(outpost_k)
+	if node:
+		node.hub_print(lines, ok)
+
+
+## Ship-local spots at the landed outpost: "generator" (its starter), "keypad" (door `di`'s) or
+## "hub" (the control hub's computer).
 func _outpost_spot(what: String, di := -1) -> Vector3:
 	var node: Derelict = Derelict.live.get(derelict_k)
 	if node == null:
 		return Vector3(INF, INF, INF)
 	if what == "generator":
 		return to_local(node.generator_spot())
+	if what == "hub":
+		var console := node.hub_console()
+		return to_local(console.global_position) if console else Vector3(INF, INF, INF)
 	var panel := node.panel_of(di)
 	return to_local(panel.global_position) if panel else Vector3(INF, INF, INF)
 
@@ -2204,9 +2411,9 @@ func bought_crates_outside() -> int:
 func _station_offer(k: int) -> Array:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash([int(Game.mission.mission_seed), k, "shop"])
-	# No ship guns: the gun pods carry their heavy machine guns (see gun_weapons).
+	# A gun for the gun pods that isn't on every one of them yet (the rocket launchers, at first).
 	var free := turret_slots() - autocannons - _crates_of("autocannon")
-	var items := RunItems.roll_shop(rng, [], gun_weapons.values(), free)
+	var items := RunItems.roll_shop(rng, GunPod.WEAPONS.keys(), gun_weapons.values(), free)
 	var out := []
 	for i in mini(items.size(), StationBuilder.SHOP_SLOTS.size()):
 		var sl: Array = StationBuilder.SHOP_SLOTS[i]
@@ -2285,9 +2492,28 @@ func request_crate_pickup(crate_name: String) -> void:
 		return
 	if who.net_pos.distance_to(crate.net_pos) > 4.0:
 		return
+	# (A sentry turret is carried folded up.)
+	if crate is Sentry and (crate as Sentry).s_state != Sentry.PACKED:
+		return
 	crate.carrier = pid
 	crate.last_carrier_pos = who.net_pos
 	_fx_crate.rpc(crate.net_pos)
+
+
+## A crew member (any peer) opens a sentry turret set down in a station (`open`), or folds an open
+## one up again.
+@rpc("any_peer", "call_local", "reliable")
+func request_sentry(crate_name: String, open: bool) -> void:
+	if not multiplayer.is_server():
+		return
+	var s := cargo_root.get_node_or_null(crate_name) as Sentry
+	var who := crew_root.get_node_or_null(str(Game.sender_id())) as CrewMember
+	if s == null or who == null or not who.alive or s.carrier != 0 or who.net_pos.distance_to(s.net_pos) > 4.0:
+		return
+	if open:
+		s.server_open()
+	else:
+		s.server_fold()
 
 
 @rpc("any_peer", "call_local", "reliable")
@@ -2324,19 +2550,32 @@ func request_install(crate_name: String, target: String) -> void:
 		if target == "hub":
 			notify_peer(pid, "Guns are mounted at the gun consoles", 1)
 			return
+		var new_w := RunItems.weapon_of(item)
 		var old := gun_weapon(target)
+		if not GunPod.WEAPONS.has(new_w):
+			notify_peer(pid, "That gun doesn't fit the gun pods", 1)
+			return
+		if new_w == old:
+			notify_peer(pid, "The %s already carries a %s" % [station_name(target).to_lower(), RunItems.display_name(item)], 1)
+			return
 		var w := gun_weapons.duplicate()
-		w[target] = RunItems.weapon_of(item)
+		w[target] = new_w
 		gun_weapons = w
 		_fire_cd[target] = 0.6
-		msg = "%s mounted a %s on the %s (was %s)" % [who.display_name, RunItems.display_name(item),
-			station_name(target).to_lower(), Game.GUNS[old]["name"]]
+		_reset_gun(gun_index(target))
+		# The weapon taken off comes out in a crate at the crew member's feet, to mount again some time.
+		spawn_crate("weapon:" + old, who.net_pos + Vector3(0, SupplyCrate.SIZE.y * 0.5, 0), who.look_yaw + PI / 2.0)
+		msg = "%s mounted the %s on the %s (its %s came off in a crate)" % [who.display_name, RunItems.display_name(item),
+			station_name(target).to_lower(), str(GunPod.WEAPONS[old]["name"]).to_lower()]
 	elif RunItems.is_crew_weapon(item):
 		notify_peer(pid, "Hand weapons aren't installed - put the crate down and press F to equip it", 1)
 		return
 	elif RunItems.is_credits(item):
 		crate.carrier = 0
 		_deposit(crate, who)
+		return
+	elif item == "sentry":
+		notify_peer(pid, "Sentry turrets aren't installed - set one down in a station and press F to open it", 1)
 		return
 	else:
 		if target != "hub":
@@ -3085,7 +3324,9 @@ func _update_visuals(delta: float) -> void:
 		var holder := int(occupants.get(gid, 0))
 		var mine := lp != null and lp.station == gid
 		var figure := Net.player_color(holder) if holder != 0 and not mine else Color(0, 0, 0, 0)
-		pod.set_state(gun_ammo[i], gun_heat[i], gun_reload[i], weapons_hp, weapons_online and alive, figure, mine)
+		pod.set_weapon(gun_weapon(gid))
+		pod.set_state(gun_ammo[i], gun_heat[i], gun_reload[i], weapons_hp, weapons_online and alive, figure, mine,
+			gun_tube[i] if i < gun_tube.size() else -1)
 		pod.masked = fire_masked(gid, pod.aim)
 	var glow: StandardMaterial3D = _ext["engine_glow_mat"]
 	var power := clampf(absf(throttle), 0.0, 1.0) if engine_online and alive else 0.0

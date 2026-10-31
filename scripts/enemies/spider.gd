@@ -81,9 +81,10 @@ func _think_outside(delta: float, ship: Mothership) -> void:
 				_set_goal(ship, _graph(ship), _spot)
 				_repath = 1.5
 			_follow_path(delta)
-			var d := _surf_pos.distance_to(victim.position + Vector3(0, 1.2, 0))
+			var aim_at := victim.position + Vector3(0, aim_height(victim), 0)
+			var d := _surf_pos.distance_to(aim_at)
 			if _phase_t <= 0.0 and d < SPIT_FAR + 3.0 and _attack_cd <= 0.0 \
-					and _clear_from(ship, ship.to_global(_surf_pos + _surf_up * 0.4), ship.to_global(victim.position + Vector3(0, 1.2, 0))):
+					and _clear_from(ship, ship.to_global(_surf_pos + _surf_up * 0.4), ship.to_global(aim_at)):
 				mode = WINDUP_M
 				_phase_t = WINDUP
 				attacking = true
@@ -106,7 +107,7 @@ func _think_outside(delta: float, ship: Mothership) -> void:
 
 
 ## Where to scurry next: a spot round the target, SPIT_NEAR..SPIT_FAR from it, off to one side.
-func _scurry_spot(ship: Mothership, victim: CrewMember) -> Vector3:
+func _scurry_spot(ship: Mothership, victim: Node3D) -> Vector3:
 	var away := position - victim.position
 	away.y = 0.0
 	if away.length_squared() < 0.01:
@@ -120,10 +121,11 @@ func _scurry_spot(ship: Mothership, victim: CrewMember) -> Vector3:
 	return graph.get_point_position(id) if id >= 0 else spot
 
 
-## A glob of acid from its mouth at the target's chest, aimed high to allow for the drop.
-func _spit(ship: Mothership, victim: CrewMember) -> void:
+## A glob of acid from its mouth at the target's chest (a sentry turret's gun), aimed high to allow
+## for the drop.
+func _spit(ship: Mothership, victim: Node3D) -> void:
 	var mouth := ship.to_global(_surf_pos + _surf_up * 0.35)
-	var target := ship.to_global(victim.position + Vector3(0, 1.15, 0))
+	var target := ship.to_global(victim.position + Vector3(0, aim_height(victim), 0))
 	var dist := mouth.distance_to(target)
 	var t := dist / SPIT_SPEED
 	target += ship.global_basis.y * (0.5 * Projectiles.ACID_GRAVITY * t * t)

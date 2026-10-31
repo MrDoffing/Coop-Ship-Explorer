@@ -15,9 +15,9 @@ extends Node3D
 ## shallow V; the shell is deepest at the bottom, where the instruments are.
 ## The visor (grimy glass like the mothership's windows: grime gathered round its edge and along the
 ## bottom, smudges and scratches) swings down and seals by itself when the crew member leaves the
-## ship and opens again back aboard; it fogs up for a moment as it seals. Once the health is
-## critical (CRITICAL) the visor cracks from its edges, more and further as the health drops, and
-## the suit beeps; the cracks seal over once the health has recovered.
+## ship and opens again back aboard; it fogs up for a moment as it seals. Once the health is down to
+## half (CRACK_START) the visor cracks from its edges, more and further as the health drops; once it
+## is critical (CRITICAL) the suit beeps. The cracks seal over once the health has recovered.
 ##
 ## Built in the camera's frame (-Z forward, the eye at the origin). Everything is on the viewmodel
 ## render layer (Game.VIS_VIEWMODEL), which the crew's own flashlight does not light. Other lights
@@ -64,11 +64,13 @@ const PLATE_FALL := 0.005
 const R_VISOR := 0.158
 const OPEN_ANGLE := 1.5
 const VISOR_TIME := 0.7
-## Below this share of max health the health is critical: the visor cracks (crack k once below
-## CRACK_AT[k], growing to full length over CRACK_GROW more of the health) and the suit beeps. The
-## cracks seal once the health is back above CRITICAL + HEAL_MARGIN.
+## Below CRACK_START of max health the visor cracks (crack k once below CRACK_AT[k], growing to full
+## length over CRACK_GROW more of the health); the cracks seal once the health is back above
+## CRACK_START + HEAL_MARGIN. Below CRITICAL the health is critical: the suit beeps and the CRIT
+## lamp flashes.
 const CRITICAL := 0.3
-const CRACK_AT := [0.3, 0.24, 0.18, 0.12, 0.06]
+const CRACK_START := 0.5
+const CRACK_AT := [0.5, 0.4, 0.3, 0.2, 0.1]
 const CRACK_GROW := 0.15
 const HEAL_MARGIN := 0.12
 ## The cracks: where each starts by the visor's edge (tangent space), the way it runs and its full
@@ -917,11 +919,11 @@ func _update_visor(delta: float, shown: bool) -> void:
 	_visor_mat.set_shader_parameter("fog", _fog * _fog)
 
 
-## Critical health cracks the visor from its edges, further as the health drops; it seals over once
-## the health has recovered. The suit beeps while the health is critical.
+## Health down to half (CRACK_START) cracks the visor from its edges, further as the health drops;
+## it seals over once the health has recovered. The suit beeps while the health is critical.
 func _update_cracks(delta: float, shown: bool) -> void:
 	var frac := clampf(crew.hp / maxf(crew.max_hp, 0.001), 0.0, 1.0) if crew.alive else 0.0
-	if frac > CRITICAL + HEAL_MARGIN or not crew.alive:
+	if frac > CRACK_START + HEAL_MARGIN or not crew.alive:
 		if _cracks_on > 0 and crew.alive and shown:
 			Sfx.play("visor_seal", null, -14.0, 1.25)
 		for k in _crack_len.size():

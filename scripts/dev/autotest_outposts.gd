@@ -20,7 +20,7 @@ func run_plans() -> void:
 	var seeds := 80
 	var fails := 0
 	var times: Array[float] = []
-	var stats := {"rooms": 0, "doors": 0, "hack": 0, "power": 0, "generator": 0, "security": 0, "armory": 0, "loops": 0,
+	var stats := {"rooms": 0, "doors": 0, "hack": 0, "power": 0, "generator": 0, "hub": 0, "armory": 0, "loops": 0,
 		"l_shaped": 0, "junctions": 0, "bends": 0}
 	var themes := {}
 	for sd in seeds:
@@ -40,7 +40,7 @@ func run_plans() -> void:
 			if str(d["kind"]) in ["hack", "power"]:
 				stats[str(d["kind"])] += 1
 		stats["generator"] += 1 if int(layout["generator"]) >= 0 else 0
-		stats["security"] += 1 if int(layout["security"]) >= 0 else 0
+		stats["hub"] += 1 if int(layout["hub"]) >= 0 else 0
 		for room: Dictionary in rooms:
 			themes[room["theme"]] = int(themes.get(room["theme"], 0)) + 1
 			if str(room["theme"]) == "armory":
@@ -93,8 +93,8 @@ func run_plans() -> void:
 		phase["nav"] += (t5 - t4) / 20000.0
 	print("[autotest] plans: placing rooms %.1f ms, a corridor route %.2f ms, furnishing %.1f ms, the walking graph %.1f ms" % [
 		phase["place"], phase["route"], phase["furnish"], phase["nav"]])
-	print("[autotest] plans: per outpost %.1f rooms, %.1f doorways; %d keypad locks, %d power doors, %d generators, %d security rooms, %d armories" % [
-		stats["rooms"] / float(seeds), stats["doors"] / float(seeds), stats["hack"], stats["power"], stats["generator"], stats["security"], stats["armory"]])
+	print("[autotest] plans: per outpost %.1f rooms, %.1f doorways; %d keypad locks, %d power doors, %d generators, %d control hubs, %d armories" % [
+		stats["rooms"] / float(seeds), stats["doors"] / float(seeds), stats["hack"], stats["power"], stats["generator"], stats["hub"], stats["armory"]])
 	print("[autotest] plans: %d rooms with two or more doorways (loops), %d L-shaped or with an alcove, corridor junctions %d, bends %d" % [
 		stats["loops"], stats["l_shaped"], stats["junctions"], stats["bends"]])
 	print("[autotest] plans: themes %s" % str(themes))
@@ -178,7 +178,8 @@ func _check_plan(layout: Dictionary) -> Array[String]:
 
 
 ## A plan as a picture: rock dark, rooms by theme, corridors grey, walls black, doorways by kind
-## (green open, red keypad, yellow power), furniture outlined, salvage spots and cameras dotted.
+## (green open, red keypad, yellow power, blue locked from the control hub), furniture outlined,
+## salvage spots and cameras dotted.
 func _draw_plan(layout: Dictionary, sd: int) -> void:
 	var px := 30
 	var w := OutpostLayout.GX * px
@@ -186,7 +187,7 @@ func _draw_plan(layout: Dictionary, sd: int) -> void:
 	var img := Image.create(w, h + px, false, Image.FORMAT_RGB8)
 	img.fill(Color(0.08, 0.08, 0.09))
 	var colors := {"lab": Color(0.25, 0.55, 0.35), "storage": Color(0.45, 0.4, 0.25), "vault": Color(0.55, 0.3, 0.2),
-		"quarters": Color(0.3, 0.35, 0.55), "mess": Color(0.55, 0.45, 0.3), "security": Color(0.25, 0.45, 0.55),
+		"quarters": Color(0.3, 0.35, 0.55), "mess": Color(0.55, 0.45, 0.3), "hub": Color(0.25, 0.45, 0.55),
 		"generator": Color(0.6, 0.55, 0.15), "armory": Color(0.5, 0.25, 0.25), "medbay": Color(0.55, 0.55, 0.55), "workshop": Color(0.4, 0.3, 0.45)}
 	var kind: PackedByteArray = layout["kind"]
 	var owner: PackedInt32Array = layout["owner"]
@@ -212,7 +213,8 @@ func _draw_plan(layout: Dictionary, sd: int) -> void:
 			var di := DerelictBuilder._door_between(layout, c, n)
 			var col := Color.BLACK
 			if di >= 0:
-				col = {"open": Color(0.2, 0.9, 0.3), "hack": Color(1.0, 0.15, 0.1), "power": Color(1.0, 0.85, 0.1)}.get(str(layout["doors"][di]["kind"]), Color.WHITE)
+				col = {"open": Color(0.2, 0.9, 0.3), "hack": Color(1.0, 0.15, 0.1), "power": Color(1.0, 0.85, 0.1),
+					"hub": Color(0.3, 0.75, 1.0)}.get(str(layout["doors"][di]["kind"]), Color.WHITE)
 			var x0 := c.x * px
 			var y0 := (OutpostLayout.GZ - 1 - c.y) * px + px
 			var r := Rect2i()
@@ -280,10 +282,10 @@ func start_outpost(mission_seed := -1) -> MissionLevel:
 
 
 ## A camera tour of the outpost the test lands at (windowed): how long it takes to build, the
-## corridors, every room, the generator, the security desk and a keypad, with the power off and on,
+## corridors, every room, the generator, the control hub's desk and a keypad, with the power off and on,
 ## and a lockdown.
 func run_tour() -> void:
-	var sd := seed_where(func(l): return int(l["generator"]) >= 0 and int(l["security"]) >= 0 and OutpostLayout._seals(l["rooms"], "hack") > 0)
+	var sd := seed_where(func(l): return int(l["generator"]) >= 0 and int(l["hub"]) >= 0 and OutpostLayout._seals(l["rooms"], "hack") > 0)
 	var m := await start_outpost(sd)
 	if m == null:
 		print("[autotest] FAIL: the outpost test never started")
@@ -368,7 +370,7 @@ func _stage_times(m: MissionLevel, d: Dictionary) -> String:
 	stamp.call("facade")
 	DerelictBuilder._build_shell(b, body, d["layout"], mats)
 	stamp.call("shell")
-	DerelictBuilder._build_halls(root, b, d["layout"], mats, rng, true)
+	DerelictBuilder._build_halls(root, b, d["layout"], mats, rng, true, Models.Batch.new())
 	stamp.call("halls")
 	var props := {"tanks": [], "subjects": [], "screens": [], "generator": {}}
 	for ri in (d["layout"]["rooms"] as Array).size():
@@ -384,7 +386,7 @@ func _stage_times(m: MissionLevel, d: Dictionary) -> String:
 	return str(out)
 
 
-## Views of every room, a corridor or two, the generator, the security desk and a keypad.
+## Views of every room, a corridor or two, the generator, the control hub's desk and a keypad.
 func _views(cam: Camera3D, xf: Transform3D, layout: Dictionary, prefix: String) -> void:
 	var rooms: Array = layout["rooms"]
 	for ri in rooms.size():
@@ -393,12 +395,18 @@ func _views(cam: Camera3D, xf: Transform3D, layout: Dictionary, prefix: String) 
 		var a := OutpostLayout.cell_pos(core.position)
 		var e := OutpostLayout.cell_pos(core.end - Vector2i.ONE)
 		var mid := (a + e) * 0.5
-		var eye := a + (a - mid).normalized() * 0.6 + Vector3(0, float(room["h"]) - 1.0, 0)
-		if ri == int(layout["generator"]) or ri == int(layout["security"]):
+		# (Below the hanging lamps, which hang over every other core cell from its corner.)
+		var eye := a + (a - mid).normalized() * 0.6 + Vector3(0, float(room["h"]) - 1.6, 0)
+		if ri == int(layout["generator"]) or ri == int(layout["hub"]):
 			eye = mid + (a - mid) * 0.8 + Vector3(0, 2.4, 0)
 		_look(cam, xf, eye, mid + Vector3(0, 0.6, 0))
 		await t.wait(0.35)
 		await t.shot("%s_room%d_%s" % [prefix, ri, room["theme"]])
+		# At eye height, a step in from its first doorway.
+		var dd: Dictionary = layout["doors"][(room["doors"] as Array)[0]]
+		_look(cam, xf, DerelictBuilder.door_inside(dd, 0.5) + Vector3(0, 1.65, 0), mid + Vector3(0, 1.1, 0))
+		await t.wait(0.35)
+		await t.shot("%s_room%d_%s_eye" % [prefix, ri, room["theme"]])
 	# The longest straight run of corridor, looking along it.
 	var best := []
 	for c: Vector2i in OutpostLayout.corridor_cells(layout):
@@ -418,15 +426,16 @@ func _views(cam: Camera3D, xf: Transform3D, layout: Dictionary, prefix: String) 
 		_look(cam, xf, p0 + Vector3(0, 1.65, 0) - (p1 - p0).normalized() * 1.2, p1 + Vector3(0, 1.4, 0))
 		await t.wait(0.35)
 		await t.shot("%s_corridor" % prefix)
-	# The security desk's screens, from its chairs (the feeds run while the viewer is in the room).
-	var sec := int(layout["security"])
+	# The control hub's desk from its chair (the feeds run while the viewer is in the room): the map
+	# board, the monitors over it and the computer.
+	var sec := int(layout["hub"])
 	if sec >= 0:
 		for prop: Dictionary in rooms[sec]["props"]:
-			if str(prop["kind"]) == "security_desk":
+			if str(prop["kind"]) == "hub_desk":
 				var px := Transform3D(Basis(Vector3.UP, float(prop["yaw"])), prop["pos"])
-				_look(cam, xf, px * Vector3(0.2, 1.55, 1.9), px * Vector3(0, 1.3, -0.25))
+				_look(cam, xf, px * Vector3(0.2, 1.6, 2.3), px * Vector3(0, 1.8, -0.6))
 				await t.wait(1.0)
-				await t.shot("%s_security_desk" % prefix)
+				await t.shot("%s_hub_desk" % prefix)
 	# A keypad lock, close up.
 	var node: Derelict = Derelict.live.get(Game.mission.ship.derelict_k)
 	for di in (layout["doors"] as Array).size():
@@ -446,6 +455,900 @@ func _views(cam: Camera3D, xf: Transform3D, layout: Dictionary, prefix: String) 
 func _look(cam: Camera3D, xf: Transform3D, eye: Vector3, at: Vector3) -> void:
 	cam.global_position = xf * eye
 	cam.look_at(xf * at, xf.basis.y)
+
+
+# --- Keypads in view ---------------------------------------------------------------------------
+
+## Every keypad lock of many outposts: nothing the station builds stands in front of its panel,
+## between it and the close look at it (HackPanel.clear_box). Each outpost is built far below the
+## test's own (not set up: no lamps run), its batched triangles checked before they are committed
+## (their bounds, in the panel's frame) and every other mesh's and label's bounds. Windowed, the
+## first few keypads are also pictured as the close look sees them (kc_<seed>_<door>.png).
+func run_keypad_clear(shots: bool) -> void:
+	var m := await start_outpost()
+	if m == null:
+		print("[autotest] FAIL: the outpost test never started")
+		return
+	await t.wait(0.5)
+	var scratch := Node3D.new()
+	m.add_child(scratch)
+	var seeds := 40
+	var panels := 0
+	var bad_tris := 0
+	var bad_nodes := PackedStringArray()
+	var pictured := 0
+	var t0 := Time.get_ticks_msec()
+	for sd in seeds:
+		var rng := RandomNumberGenerator.new()
+		rng.seed = hash([sd, "plan"])
+		var layout := OutpostLayout.generate(rng)
+		var spots: Array[Transform3D] = []
+		for dd: Dictionary in layout["doors"]:
+			if str(dd["kind"]) == "hack":
+				spots.append(DerelictBuilder._keypad_spot(layout, dd))
+		if spots.is_empty():
+			continue
+		var at := Transform3D(Basis.IDENTITY, Vector3(0, -600.0, 0))
+		var d := {"k": -1000 - sd, "layout": layout, "xform": at, "seed": hash([sd, "dressing"]), "name": layout["name"]}
+		var root := Derelict.new()
+		root.k = int(d["k"])
+		root.layout = layout
+		root.transform = at
+		scratch.add_child(root)
+		var b := Models.Batch.new()
+		DerelictBuilder.build_parts(root, b, Models.Batch.new(), d)
+		var boxes: Array = []
+		for spot in spots:
+			boxes.append([spot.affine_inverse(), HackPanel.clear_box()])
+		panels += spots.size()
+		# The batched triangles (station-local).
+		for part: Models.BatchPart in b._parts.values():
+			var v := part.v
+			for i in range(0, v.size() - 2, 3):
+				for bx: Array in boxes:
+					var inv: Transform3D = bx[0]
+					var tri := AABB(inv * v[i], Vector3.ZERO).expand(inv * v[i + 1]).expand(inv * v[i + 2])
+					if tri.intersects(bx[1]):
+						bad_tris += 1
+		# The furniture models placed whole (their bounds).
+		for key: Variant in b._instances:
+			var mesh: Mesh = key[0] if key is Array else key
+			for x: Transform3D in b._instances[key]:
+				for bx: Array in boxes:
+					if ((bx[0] as Transform3D) * x * mesh.get_aabb()).intersects(bx[1]):
+						bad_nodes.append("%d:%s model" % [sd, mesh.resource_name])
+		# Everything else that shows (meshes, labels), but the panels themselves.
+		var station_inv := root.global_transform.affine_inverse()
+		for g: GeometryInstance3D in root.find_children("*", "GeometryInstance3D", true, false):
+			var inside_panel := false
+			var n: Node = g
+			while n != null and n != root:
+				if n is HackPanel:
+					inside_panel = true
+					break
+				n = n.get_parent()
+			# (A keypad lock's lockdown shutter hangs up in the ceiling until a lockdown, when the
+			# keypad is dead.)
+			if inside_panel or not g.visible or str(g.name).begins_with("Shutter"):
+				continue
+			var local := station_inv * g.global_transform * g.get_aabb()
+			for bx: Array in boxes:
+				if ((bx[0] as Transform3D) * local).intersects(bx[1]):
+					var what: String = (g as MeshInstance3D).mesh.get_class() if g is MeshInstance3D and (g as MeshInstance3D).mesh else g.get_class()
+					var spot_of: Transform3D = (bx[0] as Transform3D).affine_inverse()
+					bad_nodes.append("%d:%s (%s under %s at %s; the keypad at %s facing %s, in cell %s)" % [sd, g.name, what, g.get_parent().name,
+						(station_inv * g.global_position).snapped(Vector3.ONE * 0.01), spot_of.origin.snapped(Vector3.ONE * 0.01),
+						spot_of.basis.z.snapped(Vector3.ONE * 0.01), OutpostLayout.cell_at(spot_of.origin)])
+		if shots and pictured < 6:
+			b.commit(root, "Derelict")
+			for panel: HackPanel in root.find_children("*", "HackPanel", true, false):
+				if pictured >= 6:
+					break
+				var cam := Camera3D.new()
+				cam.fov = HackPanel.VIEW_FOV
+				m.add_child(cam)
+				cam.global_transform = panel.view_transform()
+				cam.current = true
+				var lamp := OmniLight3D.new()
+				lamp.omni_range = 6.0
+				lamp.light_energy = 1.6
+				cam.add_child(lamp)
+				lamp.position = Vector3(0.3, 0.4, 0.2)
+				panel.enter()
+				await t.wait(1.5)
+				await t.shot("kc_%d_%d" % [sd, panel.door])
+				cam.queue_free()
+				pictured += 1
+			m.local_player.camera.current = true
+		root.free()
+	scratch.queue_free()
+	print("[autotest] keypads: %d keypads in %d outposts checked in %.1f s: %d batched triangles in front of a keypad, other meshes in front: %s" % [
+		panels, seeds, (Time.get_ticks_msec() - t0) / 1000.0, bad_tris, "none" if bad_nodes.is_empty() else ", ".join(bad_nodes)])
+
+
+# --- Performance -------------------------------------------------------------------------------
+
+## What an outpost costs to draw (windowed, vsync off): the player stands on the pier looking in, in
+## a corridor and in every room, flashlight on; at each the frame rate, the main view's GPU time and
+## the draw calls, objects and triangles drawn. Then the same in the first room with the flashlight
+## off, with the station hidden, and the station's own counts: mesh instances, triangles, lights,
+## decals. `bots` crew bots come along (they stand beside the player, their flashlights on).
+func run_perf(bots := 0, bisect := false) -> void:
+	var sd := seed_where(func(l): return int(l["generator"]) >= 0 and int(l["hub"]) >= 0)
+	Game.bot_count = bots
+	var m := await start_outpost(sd)
+	if m == null:
+		print("[autotest] FAIL: the outpost test never started")
+		return
+	await t.wait(1.0)
+	var ship := m.ship
+	var p := m.local_player
+	# (Nobody gets hurt meanwhile: the aliens live on, but the player can't die.)
+	p.max_hp = 100000.0
+	p.hp = 100000.0
+	var d := m.cave.derelict(ship.derelict_k)
+	var layout: Dictionary = d["layout"]
+	var node: Derelict = Derelict.live.get(ship.derelict_k)
+	var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	var floor_y := StationBuilder.DECK_Y - StationBuilder.LAND_HEIGHT + 0.05
+	var tris := 0
+	var meshes := 0
+	for mi: MeshInstance3D in node.find_children("*", "MeshInstance3D", true, false):
+		meshes += 1
+		if mi.mesh:
+			tris += mi.mesh.get_faces().size() / 3
+	var lights := node.find_children("*", "Light3D", true, false).size()
+	var decals := node.find_children("*", "Decal", true, false).size()
+	print("[autotest] perf: %s, %d mesh instances, %d triangles, %d lights, %d decals; %d aliens, %d crew bots, %d nodes in the tree" % [d["name"], meshes, tris, lights,
+		decals, ship.boarder_root.get_child_count(), bots, int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))])
+	var rid := t.get_viewport().get_viewport_rid()
+	RenderingServer.viewport_set_measure_render_time(rid, true)
+	var vsync := DisplayServer.window_get_vsync_mode()
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+	var spots: Array = []
+	spots.append(["pier", Vector3(0, floor_y, DerelictBuilder.FACADE_Z - 4.0), 0.0])
+	var halls := OutpostLayout.corridor_cells(layout)
+	if not halls.is_empty():
+		spots.append(["corridor", OutpostLayout.cell_pos(halls[halls.size() / 2]) - lift + Vector3(0, 0.05, 0), PI * 0.5])
+	var rooms: Array = layout["rooms"]
+	for ri in rooms.size():
+		var core: Rect2i = rooms[ri]["core"]
+		spots.append(["room%d %s" % [ri, rooms[ri]["theme"]], OutpostLayout.cell_pos(core.get_center()) - lift + Vector3(0, 0.05, 0), 0.0])
+	var sum_fps := 0.0
+	for s: Array in spots:
+		p.position = s[1]
+		p.velocity = Vector3.ZERO
+		p.look_yaw = float(s[2])
+		p.look_pitch = -0.05
+		_bots_beside(ship, p)
+		await t.wait(0.8)
+		var r := await _measure(rid)
+		sum_fps += r[0]
+		print("[autotest] perf at %s: %s" % [s[0], _perf_text(r)])
+	print("[autotest] perf: mean %.0f fps over %d spots" % [sum_fps / spots.size(), spots.size()])
+	# The first room again: flashlight off, then the station hidden.
+	var first: Array = spots[2] if spots.size() > 2 else spots[0]
+	p.position = first[1]
+	p.look_yaw = float(first[2])
+	await t.wait(0.6)
+	_bots_beside(ship, p)
+	var lit := 0
+	for c in ship.crew_root.get_children():
+		if c is CrewMember and (c as CrewMember)._flashlight and (c as CrewMember)._flashlight.visible:
+			lit += 1
+			(c as CrewMember)._flashlight.visible = false
+	await t.wait(0.5)
+	print("[autotest] perf at %s, the %d flashlights off: %s" % [first[0], lit, _perf_text(await _measure(rid))])
+	for c in ship.crew_root.get_children():
+		if c is CrewMember and (c as CrewMember)._flashlight:
+			(c as CrewMember)._flashlight.visible = (c as CrewMember).lamp_on()
+	node.visible = false
+	await t.wait(0.5)
+	print("[autotest] perf at %s, the station hidden: %s" % [first[0], _perf_text(await _measure(rid))])
+	node.visible = true
+	node.set_process(false)
+	await t.wait(0.5)
+	print("[autotest] perf at %s, the station's own updates (lamps, doors, feeds) stopped: %s" % [first[0], _perf_text(await _measure(rid))])
+	node.set_process(true)
+	for c in ship.boarder_root.get_children():
+		c.process_mode = Node.PROCESS_MODE_DISABLED
+	await t.wait(0.5)
+	print("[autotest] perf at %s, the aliens stopped: %s" % [first[0], _perf_text(await _measure(rid))])
+	for c in ship.boarder_root.get_children():
+		c.process_mode = Node.PROCESS_MODE_INHERIT
+	for c in ship.boarder_root.get_children():
+		c.set_physics_process(false)
+	await t.wait(0.5)
+	print("[autotest] perf at %s, the aliens' thinking stopped (animation runs): %s" % [first[0], _perf_text(await _measure(rid))])
+	for c in ship.boarder_root.get_children():
+		c.set_physics_process(true)
+		c.set_process(false)
+	await t.wait(0.5)
+	print("[autotest] perf at %s, the aliens' animation stopped (thinking runs): %s" % [first[0], _perf_text(await _measure(rid))])
+	var kinds := {}
+	for c in ship.boarder_root.get_children():
+		c.set_process(true)
+		kinds[(c as Boarder).kind] = int(kinds.get((c as Boarder).kind, 0)) + 1
+	print("[autotest] perf: the aliens %s" % str(kinds))
+	if not bisect:
+		DisplayServer.window_set_vsync_mode(vsync)
+		RenderingServer.viewport_set_measure_render_time(rid, false)
+		return
+	# Which part of the mission the frame's time goes to: each of the mission's and the ship's
+	# children stopped in turn (process and physics), the frame rate then.
+	await t.wait(1.0)
+	var base := await _measure(rid)
+	print("[autotest] perf bisect: everything running %s" % _perf_text(base))
+	var parts: Array[Node] = []
+	for c in m.get_children():
+		parts.append(c)
+	for c in ship.get_children():
+		parts.append(c)
+	var interior := ship.get_node_or_null("Interior")
+	if interior:
+		for c in interior.get_children():
+			parts.append(c)
+			for g in c.get_children():
+				if g.get_child_count() > 3 or g.get_script() != null:
+					parts.append(g)
+	for c in parts:
+		if c == ship or c is Camera3D or not is_instance_valid(c):
+			continue
+		var was := c.process_mode
+		c.process_mode = Node.PROCESS_MODE_DISABLED
+		await t.wait(0.3)
+		var r := await _measure(rid)
+		c.process_mode = was
+		if r[0] > float(base[0]) * 1.08:
+			print("[autotest] perf bisect: %s/%s (%s) stopped: %.0f fps (%.1f ms, %+.1f ms)" % [c.get_parent().name, c.name, c.get_class(), r[0],
+				1000.0 / float(r[0]), 1000.0 / float(r[0]) - 1000.0 / float(base[0])])
+	DisplayServer.window_set_vsync_mode(vsync)
+	RenderingServer.viewport_set_measure_render_time(rid, false)
+
+
+## The crew bots stand round the player (just behind), facing the same way.
+func _bots_beside(ship: Mothership, p: CrewMember) -> void:
+	var k := 0
+	for c in ship.crew_root.get_children():
+		var b := c as CrewMember
+		if b == null or not b.bot:
+			continue
+		k += 1
+		var off := Basis(Vector3.UP, p.look_yaw) * Vector3((k - 2) * 0.9, 0, 1.4)
+		b.position = p.position + off
+		b.net_pos = b.position
+		b.look_yaw = p.look_yaw
+		b.rotation.y = p.look_yaw
+
+
+## [fps, GPU ms of the main view, draw calls, objects, triangles] over 1.5 s.
+func _measure(rid: RID) -> Array:
+	var f0 := Engine.get_frames_drawn()
+	var t0 := Time.get_ticks_usec()
+	var gpu := 0.0
+	var cpu := 0.0
+	var proc := 0.0
+	var phys := 0.0
+	var n := 0
+	while Time.get_ticks_usec() - t0 < 1500000:
+		await t.get_tree().process_frame
+		gpu += RenderingServer.viewport_get_measured_render_time_gpu(rid)
+		cpu += RenderingServer.viewport_get_measured_render_time_cpu(rid)
+		proc += Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+		phys += Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
+		n += 1
+	var fps := float(Engine.get_frames_drawn() - f0) / ((Time.get_ticks_usec() - t0) / 1000000.0)
+	return [fps, gpu / maxf(n, 1), RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME),
+		RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_OBJECTS_IN_FRAME),
+		RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_PRIMITIVES_IN_FRAME), cpu / maxf(n, 1), proc / maxf(n, 1), phys / maxf(n, 1)]
+
+
+func _perf_text(r: Array) -> String:
+	return "%.0f fps (%.1f ms), GPU %.2f ms, render CPU %.2f ms, process %.2f ms, physics %.2f ms, %d draw calls, %d objects, %.2fM triangles" % [
+		r[0], 1000.0 / maxf(float(r[0]), 1.0), r[1], r[5], r[6], r[7], r[2], r[3], float(r[4]) / 1000000.0]
+
+
+## What the echolocation scanner costs (windowed, vsync off), standing in the room nearest the
+## outpost's middle (walls all round within its reach; the aliens frozen where they are): the frame
+## rate with it down and held up, held up with its screen drawing nothing, how long drawing its
+## screen takes (Scanner.draw_us) and how long one ray of its ping takes, and how many echoes it
+## holds.
+func run_scanner_perf() -> void:
+	var sd := seed_where(func(l): return (l["rooms"] as Array).size() >= 7)
+	var m := await start_outpost(sd)
+	if m == null:
+		print("[autotest] FAIL: the outpost test never started")
+		return
+	await t.wait(1.0)
+	var ship := m.ship
+	var p := m.local_player
+	p.max_hp = 100000.0
+	p.hp = 100000.0
+	for c in ship.boarder_root.get_children():
+		c.process_mode = Node.PROCESS_MODE_DISABLED
+	var layout: Dictionary = m.cave.derelict(ship.derelict_k)["layout"]
+	var rooms: Array = layout["rooms"]
+	var mid := Vector2(0.0, OutpostLayout.Z0 + OutpostLayout.GZ * OutpostLayout.CELL * 0.5)
+	var best := 0
+	for ri in rooms.size():
+		if (rooms[ri]["c"] as Vector2).distance_to(mid) < (rooms[best]["c"] as Vector2).distance_to(mid):
+			best = ri
+	var c2: Vector2 = rooms[best]["c"]
+	_stand(p, Vector3(c2.x, 0, c2.y), Vector3(c2.x, 1.6, c2.y - 5.0))
+	var rid := t.get_viewport().get_viewport_rid()
+	RenderingServer.viewport_set_measure_render_time(rid, true)
+	var vsync := DisplayServer.window_get_vsync_mode()
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+	await t.wait(1.0)
+	print("[autotest] scanner perf: seed %d, standing in room %d (%s), %d aliens" % [sd, best, rooms[best]["theme"], ship.boarder_root.get_child_count()])
+	print("[autotest] scanner perf: down: %s" % _perf_text(await _measure(rid)))
+	Input.action_press("scanner")
+	await t.wait(PI)
+	var sc: Scanner = p._scanner
+	var r := await _measure(rid)
+	print("[autotest] scanner perf: up (%s): %s; drawing the screen %.2f ms" % [sc.echo_text(), _perf_text(r), sc.draw_us / 1000.0])
+	if sc.get("parts") != null:
+		print("[autotest] scanner perf: drawing by part (us): %s" % str(sc.get("parts")))
+	await t.shot("scanner_perf")
+	# Its screen drawing nothing (Screen._draw returns at once).
+	var screen: Scanner.Screen = sc._screen
+	screen.scanner = null
+	await t.wait(0.4)
+	print("[autotest] scanner perf: up, the screen drawing nothing: %s" % _perf_text(await _measure(rid)))
+	screen.scanner = sc
+	# One ray of the ping on its own, the average over a whole sweep's worth (and what it painted is
+	# swept up again by the next real sweep).
+	var t0 := Time.get_ticks_usec()
+	for i in Scanner.BINS:
+		sc._paint(i)
+	var ray_us := float(Time.get_ticks_usec() - t0) / Scanner.BINS
+	print("[autotest] scanner perf: one ray of the ping %.3f ms (%.1f rays a second: %.2f ms a second)" % [ray_us / 1000.0,
+		Scanner.BINS / Scanner.PERIOD, ray_us * Scanner.BINS / Scanner.PERIOD / 1000.0])
+	Input.action_release("scanner")
+	await t.wait(0.6)
+	print("[autotest] scanner perf: down again: %s" % _perf_text(await _measure(rid)))
+	DisplayServer.window_set_vsync_mode(vsync)
+	RenderingServer.viewport_set_measure_render_time(rid, false)
+
+
+# --- Sentry turrets ----------------------------------------------------------------------------
+
+## The sentry turrets: one of the outpost test's boxes carried from the pier into the first room (it
+## won't open aboard), put down facing the room's far side and opened with F; three aliens in front of
+## it and one behind it: what it shoots (and what it leaves alone), the aliens it hurts turning on it,
+## its rounds; folding one up and picking it up again; one wrecked (it can't be picked up, it
+## sparks). The player waits aboard meanwhile (aliens don't go for crew aboard). Pictures with
+## `shots` (sentries; sentries_check: none).
+func run_sentries(shots: bool) -> void:
+	# (A room with low furniture, so the lines of fire stay clear.)
+	var m := await start_outpost(seed_where(func(l): return _open_room(l, ["quarters", "mess"]) >= 0))
+	if m == null:
+		print("[autotest] FAIL: the outpost test never started")
+		return
+	await t.wait(1.0)
+	var ship := m.ship
+	var p := m.local_player
+	p.max_hp = 100000.0
+	p.hp = 100000.0
+	for c in ship.boarder_root.get_children():
+		c.queue_free()
+	var layout: Dictionary = m.cave.derelict(ship.derelict_k)["layout"]
+	var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	var boxes: Array[Sentry] = []
+	for c in ship.cargo_root.get_children():
+		if c is Sentry:
+			boxes.append(c as Sentry)
+	print("[autotest] sentries: %d sentry boxes in the station and on the pier, states %s" % [boxes.size(), str(boxes.map(func(s): return s.s_state))])
+	if boxes.is_empty():
+		print("[autotest] FAIL: no sentry boxes")
+		return
+	var s := boxes[0]
+	# Picked up on the pier, it won't open aboard.
+	_stand(p, s.net_pos + lift + Vector3(0, 0, -1.2), s.net_pos + lift)
+	await t.wait(0.4)
+	print("[autotest] sentry on the pier: prompt '%s'" % p.prompt)
+	if shots:
+		await _look_at_sentry(m, s, Vector3(1.6, 1.2, 1.4), "st01_box")
+	ship.request_crate_pickup.rpc_id(1, str(s.name))
+	await t.wait(0.3)
+	p.position = ship.spawn_points()[0]
+	await t.wait(0.3)
+	ship.request_crate_drop.rpc_id(1, str(s.name), p.position + Vector3(0, SupplyCrate.SIZE.y * 0.5, -0.9), 0.0)
+	await t.wait(0.3)
+	ship.request_sentry.rpc_id(1, str(s.name), true)
+	await t.wait(0.4)
+	print("[autotest] put down aboard: carried %s, can open here %s, F: state %d (packed %d)" % [s.carrier != 0, s.can_open_here(), s.s_state, Sentry.PACKED])
+	# Into a room: facing its furthest free cell, opened with F.
+	var room: Dictionary = layout["rooms"][maxi(_open_room(layout, ["quarters", "mess"]), 0)]
+	var cells := OutpostLayout.free_cells(room)
+	var mid := Vector2(room["c"])
+	# (On the free floor nearest the room's middle: furniture often stands in the middle.)
+	var centre := OutpostLayout.cell_pos(cells[0])
+	for c: Vector2i in cells:
+		var q := OutpostLayout.cell_pos(c)
+		if Vector2(q.x, q.z).distance_to(mid) < Vector2(centre.x, centre.z).distance_to(mid):
+			centre = q
+	var far := centre
+	for c: Vector2i in cells:
+		if OutpostLayout.cell_pos(c).distance_to(centre) > far.distance_to(centre):
+			far = OutpostLayout.cell_pos(c)
+	var fwd := (far - centre).normalized()
+	var yaw := atan2(-fwd.z, fwd.x)
+	ship.request_crate_pickup.rpc_id(1, str(s.name))
+	await t.wait(0.3)
+	_stand(p, centre - fwd * 1.0, far)
+	await t.wait(0.3)
+	ship.request_crate_drop.rpc_id(1, str(s.name), centre - lift + Vector3(0, SupplyCrate.SIZE.y * 0.5, 0), yaw)
+	await t.wait(0.5)
+	_stand(p, centre - fwd * 1.3, centre)
+	await t.wait(0.3)
+	var eye := p.global_position + ship.global_basis.y * CrewMember.EYE
+	var q := PhysicsRayQueryParameters3D.create(eye, eye + p._look_dir_global() * CrewMember.REACH, Game.LAYER_INTERACT | Game.LAYER_INTERIOR | Game.LAYER_STATION)
+	q.collide_with_areas = true
+	var hit := p.get_world_3d().direct_space_state.intersect_ray(q)
+	print("[autotest] sentry set down in %s at %s (wanted %s), carried %s, player at %s; the look ray hits %s; prompt '%s'" % [room["name"],
+		(s.net_pos + lift).snapped(Vector3.ONE * 0.01), centre.snapped(Vector3.ONE * 0.01), s.carrier != 0, (p.position + lift).snapped(Vector3.ONE * 0.01),
+		str(hit.get("collider", "nothing")) + (" meta %s" % str((hit["collider"] as Object).get_meta_list())) if not hit.is_empty() else "nothing", p.prompt])
+	await t._tap("equip")
+	await t.wait(0.4)
+	var opening := s.s_state
+	await t.wait(Sentry.OPEN_TIME + 0.3)
+	print("[autotest] F: state %d while opening (opening %d), then %d (active %d); prompt '%s'; solid %s" % [opening, Sentry.OPENING, s.s_state,
+		Sentry.ACTIVE, p.prompt, s._body.collision_layer != 0])
+	if shots:
+		await _look_at_sentry(m, s, Vector3(-1.4, 1.3, 1.6), "st02_open")
+	# Aliens: three in front (within its arc), one behind it; the player waits aboard.
+	p.position = ship.spawn_points()[0]
+	var side := Vector3(-fwd.z, 0, fwd.x)
+	# (Free cells of the room: the three furthest in front of it within its arc, and one behind it.)
+	var front: Array = []
+	var behind := Vector3(INF, 0, 0)
+	for c: Vector2i in cells:
+		var v := OutpostLayout.cell_pos(c) - centre
+		var along := v.dot(fwd)
+		if along > 2.0 and absf(v.dot(side)) < along * 0.8:
+			front.append([along, OutpostLayout.cell_pos(c)])
+		elif along < -1.5 and not behind.is_finite():
+			behind = OutpostLayout.cell_pos(c)
+	front.sort_custom(func(x, y): return float(x[0]) > float(y[0]))
+	var spots: Array = front.slice(0, 3).map(func(e): return e[1])
+	while spots.size() < 3:
+		spots.append(centre + fwd * (4.0 + spots.size()))
+	spots.append(behind if behind.is_finite() else centre - fwd * 2.5)
+	var aliens: Array[Boarder] = []
+	for sp: Vector3 in spots:
+		aliens.append(ship.spawn_hostile("boarder", sp - lift, {"hp": 120.0, "max_hp": 120.0}))
+	await t.wait(0.3)
+	var rounds0 := s.s_rounds
+	var hp0 := s.s_hp
+	var turned := {}
+	var t0 := Time.get_ticks_msec()
+	var snapped := not shots
+	while Time.get_ticks_msec() - t0 < 6000:
+		await t.get_tree().physics_frame
+		for i in aliens.size():
+			var a := aliens[i]
+			if is_instance_valid(a) and a._target_id == s.get_instance_id():
+				turned[i] = true
+		if not snapped and s.s_rounds < rounds0 - 8:
+			snapped = true
+			await _look_at_sentry(m, s, Vector3(-1.2, 1.5, -1.8), "st03_firing")
+	var fates := PackedStringArray()
+	for i in aliens.size():
+		var a := aliens[i]
+		fates.append("%s%s" % ["dead" if not is_instance_valid(a) or a.hp <= 0.0 else "hp %.0f" % a.hp, " (went for it)" if turned.has(i) else ""])
+	print("[autotest] sentry vs aliens for 6 s: front %s; behind %s; rounds %d -> %d (%.1f a second while firing at most), its health %.0f -> %.0f, display '%s' '%s'" % [
+		", ".join(fates.slice(0, 3)), fates[3], rounds0, s.s_rounds, 1.0 / Sentry.FIRE_INTERVAL, hp0, s.s_hp, s._count.text, s._note.text])
+	for a in aliens:
+		if is_instance_valid(a):
+			a.queue_free()
+	await t.wait(0.3)
+	# Folded up again and picked up.
+	_stand(p, centre - fwd * 1.3, centre)
+	await t.wait(0.3)
+	await t._tap("equip")
+	await t.wait(Sentry.OPEN_TIME + 0.4)
+	var folded := s.s_state
+	await t._tap("interact")
+	await t.wait(0.3)
+	print("[autotest] F again: state %d (packed %d), rounds kept %d; E: carried %s" % [folded, Sentry.PACKED, s.s_rounds, s.carrier == p.peer_id])
+	await t._tap("drop")
+	await t.wait(0.4)
+	# Wrecked: the damage it can take, then it is bent, sparking and smoking and can't be picked up.
+	ship.request_sentry.rpc_id(1, str(s.name), true)
+	await t.wait(Sentry.OPEN_TIME + 0.3)
+	s.hurt(Sentry.HP + 1.0)
+	await t.wait(0.6)
+	_stand(p, s.net_pos + lift - fwd * 1.3, s.net_pos + lift)
+	await t.wait(0.3)
+	var prompt := p.prompt
+	await t._tap("interact")
+	await t.wait(0.3)
+	print("[autotest] wrecked: state %d (wrecked %d), prompt '%s', E: carried %s, smoke %s, display '%s'" % [s.s_state, Sentry.WRECKED, prompt,
+		s.carrier != 0, s._smoke.emitting, s._note.text])
+	if shots:
+		await _look_at_sentry(m, s, Vector3(1.5, 1.2, 1.5), "st04_wreck")
+	# Stowed with the station at liftoff and set out again on the next landing.
+	var d := m.cave.derelict(ship.derelict_k)
+	ship._stow_derelict(d)
+	await t.wait(0.4)
+	ship._unload_derelict(d)
+	await t.wait(0.6)
+	var back := PackedStringArray()
+	for c in ship.cargo_root.get_children():
+		if c is Sentry:
+			back.append("%d/%d" % [(c as Sentry).s_state, (c as Sentry).s_rounds])
+	print("[autotest] stowed and set out again: sentries (state/rounds) %s" % ", ".join(back))
+
+
+## The first room of a plan with one of `themes` that no door seals, or -1.
+static func _open_room(layout: Dictionary, themes: Array) -> int:
+	var rooms: Array = layout["rooms"]
+	for ri in rooms.size():
+		if str(rooms[ri]["theme"]) in themes and str(rooms[ri]["seal"]) == "":
+			return ri
+	return -1
+
+
+## A picture of sentry turret `s` from `off` (in its own frame, metres), looking at its middle.
+func _look_at_sentry(m: MissionLevel, s: Sentry, off: Vector3, shot_name: String) -> void:
+	var cam := Camera3D.new()
+	cam.fov = 55.0
+	m.add_child(cam)
+	var at := s.global_transform * Vector3(0, 0.25, 0)
+	cam.global_position = s.global_transform * off
+	cam.look_at(at, m.ship.global_basis.y)
+	cam.current = true
+	await t.wait(0.25)
+	await t.shot(shot_name)
+	cam.queue_free()
+	await t.wait(0.05)
+
+
+# --- The control hub ---------------------------------------------------------------------------
+
+## The control hub, in an outpost with a generator and a dead end locked from the hub: the door ids
+## (every door but the front door, no two alike) and finding a door by its id; the horde behind the
+## locked door; the computer dark and deaf until the power runs; then sat at and typed at through
+## the keyboard (HELP, DOORS, a door that isn't there, an unknown command), an open door refused
+## with a crate in its doorway, locked (its waypoint off, the map drawn again) and unlocked, the dead
+## end opened (its horde hears it), and Esc getting up again without the pause menu. Windowed:
+## hub_*.png, the desk dark and lit, the map, the screen, a door's id plate.
+func run_hub(shots: bool) -> void:
+	var sd := seed_where(func(l): return int(l["hub"]) >= 0 and int(l["generator"]) >= 0 and OutpostLayout._seals(l["rooms"], "hub") > 0)
+	var m := await start_outpost(sd)
+	if m == null:
+		print("[autotest] FAIL: the outpost test never started")
+		return
+	await t.wait(1.0)
+	var ship := m.ship
+	var p := m.local_player
+	p.max_hp = 100000.0
+	p.hp = 100000.0
+	var d := m.cave.derelict(ship.derelict_k)
+	var layout: Dictionary = d["layout"]
+	var rooms: Array = layout["rooms"]
+	var doors: Array = layout["doors"]
+	var node: Derelict = Derelict.live.get(ship.derelict_k)
+	var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	print("[autotest] hub: seed %d, %s: %s" % [sd, d["name"], ", ".join(rooms.map(func(r): return "%s%s" % [r["theme"],
+		("/" + str(r["seal"])) if str(r["seal"]) != "" else ""]))])
+	var ids := {}
+	for di in range(1, doors.size()):
+		ids[str(doors[di]["id"])] = di
+	var sealed := -1
+	for di in doors.size():
+		if str(doors[di]["kind"]) == "hub" and sealed < 0:
+			sealed = di
+	var sid := str(doors[sealed]["id"])
+	print("[autotest] hub: %d doors, %d ids (%s), front door id '%s'; %s by '%s' %d, '%s' %d, '%s' %d, 'D99' %d, 'x1' %d" % [
+		doors.size() - 1, ids.size(), ", ".join(ids.keys()), doors[0]["id"], sid, sid.to_lower(), OutpostLayout.door_by_id(layout, sid.to_lower()),
+		sid.trim_prefix("D"), OutpostLayout.door_by_id(layout, sid.trim_prefix("D")), sid, OutpostLayout.door_by_id(layout, sid),
+		OutpostLayout.door_by_id(layout, "D99"), OutpostLayout.door_by_id(layout, "x1")])
+	# The horde behind the locked dead end; every other alien is put away.
+	var sroom := int(doors[sealed]["room"])
+	var horde: Array[Boarder] = []
+	var kinds := {}
+	for c in ship.boarder_root.get_children():
+		var b := c as Boarder
+		if b and OutpostLayout.room_at(layout, b.position + lift) == sroom:
+			horde.append(b)
+			kinds[b.kind] = int(kinds.get(b.kind, 0)) + 1
+		elif b:
+			b.queue_free()
+	print("[autotest] hub: behind %s (%s): %s; door state %d, slab shape on %s" % [sid, rooms_name(layout, sealed), str(kinds),
+		ship.outpost_doors[sealed], not (node.doors[sealed]["shape"] as CollisionShape3D).disabled])
+	var console := node.hub_console()
+	var desk: Dictionary = {}
+	for prop: Dictionary in rooms[int(layout["hub"])]["props"]:
+		if str(prop["kind"]) == "hub_desk":
+			desk = prop
+	var dx := Transform3D(Basis(Vector3.UP, float(desk["yaw"])), desk["pos"])
+	var cpos := ship.to_local(console.global_position) + lift
+	var front := ship.to_local(console.global_position + console.global_basis.z * 0.95) + lift
+	_stand(p, front, cpos + Vector3(0, 0.3, 0))
+	await t.wait(0.5)
+	var n0 := console.lines.size()
+	ship.request_hub_command.rpc_id(1, "help")
+	await t.wait(0.3)
+	print("[autotest] hub: no power: console powered %s, map shows '%s', prompt '%s', a command -> %d new lines" % [console.powered,
+		node._map_key.get_slice("|", 0), p.prompt, console.lines.size() - n0])
+	if shots:
+		await _hub_view(m, dx, Vector3(0.6, 1.7, 2.6), Vector3(0, 1.9, -0.6), "hub01_dark")
+	ship.outpost_power = true
+	await t.wait(1.5)
+	print("[autotest] hub: power on: console powered %s, map shows '%s', prompt '%s'" % [console.powered, node._map_key.get_slice("|", 0), p.prompt])
+	if shots:
+		await _hub_view(m, dx, Vector3(0.6, 1.7, 2.6), Vector3(0, 1.9, -0.6), "hub02_desk")
+		await _hub_view(m, dx, Vector3(0, 1.72, 0.9), Vector3(0, 1.72, -0.7), "hub03_map")
+	await t._tap("interact")
+	await t.wait(0.4)
+	print("[autotest] hub: at the computer %s, view %.2f m from it, fov %.0f" % [p._hub == console,
+		p.camera.global_position.distance_to(console.global_position), p.camera.fov])
+	n0 = console.lines.size()
+	await _type_line("help")
+	await t.wait(0.4)
+	print("[autotest] hub: HELP -> %s; on the screen %s" % [" | ".join(console.lines.slice(n0)), console._text.text.contains("COMMANDS:")])
+	n0 = console.lines.size()
+	await _type_line("doors")
+	await t.wait(0.4)
+	print("[autotest] hub: DOORS -> %s" % " | ".join(console.lines.slice(n0)))
+	n0 = console.lines.size()
+	await _type_line("unlock d99")
+	await _type_line("hello there")
+	await _type_line("lock")
+	await t.wait(0.4)
+	print("[autotest] hub: bad lines -> %s" % " | ".join(console.lines.slice(n0)))
+	if shots:
+		await t.shot("hub04_screen")
+	# An open door, refused with a crate in its doorway, then locked and unlocked.
+	var open_di := -1
+	for di in range(1, doors.size()):
+		if str(doors[di]["kind"]) == "open" and int(doors[di]["room"]) != int(layout["hub"]) and open_di < 0:
+			open_di = di
+	var oid := str(doors[open_di]["id"])
+	var crate: SupplyCrate = null
+	for c in ship.cargo_root.get_children():
+		if c is SupplyCrate and not c is Sentry and (c as SupplyCrate).carrier == 0 and crate == null:
+			crate = c as SupplyCrate
+	var was := crate.net_pos
+	crate.net_pos = (doors[open_di]["pos"] as Vector3) - lift + Vector3(0, SupplyCrate.SIZE.y * 0.5, 0)
+	await t.wait(0.2)
+	n0 = console.lines.size()
+	await _type_line("lock " + oid)
+	await t.wait(0.4)
+	print("[autotest] hub: LOCK %s with a crate in the doorway -> state %d: %s" % [oid, ship.outpost_doors[open_di], " | ".join(console.lines.slice(n0))])
+	crate.net_pos = was
+	await t.wait(0.2)
+	var key0 := node._map_key
+	n0 = console.lines.size()
+	await _type_line("lock " + oid.to_lower())
+	await t.wait(1.0)
+	print("[autotest] hub: LOCK %s -> state %d, waypoint off %s, slab shape on %s, map drawn again %s: %s" % [oid, ship.outpost_doors[open_di],
+		ship.nav.is_point_disabled(DerelictBuilder.NAV_DOOR + open_di), not (node.doors[open_di]["shape"] as CollisionShape3D).disabled,
+		node._map_key != key0, " | ".join(console.lines.slice(n0))])
+	if shots:
+		var dd: Dictionary = doors[open_di]
+		var out := DerelictBuilder.door_outside(dd, 2.6) + Vector3(0, 1.6, 0)
+		var cam := Camera3D.new()
+		cam.fov = 60.0
+		m.add_child(cam)
+		_look(cam, ship.global_transform * Transform3D(Basis.IDENTITY, -lift), out, (dd["pos"] as Vector3) + Vector3(0, 2.2, 0))
+		cam.current = true
+		await t.wait(2.5)
+		await t.shot("hub05_locked_door")
+		cam.queue_free()
+		await t.wait(0.1)
+		await _hub_view(m, dx, Vector3(0, 1.72, 0.9), Vector3(0, 1.72, -0.7), "hub06_map_locked")
+	n0 = console.lines.size()
+	await _type_line("lock " + oid)
+	await _type_line("unlock " + oid)
+	await t.wait(0.4)
+	print("[autotest] hub: again -> %s; state %d, waypoint off %s" % [" | ".join(console.lines.slice(n0)), ship.outpost_doors[open_di],
+		ship.nav.is_point_disabled(DerelictBuilder.NAV_DOOR + open_di)])
+	# The dead end: opened, and its horde hears it.
+	n0 = console.lines.size()
+	await _type_line("unlock " + sid)
+	await t.wait(0.5)
+	var heard := horde.filter(func(b): return is_instance_valid(b) and (b._heard_t > 0.0 or b._target_id != 0)).size()
+	print("[autotest] hub: UNLOCK %s -> state %d, %d of the %d shut in heard it: %s" % [sid, ship.outpost_doors[sealed], heard, horde.size(),
+		" | ".join(console.lines.slice(n0))])
+	await _key(KEY_ESCAPE)
+	await t.wait(0.3)
+	print("[autotest] hub: Esc -> at the computer %s, pause menu open %s" % [p._hub != null, Game.main.pause_menu.visible])
+
+
+## A picture of the hub's desk from `eye` (in the desk's frame) looking at `at`.
+func _hub_view(m: MissionLevel, dx: Transform3D, eye: Vector3, at: Vector3, shot_name: String) -> void:
+	var lift := Vector3(0, StationBuilder.LAND_HEIGHT, 0)
+	var cam := Camera3D.new()
+	cam.fov = 62.0
+	m.add_child(cam)
+	_look(cam, m.ship.global_transform * Transform3D(Basis.IDENTITY, -lift), dx * eye, dx * at)
+	cam.current = true
+	await t.wait(0.4)
+	await t.shot(shot_name)
+	cam.queue_free()
+	await t.wait(0.05)
+
+
+## Type a line on the keyboard, and Enter.
+func _type_line(text: String) -> void:
+	for ch in text:
+		await _key(KEY_SPACE if ch == " " else OS.find_keycode_from_string(ch.to_upper()), ch.unicode_at(0))
+	await _key(KEY_ENTER)
+
+
+func _key(code: Key, unicode := 0) -> void:
+	var ev := InputEventKey.new()
+	ev.keycode = code
+	ev.physical_keycode = code
+	ev.unicode = unicode
+	ev.pressed = true
+	Input.parse_input_event(ev)
+	await t.get_tree().process_frame
+	var up := ev.duplicate() as InputEventKey
+	up.pressed = false
+	Input.parse_input_event(up)
+	await t.wait(0.04)
+
+
+# --- Furniture gallery -------------------------------------------------------------------------
+
+## Every kind of furniture (OutpostLayout.PROPS), built in a studio corner of the landing pad (a
+## floor, a back wall and a ceiling 4.8 m up) and pictured from the front at three quarters: pg_<kind>.png.
+## Lockers, filing cabinets, specimen tanks and barrels are built in four variants side by side (open
+## doors and drawers, drained and smashed tanks, a toppled drum come and go with the variant).
+## Windowed.
+func run_props_gallery() -> void:
+	var m := await start_outpost()
+	if m == null:
+		print("[autotest] FAIL: the outpost test never started")
+		return
+	await t.wait(1.0)
+	var ship := m.ship
+	for c in ship.boarder_root.get_children():
+		c.queue_free()
+	var node: Derelict = Derelict.live.get(ship.derelict_k)
+	var p := m.local_player
+	p.position = ship.spawn_points()[0]
+	# (Nothing else of the station shows meanwhile, nor the HUD.)
+	for c in node.get_children():
+		if c is Node3D:
+			(c as Node3D).visible = false
+	m.hud.visible = false
+	var dy := StationBuilder.DECK_Y
+	var room_h := 4.8
+	var wall_z := -16.6
+	var studio := Node3D.new()
+	node.add_child(studio)
+	var wall_mat := DerelictBuilder.surface_mat("outpost_wall", Color(0.82, 0.85, 0.8), 0.5, true)
+	var sx := -13.0
+	for box: Array in [[Vector3(sx, dy + room_h + 0.15, -12.5), Vector3(14.0, 0.3, 9.0)], [Vector3(sx, dy + room_h * 0.5, wall_z - 0.15), Vector3(14.0, room_h, 0.3)],
+			[Vector3(sx, dy - 0.05, -12.5), Vector3(14.0, 0.1, 9.0)]]:
+		Models.box(studio, box[0], box[1], wall_mat)
+	var cam := Camera3D.new()
+	cam.fov = 50.0
+	m.add_child(cam)
+	cam.current = true
+	var key := OmniLight3D.new()
+	key.light_energy = 1.8
+	key.omni_range = 12.0
+	key.light_color = Color(1.0, 0.86, 0.7)
+	studio.add_child(key)
+	var fill := OmniLight3D.new()
+	fill.light_energy = 0.6
+	fill.omni_range = 12.0
+	fill.light_color = Color(0.75, 0.82, 1.0)
+	studio.add_child(fill)
+	var mats := DerelictBuilder._materials()
+	var several := ["locker", "filing", "tube", "barrels"]
+	for kind: String in OutpostLayout.PROPS:
+		var size: Vector3 = OutpostLayout.PROPS[kind]
+		var holder := Node3D.new()
+		studio.add_child(holder)
+		var b := Models.Batch.new()
+		var body := StaticBody3D.new()
+		holder.add_child(body)
+		var out := {"tanks": [], "subjects": [], "screens": [], "generator": {}}
+		var count := 4 if kind in several else 1
+		var span := (size.x + 0.4) * count
+		var mid := Vector3(sx, dy, wall_z + size.z * 0.5 + 0.02)
+		for v in count:
+			var at := mid + Vector3(-span * 0.5 + (size.x + 0.4) * (v + 0.5), 0, 0)
+			if kind in ["tube", "table", "pallet", "generator", "hub_desk", "lab_table", "surgery", "lathe", "weapon_bench"]:
+				at.z = wall_z + maxf(size.z, size.x) * 0.5 + 0.8
+			var pd := {"kind": kind, "size": size, "pos": at, "yaw": 0.0, "var": v + 2}
+			OutpostProps.build(holder, b, body, pd, mats, out, room_h)
+		b.commit(holder, "Props")
+		var extent := maxf(span, maxf(size.y, size.z))
+		var look := mid + Vector3(0, minf(size.y, 3.0) * 0.45, (size.z * 0.5) if kind != "generator" else 1.6)
+		# (From the left: the ship stands off to the right.)
+		var eye := look + Vector3(-0.5, 0.38, 1.0).normalized() * (extent * 0.95 + 1.0)
+		cam.global_transform = node.global_transform * Transform3D(Basis.looking_at(look - eye, Vector3.UP), eye)
+		key.position = eye + Vector3(1.0, 1.5, -0.5)
+		fill.position = look + Vector3(extent * 0.8, 1.0, extent * 0.6)
+		await t.wait(0.6)
+		await t.shot("pg_%s" % kind)
+		holder.free()
+	cam.queue_free()
+	studio.queue_free()
+	m.hud.visible = true
+
+
+## The generator alone in a studio on the pad, from each side, its control box and starter close up,
+## and the starter pulled out: gen_<view>.png (windowed).
+func run_generator_views() -> void:
+	var m := await start_outpost()
+	if m == null:
+		print("[autotest] FAIL: the outpost test never started")
+		return
+	await t.wait(1.0)
+	var ship := m.ship
+	for c in ship.boarder_root.get_children():
+		c.queue_free()
+	var node: Derelict = Derelict.live.get(ship.derelict_k)
+	m.local_player.position = ship.spawn_points()[0]
+	for c in node.get_children():
+		if c is Node3D:
+			(c as Node3D).visible = false
+	m.hud.visible = false
+	# (The ship's side pods stand where some of the views look from.)
+	ship.exterior.visible = false
+	var dy := StationBuilder.DECK_Y
+	var studio := Node3D.new()
+	node.add_child(studio)
+	var wall_mat := DerelictBuilder.surface_mat("outpost_wall", Color(0.82, 0.85, 0.8), 0.5, true)
+	var mid := Vector3(-13.0, dy, -9.0)
+	Models.box(studio, mid + Vector3(0, -0.05, 0), Vector3(14.0, 0.1, 14.0), wall_mat)
+	var cam := Camera3D.new()
+	cam.fov = 50.0
+	m.add_child(cam)
+	cam.current = true
+	var lights: Array[OmniLight3D] = []
+	for i in 3:
+		var l := OmniLight3D.new()
+		l.light_energy = 2.4 if i == 0 else 1.2
+		l.omni_range = 14.0
+		l.light_color = Color(1.0, 0.86, 0.7) if i == 0 else Color(0.8, 0.85, 1.0)
+		studio.add_child(l)
+		lights.append(l)
+	var b := Models.Batch.new()
+	var body := StaticBody3D.new()
+	studio.add_child(body)
+	var out := {"tanks": [], "subjects": [], "screens": [], "generator": {}}
+	var size: Vector3 = OutpostLayout.PROPS["generator"]
+	OutpostProps.build(studio, b, body, {"kind": "generator", "size": size, "pos": mid, "yaw": 0.0, "var": 3}, DerelictBuilder._materials(), out, 5.2)
+	b.commit(studio, "Props")
+	var g: Dictionary = out["generator"]
+	# [name, eye, look] in the piece's frame (its +x side carries the control box and the starter).
+	for v: Array in [["side_x", Vector3(5.2, 2.2, 1.8), Vector3(0.6, 1.0, -0.2)], ["front_x", Vector3(3.8, 1.9, 4.6), Vector3(0.4, 1.0, 0.4)],
+			["back_x", Vector3(3.6, 2.0, -5.0), Vector3(0.3, 1.0, -0.8)], ["side_minus_x", Vector3(-5.2, 2.2, 0.8), Vector3(-0.5, 1.0, -0.2)],
+			["close_ctrl", Vector3(2.6, 1.45, 0.25), Vector3(1.05, 0.85, -0.25)], ["top", Vector3(1.8, 6.5, 0.4), Vector3(0.0, 0.5, -0.2)]]:
+		var eye: Vector3 = mid + (v[1] as Vector3)
+		var look: Vector3 = mid + (v[2] as Vector3)
+		cam.global_transform = node.global_transform * Transform3D(Basis.looking_at(look - eye, Vector3.UP), eye)
+		lights[0].position = eye + Vector3(0.5, 1.5, 0.5)
+		lights[1].position = mid + Vector3(-4.0, 3.0, 3.0)
+		lights[2].position = mid + Vector3(3.0, 3.0, -4.0)
+		await t.wait(0.5)
+		await t.shot("gen_%s" % v[0])
+	# The starter pulled out (as the Derelict animates it: the handle along the cord).
+	var handle: Node3D = g["handle"]
+	var hrest: Transform3D = g["handle_rest"]
+	handle.transform = hrest.translated((g["outward"] as Vector3) * 0.55)
+	var cord: Node3D = g["cord"]
+	cord.scale = Vector3(1.0, 1.0 + 3.6, 1.0)
+	cord.position.x = -0.08 - 0.29
+	var eye2: Vector3 = mid + Vector3(2.9, 1.5, 1.4)
+	var look2: Vector3 = mid + Vector3(1.0, 0.85, 0.2)
+	cam.global_transform = node.global_transform * Transform3D(Basis.looking_at(look2 - eye2, Vector3.UP), eye2)
+	await t.wait(0.5)
+	await t.shot("gen_pulled")
+	cam.queue_free()
+	studio.queue_free()
+	m.hud.visible = true
+	ship.exterior.visible = true
 
 
 # --- Mechanics -----------------------------------------------------------------------------------

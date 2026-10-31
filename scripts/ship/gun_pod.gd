@@ -9,6 +9,13 @@ extends Turret
 ## the gun (rounds, heat, belt changes) and hands its state over through set_state(); the pod shows
 ## it in the world: the ammo counter and heat gauge on top of the control panel and their lamps,
 ## barrels glowing when hot, muzzle flashes, spent casings, smoke, and the belt being changed.
+##
+## A pod can carry the Multiple Rocket Launcher System instead ("mrls", mounted at its gun console
+## from a crate; see WEAPONS and set_weapon()): a launcher box either side of the pod in place of the
+## guns, eight rockets in each. Held down, the trigger looses a rocket from each box in turn (the
+## rockets scatter wide, fly a little crooked and home in on an alien once they come close; see
+## Projectiles), and the empty tubes are reloaded one rocket at a time. The screens then show the
+## rockets left and the loader's progress.
 
 ## The heavy machine gun: seconds between rounds (the four barrels take turns), damage per round,
 ## muzzle velocity (m/s) and scatter (degrees). A belt holds BELT rounds. Once it runs dry a new
@@ -39,6 +46,33 @@ const SMOKE_FROM := 0.3
 const SERVO_DB := -10.0
 ## The guns' bark rises in pitch as the barrels heat up, smoothly, to this at full heat.
 const HOT_PITCH := 1.25
+
+## What a pod can carry: mounted at its gun console from a crate ("weapon:<id>", RunItems), the name,
+## the shop's line and the base price.
+const WEAPONS := {
+	"hmg": {"name": "Heavy Machine Gun", "short": "Four barrels firing in turn from a 240-round belt; heats up as it fires", "price": 90},
+	"mrls": {"name": "Multiple Rocket Launcher", "short": "Sixteen rockets in two boxes: a wild salvo that homes in close, slow to reload", "price": 240},
+}
+## The Multiple Rocket Launcher System: MRLS_TUBES rockets in all, a rocket every MRLS_INTERVAL
+## seconds while the trigger is held (the two boxes taking turns), MRLS_DAMAGE each (a direct hit; its
+## blast hurts round it, see Projectiles.ROCKET_*), leaving the tube at MRLS_SPEED m/s up to
+## MRLS_SPREAD degrees off the sight's line; the loader puts a rocket back in an empty tube every
+## MRLS_LOAD seconds, one at a time.
+const MRLS_TUBES := 16
+const MRLS_INTERVAL := 0.12
+const MRLS_DAMAGE := 38.0
+const MRLS_SPEED := 30.0
+const MRLS_SPREAD := 5.5
+const MRLS_LOAD := 0.8
+## The launcher boxes (tools/blender/mrls.py): their middles across, the tubes' columns either side of
+## that and rows top to bottom, the front and back faces.
+const MRLS_BOX_X := 1.31
+const MRLS_COLS := [-0.095, 0.095]
+const MRLS_ROWS := [0.24, 0.08, -0.08, -0.24]
+const MRLS_FRONT := -0.62
+const MRLS_BACK := 0.48
+## The launcher model (res://assets/models/mrls).
+const MRLS_ASSET := "mrls"
 
 ## Ball radius and the gunner's eye (pitch frame).
 const RADIUS := 1.05
@@ -117,12 +151,15 @@ void fragment() {
 ##   brighter than GLINT_MAX on screen; the grease is lit as well. With HELMET_VISOR defined nothing
 ##   on the eye's side reaches the glass at all: the helmet round it stops that light.
 ## - A light on the far side: the grease scatters GLARE of it on to the eye, nearly all of it
-##   within a few degrees of the line from the eye to the light, and a little in a wider halo.
+##   within a few degrees of the line from the eye to the light, and a little in a wider halo. It
+##   fades out where the light grazes the glass (its cosine under GRAZE), so a curved pane lit
+##   from the side shows no hard line where the glass turns edge-on to it.
 ## The light added is divided by the glass's alpha, since blending it in multiplies it by that.
 const GLASS_LIGHT := """
 const float GLINT_MAX = 0.5;
 const float GLINT_ROUGH = 0.12;
 const float GLARE = 0.25;
+const float GRAZE = 0.4;
 
 // The Henyey-Greenstein phase function: the share of the light the grease scatters that leaves it at
 // an angle (cosine c) from the way it was going; g is how much of it keeps going forward.
@@ -156,7 +193,11 @@ void light() {
 	} else {
 		float c = dot(-LIGHT, VIEW);
 		float ph = glass_phase(c, 0.9) * 0.8 + glass_phase(c, 0.6) * 0.2;
-		SPECULAR_LIGHT += lc * glass_film * ph * GLARE / a;
+		// Light grazing the glass mostly glances off it instead of going through, so the glare fades
+		// out towards where the glass turns edge-on to the light (no hard line across a curved pane
+		// lit from the side).
+		float through = smoothstep(0.0, GRAZE, -nl);
+		SPECULAR_LIGHT += lc * glass_film * ph * GLARE * through / a;
 	}
 }
 """
@@ -272,6 +313,20 @@ var _beep := 0.0
 var _clock := 0.0
 ## Text and segment counts on the screens, so they are only rebuilt when they change.
 var _shown: Dictionary = {}
+## What the pod carries ("hmg" or "mrls", see WEAPONS), and the captions that change with it.
+var weapon := "hmg"
+var _captions: Dictionary = {}
+## The rocket launchers (built the first time the pod carries them): the boxes, the rockets showing in
+## their tubes (one MultiMesh), the tube that fires next, and the flash and smoke of a launch.
+var _launchers: Node3D
+var _tube_rockets: MultiMesh
+var _next_tube := 0
+var _shown_tubes := Vector2i(-1, -1)
+var _launch_flash: Array[MeshInstance3D] = []
+var _launch_light: OmniLight3D
+var _launch_t := 0.0
+var _backblast: Array[GPUParticles3D] = []
+var _paint_tint := Color.WHITE
 
 
 func build(def: Dictionary) -> void:
@@ -283,6 +338,7 @@ func build(def: Dictionary) -> void:
 	# gun_pod.py), its shell painted in the ship's colour. The glass, the sight's glass and the
 	# instruments are made here.
 	var tint := {"Paint": paint.darkened(0.45 if heavy else 0.3)}
+	_paint_tint = tint["Paint"]
 	Models.asset_mesh(pitch_pivot, ASSET, "Pod", tint)
 	if heavy:
 		Models.asset_mesh(pitch_pivot, ASSET, "Armour", tint)
@@ -436,11 +492,11 @@ func _build_displays() -> void:
 		_screens.append(screen)
 	# Ammo screen (left) and heat screen (right).
 	var top := 0.045
-	_label(disp, Vector3(-0.373, top, 0.056), "AMMO", 26, GREEN, HORIZONTAL_ALIGNMENT_LEFT)
+	_captions["ammo"] = _label(disp, Vector3(-0.373, top, 0.056), "AMMO", 26, GREEN, HORIZONTAL_ALIGNMENT_LEFT)
 	_ammo_note = _label(disp, Vector3(-0.083, top, 0.056), "READY", 26, GREEN, HORIZONTAL_ALIGNMENT_RIGHT)
 	_ammo_label = _label(disp, Vector3(-0.255, -0.008, 0.056), "%03d" % BELT, 92, GREEN)
-	_label(disp, Vector3(-0.122, -0.022, 0.056), "RDS", 22, GREEN)
-	_label(disp, Vector3(0.083, top, 0.056), "BARREL HEAT", 26, GREEN, HORIZONTAL_ALIGNMENT_LEFT)
+	_captions["unit"] = _label(disp, Vector3(-0.122, -0.022, 0.056), "RDS", 22, GREEN)
+	_captions["heat"] = _label(disp, Vector3(0.083, top, 0.056), "BARREL HEAT", 26, GREEN, HORIZONTAL_ALIGNMENT_LEFT)
 	_sys_label = _label(disp, Vector3(0.373, top, 0.056), "SYS 100%", 26, GREEN, HORIZONTAL_ALIGNMENT_RIGHT)
 	_heat_note = _label(disp, Vector3(0.228, -0.052, 0.056), "NORMAL", 30, GREEN)
 	var stencil := Color(0.85, 0.82, 0.7)
@@ -551,10 +607,17 @@ func eye_local(a: Vector2) -> Vector3:
 
 ## The gun's state from the ship: rounds left, heat, seconds left of a belt change, the weapon
 ## systems' health and whether they are online, the colour of someone else sitting in the pod
-## (alpha 0: nobody, or it is us) and whether the local crew member is the gunner.
-func set_state(rounds: int, heat_now: float, reload_now: float, sys_hp: float, sys_online: bool, figure: Color, local: bool) -> void:
+## (alpha 0: nobody, or it is us) and whether the local crew member is the gunner. Carrying rockets:
+## the rockets loaded, the seconds left until the loader puts the next one in, and `tube`, the tube
+## that fires next.
+func set_state(rounds: int, heat_now: float, reload_now: float, sys_hp: float, sys_online: bool, figure: Color, local: bool, tube := -1) -> void:
 	_local = local
-	if reload_now > 0.0 and reload_left <= 0.0:
+	if weapon == "mrls":
+		if tube >= 0:
+			_next_tube = tube
+		if rounds > ammo:
+			_sound("clunk", -9.0)
+	elif reload_now > 0.0 and reload_left <= 0.0:
 		_sound("belt_out", -3.0)
 	elif reload_now <= 0.0 and reload_left > 0.0:
 		_sound("belt_in", -1.0)
@@ -568,9 +631,127 @@ func set_state(rounds: int, heat_now: float, reload_now: float, sys_hp: float, s
 		_visor_mat.emission = figure
 
 
-## Barrel `i` fires a round. `hot`: it was fired at full heat (the weapon systems take damage).
-## `local`: the local crew member is the gunner.
+## Show what the pod carries (WEAPONS): the heavy machine gun's barrels, or the rocket launchers'
+## boxes (built the first time), and the screens' captions to go with it.
+func set_weapon(id: String) -> void:
+	if id == weapon or not WEAPONS.has(id):
+		return
+	weapon = id
+	var rockets := id == "mrls"
+	if rockets and _launchers == null:
+		_build_launchers()
+	if _launchers:
+		_launchers.visible = rockets
+	for n in _barrel_nodes:
+		n.visible = not rockets
+	for l in _lights:
+		l.light_energy = 0.0
+	_next_tube = 0
+	_shown_tubes = Vector2i(-1, -1)
+	_shown.clear()
+	_show(_captions["ammo"], "ROCKETS" if rockets else "AMMO", GREEN)
+	_show(_captions["unit"], "RKT" if rockets else "RDS", GREEN)
+	_show(_captions["heat"], "LOADER" if rockets else "BARREL HEAT", GREEN)
+
+
+## Where tube `t`'s mouth is (pitch frame), `t` in firing order: the left and right boxes in turn,
+## each from the top row down, the inner tube of a row before the outer.
+static func mrls_mouth(t: int) -> Vector3:
+	var s := -1.0 if t % 2 == 0 else 1.0
+	var slot := t / 2
+	var col := float(MRLS_COLS[0]) if slot % 2 == 0 else float(MRLS_COLS[1])
+	return Vector3(s * (MRLS_BOX_X + col), float(MRLS_ROWS[slot / 2]), MRLS_FRONT)
+
+
+## The rocket launchers (a Blender-made model, tools/blender/mrls.py, in the ship's paint): a box
+## either side over the receivers, the rockets in their tubes (their noses show in the mouths), and
+## a launch's flash, light and backblast.
+func _build_launchers() -> void:
+	_launchers = Node3D.new()
+	_launchers.name = "Launchers"
+	pitch_pivot.add_child(_launchers)
+	Models.asset_mesh(_launchers, MRLS_ASSET, "Launchers", {"Paint": _paint_tint})
+	_tube_rockets = MultiMesh.new()
+	_tube_rockets.transform_format = MultiMesh.TRANSFORM_3D
+	_tube_rockets.mesh = _rocket_mesh()
+	_tube_rockets.instance_count = MRLS_TUBES
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = _tube_rockets
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_launchers.add_child(mmi)
+	for k in 2:
+		var f := MeshInstance3D.new()
+		f.mesh = _flash_mesh()
+		f.material_override = _flash_mat()
+		f.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		f.visible = false
+		_launchers.add_child(f)
+		_launch_flash.append(f)
+	_launch_light = OmniLight3D.new()
+	_launch_light.omni_range = 6.0
+	_launch_light.light_energy = 0.0
+	_launch_light.light_color = Color(1.0, 0.62, 0.3)
+	_launchers.add_child(_launch_light)
+	var pm := _smoke_process(true)
+	pm.direction = Vector3(0, 0, 1)
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	pm.emission_box_extents = Vector3(0.16, 0.3, 0.02)
+	for s: float in [-1.0, 1.0]:
+		var smoke := _smoke_emitter(pm, 22, 1.6)
+		smoke.position = Vector3(s * MRLS_BOX_X, 0, MRLS_BACK + 0.05)
+		_launchers.add_child(smoke)
+		_backblast.append(smoke)
+
+
+## The rockets showing in the tubes: the `ammo` loaded ones, from the tube that fires next on (in
+## firing order); an empty tube shows its dark mouth.
+func _show_tubes() -> void:
+	if _tube_rockets == null or _shown_tubes == Vector2i(ammo, _next_tube):
+		return
+	_shown_tubes = Vector2i(ammo, _next_tube)
+	var hidden := Transform3D(Basis.from_scale(Vector3.ONE * 0.0001), Vector3.ZERO)
+	for k in MRLS_TUBES:
+		var t := (_next_tube + k) % MRLS_TUBES
+		var mouth := mrls_mouth(t)
+		_tube_rockets.set_instance_transform(t, Transform3D(Basis.IDENTITY, mouth + Vector3(0, 0, -0.08)) if k < ammo else hidden)
+
+
+## A rocket as it shows in its tube, its nose's tip at the origin and its body running back along +Z:
+## an olive body and a dull red nose (two surfaces), shared.
+static func _rocket_mesh() -> ArrayMesh:
+	if _shared.has("rocket"):
+		return _shared["rocket"]
+	var mesh := ArrayMesh.new()
+	var body := CylinderMesh.new()
+	body.top_radius = 0.05
+	body.bottom_radius = 0.05
+	body.height = 0.16
+	body.radial_segments = 14
+	body.rings = 1
+	var nose := CylinderMesh.new()
+	nose.top_radius = 0.004
+	nose.bottom_radius = 0.05
+	nose.height = 0.12
+	nose.radial_segments = 14
+	nose.rings = 1
+	# (Cylinders stand along +Y; turned, +Y points forward, down -Z.)
+	var turn := Basis(Vector3.RIGHT, -PI / 2.0)
+	for part: Array in [[body, Transform3D(turn, Vector3(0, 0, 0.2)), Models.mat(Color(0.3, 0.33, 0.22), 0.3, 0.6)],
+			[nose, Transform3D(turn, Vector3(0, 0, 0.06)), Models.mat(Color(0.55, 0.13, 0.08), 0.35, 0.5)]]:
+		var st := SurfaceTool.new()
+		st.append_from(part[0], 0, part[1])
+		st.commit(mesh)
+		mesh.surface_set_material(mesh.get_surface_count() - 1, part[2])
+	_shared["rocket"] = mesh
+	return mesh
+
+
+## Barrel `i` fires a round (carrying rockets: tube `i` looses its rocket). `hot`: it was fired at
+## full heat (the weapon systems take damage). `local`: the local crew member is the gunner.
 func fire_fx(i: int, hot: bool, local: bool) -> void:
+	if weapon == "mrls":
+		_launch_fx(i, local)
+		return
 	if i < 0 or i >= _barrel_nodes.size():
 		return
 	_local = local
@@ -594,6 +775,34 @@ func fire_fx(i: int, hot: bool, local: bool) -> void:
 		_hot_t = 0.22
 		_sparks.restart()
 		_sound("sizzle", -5.0)
+
+
+## Tube `t` looses its rocket: a flash at its mouth and a blast out of the back of its box, their
+## light, the launch's whoosh. (The tube shows empty once the ship's state says so, see set_state.)
+func _launch_fx(t: int, local: bool) -> void:
+	if _launchers == null or t < 0 or t >= MRLS_TUBES:
+		return
+	_local = local
+	var mouth := mrls_mouth(t)
+	var front := _launch_flash[0]
+	front.position = mouth
+	front.rotation = Vector3(0, 0, randf() * TAU)
+	front.scale = Vector3.ONE * randf_range(0.9, 1.3)
+	front.visible = true
+	var back := _launch_flash[1]
+	back.position = Vector3(mouth.x, mouth.y, MRLS_BACK)
+	back.rotation = Vector3(0, PI, randf() * TAU)
+	back.scale = Vector3.ONE * randf_range(1.1, 1.6)
+	back.visible = true
+	_launch_light.position = mouth
+	_launch_light.light_energy = 3.2
+	_launch_t = 0.07
+	_since_shot = 0.0
+	if local:
+		_kick = 1.0
+		Sfx.play("missile_launch", null, -9.0, randf_range(1.15, 1.35))
+	elif is_inside_tree():
+		Sfx.play("missile_launch", pitch_pivot.global_transform * mouth, -3.0, randf_range(1.15, 1.35))
 
 
 ## How hard the gunner's view shakes from the guns right now (0..1).
@@ -624,7 +833,18 @@ func _physics_process(delta: float) -> void:
 	for l in _lights:
 		l.light_energy = maxf(0.0, l.light_energy - delta * 60.0)
 	for c in _casings:
-		c.emitting = _since_shot < 0.1
+		c.emitting = _since_shot < 0.1 and weapon == "hmg"
+	if _launchers:
+		_launch_t = maxf(0.0, _launch_t - delta)
+		if _launch_t <= 0.0 and _launch_flash[0].visible:
+			for f in _launch_flash:
+				f.visible = false
+		_launch_light.light_energy = maxf(0.0, _launch_light.light_energy - delta * 40.0)
+		for s in _backblast:
+			s.emitting = weapon == "mrls" and _since_shot < 0.15
+			s.amount_ratio = 1.0
+		if weapon == "mrls":
+			_show_tubes()
 	_update_smoke()
 	# Hot barrels glow: dull red, then orange.
 	var glow := clampf((heat - 0.3) / 0.7, 0.0, 1.0)
@@ -650,7 +870,7 @@ func _update_smoke() -> void:
 		s.emitting = h > 0.01
 		s.amount_ratio = maxf(h, 0.08)
 	for p in _puffs:
-		p.emitting = firing
+		p.emitting = firing and weapon == "hmg"
 		p.amount_ratio = lerpf(0.25, 1.0, heat)
 	_smoke_pm.color = Color(1.0, 1.0, 1.0, lerpf(0.35, 1.0, h))
 	_smoke_pm.scale_min = lerpf(0.6, 1.2, h)
@@ -675,6 +895,9 @@ func _update_servo(delta: float) -> void:
 func _update_displays() -> void:
 	var blink := fmod(_clock, 0.5) < 0.25
 	var fast := fmod(_clock, 0.24) < 0.12
+	if weapon == "mrls":
+		_update_rocket_displays(blink)
+		return
 	var reloading := reload_left > 0.0
 	var progress := clampf(1.0 - reload_left / RELOAD_TIME, 0.0, 1.0)
 	_show(_ammo_label, "---" if reloading else "%03d" % ammo, GREEN if ammo * 5 > BELT or reloading else AMBER)
@@ -712,6 +935,43 @@ func _update_displays() -> void:
 	(_lamps["ready"] as StandardMaterial3D).emission_energy_multiplier = 3.0 if online and not reloading and heat < 0.97 and not masked else 0.0
 	(_lamps["belt"] as StandardMaterial3D).emission_energy_multiplier = 3.0 if reloading and blink else 0.0
 	(_lamps["heat"] as StandardMaterial3D).emission_energy_multiplier = 3.5 if (heat >= 0.97 and fast) or (heat >= HEAT_WARN and heat < 0.97 and blink) else 0.0
+	(_lamps["sys"] as StandardMaterial3D).emission_energy_multiplier = 3.0 if not online or (_sys_hp < 50.0 and blink) else 0.0
+	var power := 1.0 if online else 0.35
+	for s in _screens:
+		s.set_instance_shader_parameter("power", power)
+	_reticle.set_instance_shader_parameter("power", 1.0 if online else 0.15)
+
+
+## Carrying rockets: the rockets left (and a bar of them) on the left screen, the loader putting the
+## next one into an empty tube on the right (its progress on the bar), and the lamps: ready, loading,
+## weapon systems.
+func _update_rocket_displays(blink: bool) -> void:
+	var loading := reload_left > 0.0 and ammo < MRLS_TUBES
+	_show(_ammo_label, "%02d" % ammo, GREEN if ammo > 4 else (AMBER if ammo > 0 else RED))
+	var note := "READY"
+	var note_col := GREEN
+	if not online:
+		note = "NO POWER"
+		note_col = RED
+	elif masked:
+		note = "HULL IN LINE" if blink else ""
+		note_col = AMBER
+	elif ammo <= 0:
+		note = "EMPTY" if blink else ""
+		note_col = RED
+	elif loading:
+		note = "LOADING"
+		note_col = AMBER
+	_show(_ammo_note, note, note_col)
+	_fill(_ammo_segs, int(ceil(float(ammo) / MRLS_TUBES * 10.0 - 0.001)), "belt", func(_i: int) -> int: return 1)
+	var progress := clampf(1.0 - reload_left / MRLS_LOAD, 0.0, 1.0) if loading else 1.0
+	_fill(_heat_segs, int(round(progress * _heat_segs.size())), "load" if loading else "full", func(_i: int) -> int: return 2 if loading else 1)
+	var hnote := "FULL" if not loading else "LOADING %d/%d" % [mini(ammo + 1, MRLS_TUBES), MRLS_TUBES]
+	_show(_heat_note, hnote if online else "WEAPONS OFFLINE", (AMBER if loading else GREEN) if online else RED)
+	_show(_sys_label, "SYS %3d%%" % int(round(_sys_hp)), GREEN if _sys_hp >= 50.0 else (AMBER if online else RED))
+	(_lamps["ready"] as StandardMaterial3D).emission_energy_multiplier = 3.0 if online and ammo > 0 and not masked else 0.0
+	(_lamps["belt"] as StandardMaterial3D).emission_energy_multiplier = 3.0 if loading and blink else 0.0
+	(_lamps["heat"] as StandardMaterial3D).emission_energy_multiplier = 0.0
 	(_lamps["sys"] as StandardMaterial3D).emission_energy_multiplier = 3.0 if not online or (_sys_hp < 50.0 and blink) else 0.0
 	var power := 1.0 if online else 0.35
 	for s in _screens:

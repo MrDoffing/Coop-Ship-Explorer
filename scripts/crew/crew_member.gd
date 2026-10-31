@@ -128,6 +128,8 @@ var _scan_box: Node3D
 var _held_pos := CrewWeapons.HELD_POS
 var _held_rot := Vector3.ZERO
 var _flash3_t := 0.0
+## Which of the Dual Pistols last fired as everyone else sees it (they take turns).
+var _remote_side := 1
 ## Aiming (0..1 down the sight), the weapon raised (0 relaxed .. 1), sprinting (0..1), time since
 ## the last shot, the scatter that builds up with quick shots, the part of the view's kick still to
 ## come back, where a vent started from, a shot waiting for the weapon to come up, and how fast the
@@ -179,6 +181,9 @@ var _flash_on := false
 ## they look on it (yaw, pitch away from straight at it).
 var _panel: HackPanel
 var _panel_look := Vector2.ZERO
+## The control hub's computer the crew member sits at (owner only; see HubConsole). The view looks
+## about it as over a keypad's panel (_panel_look).
+var _hub: HubConsole
 
 
 func _init() -> void:
@@ -392,6 +397,8 @@ func _physics_process(delta: float) -> void:
 		_station_physics(blocked)
 	elif _panel:
 		_panel_physics(delta, blocked)
+	elif _hub:
+		_hub_physics(delta)
 	else:
 		_walk(delta, blocked)
 		_interact(delta, blocked)
@@ -439,6 +446,10 @@ func _make_flashlight(parent: Node3D, offset: Vector3, local: bool) -> SpotLight
 	# A projector only shows on a light with shadows.
 	l.light_projector = Models.light_cookie("flashlight")
 	l.shadow_enabled = true
+	if not local:
+		# (A crewmate's light only needs a station's walls and doors to stop it: shadows from every
+		# fitting and piece of furniture, for every crewmate, cost more than they show.)
+		l.shadow_caster_mask = Game.VIS_SHELL
 	l.visible = false
 	parent.add_child(l)
 	return l
@@ -510,6 +521,29 @@ func _unhandled_input(event: InputEvent) -> void:
 			if label != "":
 				_panel_key(label)
 				get_viewport().set_input_as_handled()
+		return
+	if _hub:
+		# At the control hub's computer: the keys type (Enter sends the line, Esc gets up again,
+		# before the pause menu sees it), the mouse looks about a little.
+		if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+			var dm: Vector2 = (event as InputEventMouseMotion).relative * Game.mouse_sensitivity
+			_panel_look.x = clampf(_panel_look.x - dm.x, -0.45, 0.45)
+			_panel_look.y = clampf(_panel_look.y - dm.y * (-1.0 if Game.invert_y else 1.0), -0.4, 0.4)
+		elif event is InputEventKey and (event as InputEventKey).pressed:
+			var ke := event as InputEventKey
+			match ke.keycode:
+				KEY_ESCAPE:
+					_leave_hub()
+				KEY_ENTER, KEY_KP_ENTER:
+					var line := _hub.submit()
+					if line != "":
+						ship.request_hub_command.rpc_id(1, line)
+				KEY_BACKSPACE:
+					_hub.backspace()
+				_:
+					if not ke.echo and ke.unicode >= 32 and ke.unicode < 127:
+						_hub.type_char(char(ke.unicode))
+			get_viewport().set_input_as_handled()
 		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		var d: Vector2 = (event as InputEventMouseMotion).relative * Game.mouse_sensitivity
@@ -624,6 +658,18 @@ func _interact(delta: float, blocked: bool) -> void:
 					ship.request_weapon_swap.rpc_id(1, str(crate.name))
 			if not blocked and Input.is_action_just_pressed("interact"):
 				ship.request_crate_pickup.rpc_id(1, str(crate.name))
+		elif crate is Sentry and crate.carrier == 0:
+			# A sentry turret: F opens it where it stands (in a station) or folds it up again; it is
+			# only picked up folded.
+			var sentry := crate as Sentry
+			prompt = sentry.prompt_line()
+			if not blocked and Input.is_action_just_pressed("equip"):
+				if sentry.s_state == Sentry.PACKED and sentry.can_open_here():
+					ship.request_sentry.rpc_id(1, str(crate.name), true)
+				elif sentry.s_state == Sentry.ACTIVE:
+					ship.request_sentry.rpc_id(1, str(crate.name), false)
+			if not blocked and sentry.s_state == Sentry.PACKED and Input.is_action_just_pressed("interact"):
+				ship.request_crate_pickup.rpc_id(1, str(crate.name))
 		elif crate and crate.carrier == 0:
 			prompt = "[E] Pick up %s - %s" % [RunItems.display_name(crate.item), RunItems.describe(crate.item)]
 			if not blocked and Input.is_action_just_pressed("interact"):
@@ -677,6 +723,8 @@ func _interact(delta: float, blocked: bool) -> void:
 				ship.request_blast.rpc_id(1)
 	elif col is Area3D and col.has_meta("hack"):
 		_hack_prompt(int(col.get_meta("hack")), blocked)
+	elif col is Area3D and col.has_meta("hub_console") and col.get_parent() is HubConsole:
+		_hub_prompt(col.get_parent() as HubConsole, blocked)
 	elif col is Area3D and col.has_meta("generator"):
 		if ship.outpost_power:
 			prompt = "Generator running"
@@ -762,6 +810,48 @@ func _panel_key(label: String) -> void:
 	var code := _panel.press(label)
 	if code != "":
 		ship.request_hack.rpc_id(1, _panel.door, code)
+
+
+## Looking at the control hub's computer: E sits down at it (while the station has power).
+func _hub_prompt(console: HubConsole, blocked: bool) -> void:
+	if not console.powered:
+		prompt = "Control computer - no power (start the generator)"
+		return
+	prompt = "[E] Use the control computer - type a command, Enter sends it, Esc gets up"
+	if not blocked and Input.is_action_just_pressed("interact"):
+		_enter_hub(console)
+
+
+func _enter_hub(console: HubConsole) -> void:
+	_hub = console
+	_panel_look = Vector2.ZERO
+	velocity = Vector3.ZERO
+	scanning = false
+	charge = 0.0
+	_fire_queued = 0.0
+	# Face it (as everyone else sees it).
+	var to := ship.to_local(console.global_position) - position
+	look_yaw = atan2(-to.x, -to.z)
+	look_pitch = 0.0
+	console.enter()
+
+
+func _leave_hub() -> void:
+	if _hub and is_instance_valid(_hub):
+		_hub.leave()
+	_hub = null
+
+
+## At the control hub's computer: the view rests on its screen (see _update_camera) and the keys
+## type (see _unhandled_input); Esc, a hit or the power failing gets you up again.
+func _hub_physics(delta: float) -> void:
+	velocity = Vector3(0, 0.0 if is_on_floor() else velocity.y - GRAVITY * delta, 0)
+	move_and_slide()
+	pose = Pose.RELAXED
+	prompt = ""
+	if not is_instance_valid(_hub) or ship.derelict_k < 0 or not _hub.powered \
+			or ship.to_local(_hub.global_position).distance_to(position + Vector3(0, EYE, 0)) > 3.5:
+		_leave_hub()
 
 
 ## The hand weapon: R reloads (vents a heat weapon), RMB aims down the sight, LMB fires once the
@@ -856,6 +946,11 @@ func _interact_carrying(col: Object, blocked: bool) -> void:
 			prompt = "Hand weapons aren't installed - [G] put the crate down, then [F] to equip it"
 		elif col is Area3D and (col.has_meta("repair") or col.has_meta("crate")):
 			prompt = "Your hands are full - [G] drop the crate"
+	elif item == "sentry":
+		if col is Area3D and (col.has_meta("install_hub") or col.has_meta("station")):
+			prompt = "Sentry turrets aren't installed - [G] set it down in a station, then [F] opens it"
+		elif col is Area3D and (col.has_meta("repair") or col.has_meta("crate")):
+			prompt = "Your hands are full - [G] drop the crate"
 	elif col is Area3D and col.has_meta("install_hub"):
 		if gun:
 			prompt = "Guns are mounted at a GUN console"
@@ -868,9 +963,12 @@ func _interact_carrying(col: Object, blocked: bool) -> void:
 		var id := str(col.get_meta("station"))
 		if ship.station_kind(id) == "gun" and gun:
 			var current := ship.gun_weapon(id)
-			prompt = "[E] Mount %s on the %s (replaces the %s)" % [name_s, ship.station_name(id).to_lower(),
-				Game.GUNS[current]["name"]]
-			target = id
+			if RunItems.weapon_of(item) == current:
+				prompt = "The %s already carries a %s" % [ship.station_name(id).to_lower(), name_s]
+			else:
+				prompt = "[E] Mount the %s on the %s (its %s comes off in a crate)" % [name_s, ship.station_name(id).to_lower(),
+					str(GunPod.WEAPONS.get(current, {}).get("name", "gun")).to_lower()]
+				target = id
 		elif gun:
 			prompt = "Mount guns at a GUN console"
 		else:
@@ -1065,9 +1163,13 @@ func _add_heat(amount: float) -> void:
 			Sfx.play("overheat", null, -10.0)
 
 
-## Where the weapon's muzzle is (global): the first-person model's for your own avatar.
-func _muzzle_global() -> Vector3:
+## Where the weapon's muzzle is (global): the first-person model's for your own avatar (the Dual
+## Pistols: gun `side`'s, 0 the right, 1 the left).
+func _muzzle_global(side := 0) -> Vector3:
 	if _rig and _rig.model:
+		var gp := _rig._gun_parts(side)
+		if gp.has("gun"):
+			return (gp["gun"] as Node3D).global_transform * (gp["muzzle"] as Vector3)
 		return _rig.model.global_transform * (_rig.parts.get("muzzle", Vector3.ZERO) as Vector3)
 	return global_transform * CrewWeapons.held_muzzle(weapon)
 
@@ -1078,9 +1180,10 @@ func _clear_line(a: Vector3, b: Vector3) -> bool:
 	return get_world_3d().direct_space_state.intersect_ray(q).is_empty()
 
 
-## Let the Lightning Thrower's bolt go (charge `c`): it strikes the closest alien within the cone in
-## front (in plain view, within range) and jumps on to the closest alien near that one, and so on,
-## each jump a little weaker. With no alien to strike it hits whatever is ahead.
+## Let the Storm Lance's bolt go (charge `c`): it flies straight where the weapon is aimed (no
+## homing) and strikes the first alien in its way, or one passing within its reach of the line
+## (CrewWeapons.BOLT_SLACK beyond the alien's own size), then jumps on to the closest alien near that
+## one, and so on, each jump a little weaker. With no alien in its way it strikes whatever is ahead.
 func _discharge(c: float) -> void:
 	var d := CrewWeapons.def("lightning")
 	_fire_cd = float(d["cooldown"])
@@ -1088,19 +1191,29 @@ func _discharge(c: float) -> void:
 	var eye := _eye_global()
 	var aim := _look_dir_global()
 	var reach := float(d["range"])
-	var cone := deg_to_rad(lerpf(CrewWeapons.BOLT_CONE, CrewWeapons.BOLT_CONE_ADS, smoothstep(0.0, 1.0, _aim_t)))
 	var struck: Array[Boarder] = []
+	var q := PhysicsRayQueryParameters3D.create(eye, eye + aim * reach, CrewWeapons.shot_mask())
+	q.collide_with_areas = true
+	q.exclude = [get_rid()]
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	var wall_at: Vector3 = hit["position"] if not hit.is_empty() else eye + aim * reach
 	var first: Boarder = null
-	var best := reach
-	for n in ship.boarder_root.get_children():
-		var b := n as Boarder
-		if b == null or b.hp <= 0.0 or b.is_queued_for_deletion():
-			continue
-		var at := b.center_global()
-		var dist := eye.distance_to(at)
-		if dist < best and aim.angle_to(at - eye) <= cone and _clear_line(eye, at):
-			best = dist
-			first = b
+	if not hit.is_empty() and (hit["collider"] as Object).has_meta("boarder"):
+		first = ship.boarder_root.get_node_or_null(str((hit["collider"] as Object).get_meta("boarder"))) as Boarder
+	if first == null:
+		# A near miss still draws the bolt: the alien nearest along the line that it passes close to.
+		var best := eye.distance_to(wall_at)
+		for n in ship.boarder_root.get_children():
+			var b := n as Boarder
+			if b == null or b.hp <= 0.0 or b.is_queued_for_deletion():
+				continue
+			var to := b.center_global() - eye
+			var along := to.dot(aim)
+			if along <= 0.0 or along >= best:
+				continue
+			if (to - aim * along).length() <= b.stat("radius") + CrewWeapons.BOLT_SLACK and _clear_line(eye, b.center_global()):
+				best = along
+				first = b
 	var muzzle := _muzzle_global()
 	var points := PackedVector3Array([muzzle])
 	if first:
@@ -1128,9 +1241,7 @@ func _discharge(c: float) -> void:
 		if Game.mission and Game.mission.hud:
 			Game.mission.hud.hit_marker()
 	else:
-		var q := PhysicsRayQueryParameters3D.create(eye, eye + aim * reach, Game.LAYER_INTERIOR | Game.LAYER_STATION)
-		var hit := get_world_3d().direct_space_state.intersect_ray(q)
-		points.append(hit["position"] if not hit.is_empty() else eye + aim * reach)
+		points.append(wall_at)
 	CrewWeapons.lightning_fx(points, c, struck.size(), true)
 	var local_points := PackedVector3Array()
 	for p in points:
@@ -1153,13 +1264,15 @@ func _shoot() -> void:
 	_fire_cd = float(d["cooldown"])
 	_fire_queued = 0.0
 	var heat_weapon := CrewWeapons.uses_heat(weapon)
+	# (The Dual Pistols take turns: the gun that fires this round.)
+	var side := CrewWeapons.twin_side(weapon, ammo) if CrewWeapons.is_twin(weapon) else 0
 	if not heat_weapon:
 		ammo -= 1
 	var eye := _eye_global()
 	var aim := _look_dir_global()
 	var reach := float(d["range"])
 	var dmg := float(d["damage"]) * float(ship.stats["blaster_damage"]) / CrewWeapons.BASE_DAMAGE
-	var muzzle := _muzzle_global()
+	var muzzle := _muzzle_global(side)
 	var space := get_world_3d().direct_space_state
 	var ends := PackedVector3Array()
 	var normals := PackedVector3Array()
@@ -1221,7 +1334,7 @@ func _shoot() -> void:
 	_bloom = minf(float(d["bloom_max"]), _bloom + float(d["bloom"]))
 	_kick_view(float(d["kick"]) * grow)
 	if _rig:
-		_rig.shot(grow)
+		_rig.shot(grow, side)
 	if heat_weapon:
 		_add_heat(float(d["heat"]))
 	var local_ends := PackedVector3Array()
@@ -1410,8 +1523,9 @@ func _apply_damage(amount: float) -> void:
 	hp -= amount
 	hurt_flash = 1.0
 	_last_hurt = _clock
-	# A hit pulls you out of a keypad lock's panel.
+	# A hit pulls you out of a keypad lock's panel or up from the hub's computer.
 	_leave_panel()
+	_leave_hub()
 	if not bot:
 		if Game.mission:
 			Game.mission.shake(0.25)
@@ -1468,7 +1582,7 @@ func _update_camera(delta: float) -> void:
 	var ship_x := ship.get_global_transform_interpolated()
 	_cam_light.visible = station != "" or not alive or not ship.alive
 	_cam_light.position = Vector3.ZERO
-	if station != "" or not alive or not ship.alive or _panel:
+	if station != "" or not alive or not ship.alive or _panel or _hub:
 		# The helmet's visor and the scanner keep up while out of view.
 		_helmet.update(delta, false)
 		_scanner.update(delta, false)
@@ -1482,6 +1596,14 @@ func _update_camera(delta: float) -> void:
 		var pb := x.basis * Basis(Vector3.UP, _panel_look.x) * Basis(Vector3.RIGHT, _panel_look.y)
 		camera.global_transform = Transform3D(pb, x.origin + shake * 0.2)
 		camera.fov = HackPanel.VIEW_FOV
+		_view.visible = false
+		return
+	if _hub and station == "":
+		# Sitting at the control hub's computer: the view rests on its screen.
+		var x := _hub.view_transform()
+		var hb := x.basis * Basis(Vector3.UP, _panel_look.x) * Basis(Vector3.RIGHT, _panel_look.y)
+		camera.global_transform = Transform3D(hb, x.origin + shake * 0.2)
+		camera.fov = HubConsole.VIEW_FOV
 		_view.visible = false
 		return
 	match station:
@@ -1623,6 +1745,10 @@ func _update_held() -> void:
 			want_rot = Vector3(look_pitch * 0.6, 0.0, 0.0)
 		_:
 			want_rot = Vector3(look_pitch * 0.4, 0.0, 0.0)
+	if CrewWeapons.is_twin(weapon):
+		# (The Dual Pistols' middle is between the hands, a gun either side.)
+		want_pos.x = 0.0
+		want_rot = Vector3(want_rot.x, 0.0, 0.0)
 	var k := NetUtil.smooth(10.0, dt)
 	_held_pos = _held_pos.lerp(want_pos, k)
 	_held_rot = _held_rot.lerp(want_rot, k)
@@ -1633,31 +1759,39 @@ func _update_held() -> void:
 	var parts := _held_parts()
 	if parts.is_empty():
 		return
-	if not reloading and parts.has("mag") and not (parts["mag"] as Node3D).visible:
-		(parts["mag"] as Node3D).visible = true
+	for gp: Dictionary in [parts, parts.get("twin", {})]:
+		if not reloading and gp.has("mag") and not (gp["mag"] as Node3D).visible:
+			(gp["mag"] as Node3D).visible = true
 	if _flash3_t > 0.0:
 		_flash3_t -= dt
 		if _flash3_t <= 0.0:
 			(parts["flash"] as Node3D).visible = false
+			if parts.has("twin"):
+				(parts["twin"]["flash"] as Node3D).visible = false
 
 
 ## Someone else's shot (or a bot's), seen in third person: the muzzle flash and, from a magazine
-## weapon, a casing out of the ejection port.
+## weapon, a casing out of the ejection port (the Dual Pistols' guns in turn).
 func remote_shot() -> void:
 	var parts := _held_parts()
 	if parts.is_empty() or not _held[0].visible:
 		return
-	var flash: Node3D = parts["flash"]
+	var gp := parts
+	if parts.has("twin"):
+		_remote_side = 1 - _remote_side
+		if _remote_side == 1:
+			gp = parts["twin"]
+	var flash: Node3D = gp["flash"]
 	flash.visible = true
 	flash.rotation = Vector3(0, 0, randf() * TAU)
 	_flash3_t = 0.05
 	var kind := str(CrewWeapons.def(weapon)["casing"])
 	var deb := Debris.of(ship)
-	if kind == "" or not parts.has("port") or deb == null:
+	if kind == "" or not gp.has("port") or deb == null:
 		return
-	var model: Node3D = parts["root"]
+	var model: Node3D = gp["gun"] if gp.has("gun") else parts["root"]
 	var b := model.global_basis.orthonormalized()
-	var at := model.global_transform * (parts["port"] as Vector3)
+	var at := model.global_transform * (gp["port"] as Vector3)
 	var inv := ship.global_basis.inverse()
 	var out := b * Vector3(randf_range(1.5, 2.2), randf_range(0.9, 1.5), randf_range(0.1, 0.5))
 	deb.eject(kind, ship.to_local(at), inv * out, inv * b * Basis(Vector3.FORWARD, PI / 2.0),
@@ -1665,20 +1799,23 @@ func remote_shot() -> void:
 
 
 ## A reload seen in third person: the old magazine drops out of the gun onto the floor (the gun
-## shows it again once the reload is done).
+## shows it again once the reload is done; the Dual Pistols drop both).
 func _drop_held_mag() -> void:
 	var parts := _held_parts()
-	var mag: Node3D = parts.get("mag")
 	var deb := Debris.of(ship)
-	if mag == null or deb == null or not _held[0].visible or not mag.visible or weapon == "mgl":
+	if parts.is_empty() or deb == null or not _held[0].visible or weapon == "mgl":
 		return
 	var inv := ship.global_transform.affine_inverse()
 	var vel := ship.global_basis.inverse() * Vector3(0, -1.0, 0)
-	if weapon == "revolver":
-		deb.drop_mag(mag, inv * mag.global_transform.orthonormalized(), vel, Basis(Vector3.RIGHT, PI / 2.0), 0.015, "moonclip")
-	else:
-		deb.drop_mag(mag, inv * mag.global_transform.orthonormalized(), vel)
-	mag.visible = false
+	for gp: Dictionary in [parts, parts.get("twin", {})]:
+		var mag: Node3D = gp.get("mag")
+		if mag == null or not mag.visible:
+			continue
+		if weapon == "revolver":
+			deb.drop_mag(mag, inv * mag.global_transform.orthonormalized(), vel, Basis(Vector3.RIGHT, PI / 2.0), 0.015, "moonclip")
+		else:
+			deb.drop_mag(mag, inv * mag.global_transform.orthonormalized(), vel)
+		mag.visible = false
 
 
 func _remote_update(delta: float) -> void:

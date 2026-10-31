@@ -5,8 +5,9 @@ extends Node3D
 ## with a generator, the working lamps wait for its power and red emergency lamps glow meanwhile),
 ## its sealed doors (sliding up into the wall once opened, and a keypad lock's shutter slamming down
 ## in a lockdown, with red alarm lights), its keypads, the generator (the starter's pull, the flywheel,
-## the shaking engine, its smoke and chug), the specimens floating in their tanks, and the security
-## room's camera feeds. The mothership spawns the station's salvage and hostiles when it lands there.
+## the shaking engine, its smoke and chug), the specimens floating in their tanks, and the control
+## hub (its camera feeds, the station map on its board, its computer). The mothership spawns the
+## station's salvage and hostiles when it lands there.
 
 ## Lamp circuits: lit whatever happens, lit by the generator's power, lit until the power is back
 ## (the red emergency lamps), never lit.
@@ -57,11 +58,30 @@ var _feeds: Array = []
 var _feed_next := 0
 var _feeds_on := false
 var _screens: Array = []
+## The control hub's computer and the map on its board (drawn into _map_vp; _map_key: what it
+## shows, so it is only drawn again on a change).
+var _console: HubConsole
+var _map: HubMap
+var _map_vp: SubViewport
+var _map_key := ""
 var _alarm_audio: Dictionary = {}
 var _door_audio: Dictionary = {}
 static var _feed_shader: Shader
 static var _lit_mat: StandardMaterial3D
 static var _off_mat: StandardMaterial3D
+static var _strip_mat: StandardMaterial3D
+## The emergency strips low along the corridors (one batch) and their circuit.
+var _strips: Array[MeshInstance3D] = []
+var _strip_circuit := ALWAYS
+var _strips_on := -1
+## Inside, the cave's cold blue ambient light gives way to a dim olive grey (0..1, eased).
+const INSIDE_AMBIENT := Color(0.33, 0.34, 0.29)
+const INSIDE_AMBIENT_ENERGY := 0.3
+## ...a little more while the power is out, so shapes still show in the emergency light.
+const DARK_AMBIENT_ENERGY := 0.42
+var _ambient_dark := false
+var _inside := 0.0
+var _env_rest: Array = []
 
 
 func _enter_tree() -> void:
@@ -71,6 +91,8 @@ func _enter_tree() -> void:
 func _exit_tree() -> void:
 	if live.get(k) == self:
 		live.erase(k)
+	_inside = 0.0
+	_apply_ambient()
 
 
 func add_flicker(light: Light3D, rate: float, phase: float) -> void:
@@ -79,7 +101,7 @@ func add_flicker(light: Light3D, rate: float, phase: float) -> void:
 
 ## A lamp: its glowing glass (a box `size` at `pos`, station-local) and its light, on `circuit`.
 func add_lamp(pos: Vector3, size: Vector3, color: Color, energy: float, reach: float, circuit: int, cell: Vector2i, flickers: bool,
-		rng: RandomNumberGenerator) -> void:
+		rng: RandomNumberGenerator, glass_color := Color(0, 0, 0, 0)) -> void:
 	var glass := MeshInstance3D.new()
 	glass.mesh = Models.unit_box()
 	glass.position = pos
@@ -97,13 +119,31 @@ func add_lamp(pos: Vector3, size: Vector3, color: Color, energy: float, reach: f
 		light.visible = false
 		add_child(light)
 	var lit := StandardMaterial3D.new()
-	lit.albedo_color = color * 0.3
+	var glow := glass_color if glass_color.a > 0.0 else color
+	lit.albedo_color = glow * 0.3
 	lit.emission_enabled = true
-	lit.emission = color
-	lit.emission_energy_multiplier = 3.0 if color.g > 0.3 else 2.2
+	lit.emission = glow
+	lit.emission_energy_multiplier = 3.0 if glow.g > 0.3 else 2.2
 	lamps.append({"light": light, "glass": glass, "energy": energy, "circuit": circuit, "cell": cell, "flicker": flickers,
 		"rate": rng.randf_range(0.15, 0.45), "phase": rng.randf(), "lit": lit, "on": -1.0, "delay": rng.randf_range(0.0, 0.35)})
 	glass.material_override = _dark_glass()
+
+
+## The emergency strips' meshes (lit like EMERGENCY lamps, or always without a generator).
+func add_strips(meshes: Array[MeshInstance3D], circuit: int) -> void:
+	_strips = meshes
+	_strip_circuit = circuit
+
+
+## The emergency strips' glow (the batch's material; swapped for dark glass while they are off).
+static func strip_material() -> StandardMaterial3D:
+	if _strip_mat == null:
+		_strip_mat = StandardMaterial3D.new()
+		_strip_mat.albedo_color = Color(0.2, 0.09, 0.03)
+		_strip_mat.emission_enabled = true
+		_strip_mat.emission = Color(1.0, 0.45, 0.15)
+		_strip_mat.emission_energy_multiplier = 0.35
+	return _strip_mat
 
 
 func add_door(di: int, rec: Dictionary) -> void:
@@ -119,24 +159,31 @@ func setup(out: Dictionary) -> void:
 	_subjects = out["subjects"]
 	_gen = out["generator"]
 	_screens = out["screens"]
+	_console = out.get("hub_console")
 	if not _gen.is_empty():
 		_build_generator_fx()
 	_build_feeds()
+	if out.has("hub_map"):
+		_build_map(out["hub_map"])
 	var st := _state()
 	_power = bool(st["power"])
 	_power_t = -100.0
 	_apply_lamps(true)
 	for di: int in doors:
 		_apply_door(di, (st["doors"] as PackedByteArray), true)
+	_update_hub(st)
 
 
-## Whether nobody needs to open door `di` to pass it: an open doorway, or a sealed door whose state
-## (`states`, Mothership.outpost_doors; empty: the station's starting state) is open.
+## Whether nobody needs to open door `di` to pass it: the front door, or a door whose state
+## (`states`, Mothership.outpost_doors; missing: the station's starting state) is open. (An open
+## doorway always is, unless the control hub has locked its door.)
 static func door_passable(door: Dictionary, states: PackedByteArray, di: int) -> bool:
 	var kind := str(door["kind"])
-	if kind == "open" or kind == "front":
+	if kind == "front":
 		return true
-	return di < states.size() and states[di] == DOOR_OPEN
+	if di >= states.size():
+		return kind == "open"
+	return states[di] == DOOR_OPEN
 
 
 ## The station's starting door states: open doorways open, sealed doors shut.
@@ -176,6 +223,7 @@ func _process(delta: float) -> void:
 			var tries: PackedByteArray = st["tries"]
 			panel.show_state(states[di] if di < states.size() else DOOR_CLOSED, tries[di] if di < tries.size() else 0, _t)
 	_animate_generator(delta)
+	_ease_ambient(delta)
 	for s: Dictionary in _subjects:
 		if s["float"]:
 			var n: Node3D = s["node"]
@@ -183,6 +231,7 @@ func _process(delta: float) -> void:
 			var ph := float(s["phase"])
 			n.transform = base.rotated_local(Vector3.UP, sin(_t * 0.13 + ph) * 0.4).translated(Vector3(0, sin(_t * 0.6 + ph) * 0.05, 0))
 	_update_feeds()
+	_update_hub(st)
 
 
 # --- Lamps -------------------------------------------------------------------------------------
@@ -221,6 +270,40 @@ func _apply_lamps(instant: bool) -> void:
 		if light:
 			light.visible = want
 		(l["glass"] as MeshInstance3D).material_override = l["lit"] if want else _dark_glass()
+	var strips := 1 if _strip_circuit == ALWAYS or (_strip_circuit == EMERGENCY and not _power) else 0
+	if strips != _strips_on:
+		_strips_on = strips
+		for mi in _strips:
+			mi.material_override = strip_material() if strips == 1 else _dark_glass()
+
+
+## Ease the ambient light towards the station's own while the camera is inside it.
+func _ease_ambient(delta: float) -> void:
+	var cam := get_viewport().get_camera_3d()
+	var want := 0.0
+	if cam:
+		var lp := global_transform.affine_inverse() * cam.global_position
+		var c := OutpostLayout.cell_at(lp)
+		if OutpostLayout.inside(c) and (layout["kind"] as PackedByteArray)[OutpostLayout.idx(c)] != OutpostLayout.ROCK:
+			want = 1.0
+	var was := _inside
+	_inside = move_toward(_inside, want, delta * 1.5)
+	var dark := not _power and int(layout.get("generator", -1)) >= 0
+	if _inside != was or dark != _ambient_dark:
+		_ambient_dark = dark
+		_apply_ambient()
+
+
+func _apply_ambient() -> void:
+	if not is_inside_tree():
+		return
+	var env := get_world_3d().environment
+	if env == null:
+		return
+	if _env_rest.is_empty():
+		_env_rest = [env.ambient_light_color, env.ambient_light_energy]
+	env.ambient_light_color = (_env_rest[0] as Color).lerp(INSIDE_AMBIENT, _inside)
+	env.ambient_light_energy = lerpf(float(_env_rest[1]), DARK_AMBIENT_ENERGY if _ambient_dark else INSIDE_AMBIENT_ENERGY, _inside)
 
 
 static func _dark_glass() -> StandardMaterial3D:
@@ -449,12 +532,66 @@ func generator_spot() -> Vector3:
 	return to_global(_gen["pos"])
 
 
+# --- The control hub -----------------------------------------------------------------------------
+
+## Whether the control hub works: with a generator, once it runs.
+func hub_powered() -> bool:
+	return _power or int(layout.get("generator", -1)) < 0
+
+
+## The control hub's computer, or null.
+func hub_console() -> HubConsole:
+	return _console
+
+
+## The server's answer to a command typed at the hub (Mothership.fx_hub_log).
+func hub_print(lines: PackedStringArray, ok: bool) -> void:
+	if _console:
+		_console.print_lines(lines, ok)
+
+
+## The map on the hub's board: drawn offscreen (once, and again on a change, see _update_hub).
+func _build_map(board: MeshInstance3D) -> void:
+	_map_vp = SubViewport.new()
+	_map_vp.size = HubMap.SIZE
+	_map_vp.disable_3d = true
+	_map_vp.transparent_bg = false
+	_map_vp.msaa_2d = Viewport.MSAA_4X
+	_map_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	add_child(_map_vp)
+	_map = HubMap.new()
+	_map.setup(layout, float(board.get_meta("yaw", 0.0)), _console.position if _console else board.position)
+	_map_vp.add_child(_map)
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_texture = _map_vp.get_texture()
+	board.material_override = mat
+
+
+## The hub's computer and map follow the power and the doors' states.
+func _update_hub(st: Dictionary) -> void:
+	var on := hub_powered()
+	if _console:
+		_console.set_powered(on)
+	if _map == null:
+		return
+	var states: PackedByteArray = st["doors"]
+	var key := "%s|%s" % [on, states.hex_encode()]
+	if key == _map_key:
+		return
+	_map_key = key
+	_map.doors = states
+	_map.powered = on
+	_map.queue_redraw()
+	_map_vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+
+
 # --- Security feeds ----------------------------------------------------------------------------
 
 ## The cameras in the watched rooms (a housing on a bracket with a blinking light), and an offscreen
-## view of each for a screen on the security desk.
+## view of each for a screen over the control hub's desk.
 func _build_feeds() -> void:
-	var sec := int(layout.get("security", -1))
+	var sec := int(layout.get("hub", -1))
 	if sec < 0:
 		return
 	var cams: Array = []
@@ -506,7 +643,11 @@ func _build_feeds() -> void:
 		label.outline_size = 0
 		label.position = Vector3(0, 0.19, 0.002)
 		screen.add_child(label)
-		_feeds.append({"vp": vp, "cam": c3, "xform": x * Transform3D(Basis.IDENTITY, Vector3(0, 0, -0.26)), "screen": screen, "seen": false})
+		_feeds.append({"vp": vp, "cam": c3, "xform": x * Transform3D(Basis.IDENTITY, Vector3(0, 0, -0.26)), "screen": screen, "seen": false,
+			"label": label})
+		# (Dark until the viewer is in the hub and it has power, see _update_feeds.)
+		screen.set_instance_shader_parameter("power", 0.0)
+		label.visible = false
 	for i in range(_feeds.size(), _screens.size()):
 		(_screens[i] as MeshInstance3D).material_override = Models.mat(Color(0.04, 0.05, 0.05), 0.5, 0.2)
 
@@ -516,19 +657,20 @@ func _room_of(p: Vector3) -> String:
 	return str(layout["rooms"][ri]["name"]) if ri >= 0 else "CORRIDOR"
 
 
-## The feeds render while the local viewer is in the security room (and the room has power: with a
+## The feeds render while the local viewer is in the control hub (and it has power: with a
 ## generator, only once it runs), one feed a frame in turn.
 func _update_feeds() -> void:
 	if _feeds.is_empty():
 		return
 	var cam := get_viewport().get_camera_3d()
-	var on := cam != null and (_power or int(layout.get("generator", -1)) < 0) \
-		and OutpostLayout.room_at(layout, to_local(cam.global_position)) == int(layout["security"])
+	var on := cam != null and hub_powered() \
+		and OutpostLayout.room_at(layout, to_local(cam.global_position)) == int(layout["hub"])
 	if on != _feeds_on:
 		_feeds_on = on
 		for f: Dictionary in _feeds:
 			(f["vp"] as SubViewport).render_target_update_mode = SubViewport.UPDATE_DISABLED
 			(f["screen"] as MeshInstance3D).set_instance_shader_parameter("power", 1.0 if on else 0.0)
+			(f["label"] as Label3D).visible = on
 	if not on:
 		return
 	var f: Dictionary = _feeds[_feed_next]

@@ -185,8 +185,19 @@ func _build_environment() -> void:
 	_dust.scale_amount_min = 0.5
 	_dust.scale_amount_max = 1.2
 	var dust_mesh := QuadMesh.new()
-	dust_mesh.size = Vector2(0.06, 0.06)
+	dust_mesh.size = Vector2(0.04, 0.04)
 	var dust_mat := StandardMaterial3D.new()
+	# Soft round motes (a bare quad shows as a little square up close).
+	var dot := GradientTexture2D.new()
+	dot.fill = GradientTexture2D.FILL_RADIAL
+	dot.fill_from = Vector2(0.5, 0.5)
+	dot.fill_to = Vector2(1.0, 0.5)
+	dot.width = 32
+	dot.height = 32
+	var dg := Gradient.new()
+	dg.colors = PackedColorArray([Color(1, 1, 1, 1), Color(1, 1, 1, 0)])
+	dot.gradient = dg
+	dust_mat.albedo_texture = dot
 	dust_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	dust_mat.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
 	dust_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -429,8 +440,8 @@ func _physics_process(delta: float) -> void:
 
 ## Server: the outpost test. The ship settles on the abandoned station's pad at once (its aliens and
 ## salvage set out as on any landing), a crate of every hand weapon but the one everybody starts
-## with stands along the pier (in two rows, either side of the walk), and the host's own crew
-## member stands on the pier facing the station's door.
+## with stands along the pier (in two rows, either side of the walk), then two sentry turrets
+## facing the station's door, and the host's own crew member stands on the pier facing it.
 func _start_outpost_test() -> void:
 	var d := cave.derelict(_test_k)
 	ship.land_for_test(d)
@@ -443,6 +454,10 @@ func _start_outpost_test() -> void:
 		var z := StationBuilder.PIER_START + 0.4 + floorf(i * 0.5) * 1.05
 		ship.spawn_crate(RunItems.crew_weapon_item(w), Vector3(x, deck + SupplyCrate.SIZE.y * 0.5, z), 0.0)
 		i += 1
+	# (A sentry's front is its +x: turned -90 degrees it faces up the pier.)
+	for x: float in [-1.3, 1.3]:
+		var z := StationBuilder.PIER_START + 0.4 + floorf((i + 1) * 0.5) * 1.05 + 0.4
+		ship.spawn_crate("sentry", Vector3(x, deck + SupplyCrate.SIZE.y * 0.5, z), -PI / 2.0)
 	if local_player:
 		local_player.position = Vector3(0.0, deck + 0.05, StationBuilder.PIER_START + 0.3)
 		local_player.velocity = Vector3.ZERO

@@ -11,14 +11,14 @@ extends RefCounted
 ##   reload, and the grenade launcher throws its six out when it is opened. Once the magazine is
 ##   empty the trigger only clicks, and R reloads (the old magazine drops to the floor). Crew bots
 ##   reload by themselves.
-## - "heat": energy weapons (Photon Rifle, Lightning Thrower). Every shot heats them and the heat
-##   bleeds off by itself; at full heat they overheat and vent, locked until they have cooled. R
-##   vents them early.
-## Most fire for as long as LMB is held; "semi" weapons (Revolver, grenade launcher) fire once a pull
-## of the trigger, as fast as it is pulled. The Lightning Thrower charges while LMB is held and lets
-## go a bolt on release: it strikes the closest alien in front of the shooter and jumps on to the
-## aliens near it. The grenade launcher's grenades fly in an arc and bounce about until they go off
-## (Grenades).
+## - "heat": energy weapons (Photon Rifle, Storm Lance). Every shot heats them and the heat bleeds
+##   off by itself; at full heat they overheat and vent, locked until they have cooled. R vents them
+##   early.
+## Most fire for as long as LMB is held; "semi" weapons (the Revolver) fire once a pull of the
+## trigger, as fast as it is pulled. The Photon Rifle's shots fly as glowing bolts. The Storm Lance
+## (id "lightning") charges while LMB is held and lets go a bolt on release: it goes where it is
+## aimed, strikes the alien in its way and jumps on to the aliens near it. The grenade launcher's
+## grenades fly in an arc and bounce about until they go off (Grenades).
 ##
 ## Hip fire (LMB) scatters widely ("hip"); aiming down the weapon's own sight (RMB, "sight" and
 ## "zoom") is accurate ("ads"), but every shot in quick succession widens the scatter ("bloom", up
@@ -33,7 +33,7 @@ extends RefCounted
 
 const BASE_DAMAGE := 20.0
 const DEFAULT := "pistol"
-const ORDER := ["pistol", "revolver", "smg", "rifle", "photon", "marksman", "shotgun", "mgl", "lightning"]
+const ORDER := ["pistol", "dual", "revolver", "smg", "rifle", "photon", "marksman", "shotgun", "mgl", "lightning"]
 ## "kind" "mag" or "heat"; "damage" per pellet (for the grenade launcher, the blast's in its middle;
 ## half of it at its edge); "cooldown" seconds between shots; "semi": one shot a pull of the
 ## trigger (the others fire while LMB is held); "hip" / "ads" the scatter (radius of the cone,
@@ -44,13 +44,19 @@ const ORDER := ["pistol", "revolver", "smg", "rifle", "photon", "marksman", "sho
 ## launcher's grenades ("speed" m/s, "lift" radians above the aim, "fuse" seconds, "splash" radius);
 ## "mag" rounds and "reload" seconds (mag weapons); "heat" per shot, "cool" per second and "reload"
 ## seconds for a full vent (heat weapons); "zoom" when aiming; "sight" the kind of sight; "kick" view
-## climb and "punch" gun recoil per shot; "casing" what the ejection port throws out; "price" in
-## waystation shops (before the depth markup).
+## climb and "punch" gun recoil per shot; "casing" what the ejection port throws out; "flash" the
+## muzzle flash [size, glow, light energy]; "bolt" the Photon Rifle's bolts [speed m/s, length m];
+## "price" in waystation shops (before the depth markup); "twin": two guns, one in each hand, taking
+## turns (the Dual Pistols: "mag" counts both magazines).
 const DEFS := {
 	"pistol": {"name": "Pistol", "short": "Heavy sidearm", "kind": "mag", "damage": 22.0, "cooldown": 0.22, "pellets": 1,
 		"hip": 0.05, "ads": 0.003, "bloom": 0.012, "bloom_max": 0.045, "range": 60.0,
 		"mag": 12, "reload": 1.5, "zoom": 1.25, "sight": "iron", "kick": 0.016, "punch": 0.05, "casing": "pistol",
 		"color": Color(1.0, 0.8, 0.45), "sound": "pistol", "volume": -4.0, "pitch": 1.0, "price": 50},
+	"dual": {"name": "Dual Pistols", "short": "A pistol in each hand, firing in turn while the trigger is held; wild from the hip",
+		"kind": "mag", "twin": true, "damage": 18.0, "cooldown": 0.12, "pellets": 1, "hip": 0.065, "ads": 0.014, "bloom": 0.01,
+		"bloom_max": 0.05, "range": 55.0, "mag": 30, "reload": 2.2, "zoom": 1.1, "sight": "twin", "kick": 0.012, "punch": 0.05,
+		"casing": "pistol", "color": Color(1.0, 0.8, 0.45), "sound": "pistol", "volume": -5.0, "pitch": 1.06, "price": 80},
 	"revolver": {"name": "Revolver", "short": "Six shots as fast as you pull the trigger, each kicking harder; reloads from a moon clip",
 		"kind": "mag", "damage": 40.0, "cooldown": 0.07, "semi": true, "pellets": 1, "hip": 0.035, "ads": 0.0025,
 		"bloom": 0.05, "bloom_max": 0.22, "kick_grow": 2.4, "range": 60.0, "mag": 6, "reload": 2.3, "zoom": 1.25,
@@ -60,16 +66,16 @@ const DEFS := {
 		"damage": 7.5, "cooldown": 0.06, "pellets": 1, "hip": 0.09, "ads": 0.035, "bloom": 0.006, "bloom_max": 0.06,
 		"kick_grow": 0.8, "falloff": [10.0, 28.0, 0.45], "range": 50.0, "mag": 64, "reload": 2.6, "zoom": 1.2,
 		"sight": "peep", "kick": 0.011, "punch": 0.024, "casing": "pistol", "color": Color(1.0, 0.8, 0.45),
-		"sound": "smg", "volume": -8.0, "pitch": 1.0, "price": 100},
-	"rifle": {"name": "Pulse Rifle", "short": "Rapid-fire rifle with an ammo counter", "kind": "mag", "damage": 11.0, "cooldown": 0.09,
-		"pellets": 1, "hip": 0.06, "ads": 0.004, "bloom": 0.005, "bloom_max": 0.04, "range": 70.0,
-		"mag": 40, "reload": 2.0, "zoom": 1.45, "sight": "reflex", "kick": 0.007, "punch": 0.025, "casing": "rifle",
-		"color": Color(1.0, 0.82, 0.5), "sound": "rifle", "volume": -6.0, "pitch": 1.0, "price": 110},
-	"photon": {"name": "Photon Rifle", "short": "Rapid-fire energy rifle; heats up instead of running dry", "kind": "heat",
+		"flash": [0.21, 3.0, 1.2], "sound": "smg", "volume": -8.0, "pitch": 1.0, "price": 100},
+	"rifle": {"name": "Pulse Rifle", "short": "Rapid-fire rifle with an ammo counter; hits hard and climbs", "kind": "mag", "damage": 15.0,
+		"cooldown": 0.09, "pellets": 1, "hip": 0.06, "ads": 0.004, "bloom": 0.006, "bloom_max": 0.045, "kick_grow": 0.5,
+		"range": 70.0, "mag": 40, "reload": 2.0, "zoom": 1.45, "sight": "reflex", "kick": 0.013, "punch": 0.042,
+		"casing": "rifle", "color": Color(1.0, 0.82, 0.5), "sound": "rifle", "volume": -6.0, "pitch": 1.0, "price": 110},
+	"photon": {"name": "Photon Rifle", "short": "Rapid-fire energy rifle firing glowing bolts; heats up instead of running dry", "kind": "heat",
 		"damage": 11.5, "cooldown": 0.095, "pellets": 1, "hip": 0.06, "ads": 0.004, "bloom": 0.005, "bloom_max": 0.04,
 		"range": 70.0, "heat": 0.024, "cool": 0.3, "reload": 1.8, "zoom": 1.45, "sight": "holo", "kick": 0.007,
-		"punch": 0.022, "casing": "", "color": Color(0.45, 0.95, 1.0), "sound": "photon", "volume": -7.0, "pitch": 1.0,
-		"price": 130},
+		"punch": 0.022, "casing": "", "color": Color(0.45, 0.95, 1.0), "flash": [0.22, 2.6, 1.1], "bolt": [95.0, 0.75],
+		"sound": "photon", "volume": -7.0, "pitch": 1.0, "price": 130},
 	"marksman": {"name": "Marksman Rifle", "short": "Heavy semi-automatic rifle with a short scope; hits hard, through one alien into the next",
 		"kind": "mag", "damage": 52.0, "cooldown": 0.36, "pellets": 1, "hip": 0.05, "ads": 0.0012, "bloom": 0.012,
 		"bloom_max": 0.035, "range": 90.0, "pierce": 2, "mag": 10, "reload": 2.3, "zoom": 1.8, "sight": "scope",
@@ -79,24 +85,24 @@ const DEFS := {
 		"cooldown": 0.7, "pellets": 10, "hip": 0.12, "ads": 0.075, "bloom": 0.01, "bloom_max": 0.02, "falloff": [6.0, 20.0, 0.4],
 		"range": 24.0, "mag": 8, "reload": 2.2, "zoom": 1.15, "sight": "bead", "kick": 0.07, "punch": 0.11, "casing": "shell",
 		"color": Color(1.0, 0.72, 0.35), "sound": "shotgun", "volume": -1.0, "pitch": 0.92, "price": 100},
-	"mgl": {"name": "Multiple Grenade Launcher", "short": "Six 40 mm grenades, one a pull: they bounce about until they go off",
-		"kind": "mag", "damage": 80.0, "cooldown": 0.4, "semi": true, "pellets": 1, "hip": 0.025, "ads": 0.006,
-		"bloom": 0.01, "bloom_max": 0.03, "range": 60.0, "grenade": {"speed": 22.0, "lift": 0.1, "fuse": 1.6, "splash": 4.5},
+	"mgl": {"name": "Multiple Grenade Launcher", "short": "Six 40 mm grenades, fully automatic: they bounce about until they go off with a big blast",
+		"kind": "mag", "damage": 80.0, "cooldown": 0.36, "pellets": 1, "hip": 0.025, "ads": 0.006,
+		"bloom": 0.012, "bloom_max": 0.04, "range": 60.0, "grenade": {"speed": 22.0, "lift": 0.1, "fuse": 1.6, "splash": 6.5},
 		"mag": 6, "reload": 3.0, "zoom": 1.2, "sight": "ring", "kick": 0.05, "punch": 0.09, "casing": "",
 		"color": Color(1.0, 0.6, 0.25), "sound": "mgl", "volume": -3.0, "pitch": 1.0, "price": 160},
-	"lightning": {"name": "Lightning Thrower", "short": "Charge and release: a bolt that jumps between aliens", "kind": "heat",
+	"lightning": {"name": "Storm Lance", "short": "Charge, aim and release: a bolt that jumps on from the alien it strikes", "kind": "heat",
 		"damage": 30.0, "damage_max": 85.0, "cooldown": 0.25, "pellets": 1, "hip": 0.0, "ads": 0.0, "bloom": 0.0,
 		"bloom_max": 0.0, "range": 20.0, "heat": 0.16, "heat_charge": 0.24, "cool": 0.15, "reload": 1.8, "zoom": 1.15,
 		"sight": "fork", "kick": 0.045, "punch": 0.06, "casing": "", "color": Color(0.55, 0.8, 1.0), "sound": "zap",
 		"volume": -3.0, "pitch": 1.0, "price": 150},
 }
-## Lightning Thrower: seconds to a full charge, the least charge that lets a bolt go, the cone the
-## first target must be in (degrees, from the hip and aimed), how far the bolt jumps on from an alien
-## to the next, how many more it jumps to and how much of the damage each jump keeps.
+## Storm Lance: seconds to a full charge, the least charge that lets a bolt go, how close (m, beyond
+## its own size) an alien must pass to the line it is aimed along to draw the bolt (it does not seek
+## targets: it goes where it is aimed), how far the bolt jumps on from an alien to the next, how many
+## more it jumps to and how much of the damage each jump keeps.
 const CHARGE_TIME := 0.9
 const CHARGE_MIN := 0.2
-const BOLT_CONE := 32.0
-const BOLT_CONE_ADS := 14.0
+const BOLT_SLACK := 0.15
 const CHAIN_RANGE := 7.0
 const CHAIN_JUMPS := 4
 const CHAIN_FALLOFF := 0.72
@@ -111,6 +117,7 @@ const HELD_POS := Vector3(0.3, 1.15, -0.5)
 ## Each weapon's muzzle (in its model's frame).
 const MUZZLES := {
 	"pistol": Vector3(0, 0.045, -0.142),
+	"dual": Vector3(0, 0.045, -0.139),
 	"revolver": Vector3(0, 0.036, -0.174),
 	"smg": Vector3(0, 0.012, -0.356),
 	"rifle": Vector3(0, 0.005, -0.585),
@@ -120,6 +127,13 @@ const MUZZLES := {
 	"mgl": Vector3(0, 0.03, -0.268),
 	"lightning": Vector3(0, 0, -0.455),
 }
+## Muzzle flash sizes for the weapons without a "flash" of their own.
+const FLASH_SIZES := {"pistol": 0.3, "dual": 0.27, "revolver": 0.38, "marksman": 0.44, "shotgun": 0.45, "mgl": 0.5}
+## The Dual Pistols: how far either side of the middle each gun is held, in your own view, in a crew
+## member's hands (seen by everyone else), and lying on a crate.
+const DUAL_SPREAD := 0.165
+const DUAL_HELD_SPREAD := 0.3
+const DUAL_CRATE_SPREAD := 0.075
 ## The marksman rifle's scope: where its eyepiece is (Z, the model's frame), how far behind it the eye
 ## sits when aiming, the eyepiece's radius and the scope's length (it flares out to the front).
 const SCOPE_EYEPIECE_Z := 0.0855
@@ -236,13 +250,22 @@ static func aim_fov(id: String, base: float) -> float:
 ## ejection port), "eye" (where the eye is when aiming down the sight), "front" (the sight's front
 ## element, which sits in the middle of the view when aiming), "glow" (materials that glow with heat
 ## or charge), "vent" (the hatch that opens to vent heat), "prongs" (the Lightning Thrower's emitter
-## tips), "flash" (the muzzle flash) and "display" (labels and bar, first person).
-static func build_model(parent: Node3D, id: String, accent: Color, first_person: bool) -> Node3D:
+## tips), "flash" (the muzzle flash) and "display" (labels and bar, first person). The Dual Pistols
+## are two guns (see _build_dual): the right gun's parts are the root's own, "twin" holds the left
+## gun's, "guns" the two gun nodes (right first). `compact`: laid on a crate (the Dual Pistols side
+## by side).
+static func build_model(parent: Node3D, id: String, accent: Color, first_person: bool, compact := false) -> Node3D:
 	var root := Node3D.new()
 	root.name = "Weapon_" + id
 	parent.add_child(root)
 	var parts := {"root": root, "glow": [], "travel": Vector3.ZERO, "muzzle": MUZZLES.get(id, MUZZLES[DEFAULT])}
 	var m := _mats(accent)
+	if id == "dual":
+		_build_dual(root, parts, m, first_person, compact)
+		if first_person:
+			_no_shadows(root)
+		root.set_meta("parts", parts)
+		return root
 	match id:
 		"revolver":
 			_build_revolver(root, parts, m)
@@ -344,42 +367,25 @@ static func _glow_mat(parts: Dictionary, col: Color, base := 0.6) -> StandardMat
 	return g
 
 
-## A heavy service pistol: frame, slide (it runs back with every shot and locks back when the
-## magazine is empty), grip with the magazine in it, and iron sights with glowing tritium dots.
+## A heavy service pistol, a Blender-made model (tools/blender/weapons.py): frame, slide (it runs
+## back with every shot and locks back when the magazine is empty), grip with the magazine in it,
+## and iron sights; their glowing tritium dots are made here, on the slide.
 static func _build_pistol(root: Node3D, parts: Dictionary, m: Dictionary) -> void:
-	_box(root, Vector3(0, 0.012, -0.015), Vector3(0.042, 0.036, 0.19), m["dark"])
+	var asset := "weapon_pistol"
+	Models.asset_mesh(root, asset, "Body", {"Accent": m["accent"]})
 	var slide := Node3D.new()
 	slide.name = "Slide"
 	root.add_child(slide)
-	_box(slide, Vector3(0, 0.048, -0.03), Vector3(0.046, 0.038, 0.2), m["gun"])
-	for i in 4:
-		_box(slide, Vector3(0, 0.049, 0.04 + i * 0.007), Vector3(0.0475, 0.03, 0.0025), m["dark"])
-	_box(slide, Vector3(0.0232, 0.056, -0.03), Vector3(0.002, 0.012, 0.032), m["black"])
-	# Iron sights: the rear notch (two posts) and the front blade, each with a tritium dot.
+	Models.asset_mesh(slide, asset, "Slide")
 	for x: float in [-0.011, 0.011]:
-		_box(slide, Vector3(x, 0.072, 0.058), Vector3(0.007, 0.012, 0.008), m["dark"])
 		Models.sphere(slide, Vector3(x, 0.0745, 0.0625), 0.0019, m["tritium"], Vector3.ONE, 8)
-	_box(slide, Vector3(0, 0.0715, -0.118), Vector3(0.005, 0.011, 0.01), m["dark"])
 	Models.sphere(slide, Vector3(0, 0.0745, -0.1125), 0.0019, m["tritium"], Vector3.ONE, 8)
-	_cyl(root, Vector3(0, 0.045, -0.132), 0.011, 0.012, m["steel"])
-	_cyl(root, Vector3(0, 0.045, -0.1385), 0.0055, 0.003, m["black"])
-	_box(root, Vector3(0, 0.05, 0.076), Vector3(0.012, 0.016, 0.01), m["dark"])
-	# The grip with its panels, the trigger and its guard.
-	_box(root, Vector3(0, -0.055, 0.045), Vector3(0.04, 0.11, 0.058), m["grip"], Vector3(-14, 0, 0))
-	for x: float in [-0.0205, 0.0205]:
-		_box(root, Vector3(x, -0.052, 0.045), Vector3(0.003, 0.085, 0.044), m["wood"], Vector3(-14, 0, 0))
-	_box(root, Vector3(0, -0.019, -0.024), Vector3(0.01, 0.006, 0.046), m["dark"])
-	_box(root, Vector3(0, -0.008, -0.045), Vector3(0.01, 0.026, 0.006), m["dark"])
-	_box(root, Vector3(0, -0.009, -0.013), Vector3(0.006, 0.018, 0.006), m["steel"], Vector3(15, 0, 0))
-	_box(root, Vector3(-0.0212, 0.0, 0.07), Vector3(0.002, 0.008, 0.04), m["accent"])
-	# The magazine, along the grip.
 	var mag := Node3D.new()
 	mag.name = "Mag"
 	mag.position = Vector3(0, -0.055, 0.045)
 	mag.rotation_degrees = Vector3(-14, 0, 0)
 	root.add_child(mag)
-	_box(mag, Vector3(0, -0.058, 0), Vector3(0.036, 0.009, 0.052), m["dark"])
-	_box(mag, Vector3(0, -0.005, 0), Vector3(0.03, 0.1, 0.042), m["steel"])
+	Models.asset_mesh(mag, asset, "Mag")
 	parts["mag"] = mag
 	parts["slide"] = slide
 	parts["travel"] = Vector3(0, 0, 0.042)
@@ -389,75 +395,106 @@ static func _build_pistol(root: Node3D, parts: Dictionary, m: Dictionary) -> voi
 	parts["display_at"] = [Vector3(0, 0.016, 0.0915), Vector3(0, 0.32, 1.0), Vector2(0.032, 0.016)]
 
 
-## A heavy six-shot revolver: a big frame, a barrel with a vented rib and a full-length lug under it,
-## a fluted cylinder that turns a chamber after every shot (the hammer flicks back and falls as it
-## fires), and a notch in the top strap and a blade with a glowing bead to aim with. It reloads from
-## a moon clip: the cylinder swings out to the left on its crane, the spent clip (six cases on a
-## steel star) drops out of the back and a full one goes in.
+## The Dual Pistols: a slim stainless pistol in each hand (a Blender-made model, "dual" in
+## tools/blender/weapons.py: an open-top slide showing the barrel, a round-spur hammer, black
+## wraparound grips), DUAL_SPREAD either side of the root (DUAL_HELD_SPREAD in a crew member's hands,
+## DUAL_CRATE_SPREAD on a crate). Each is built like the Pistol, with its own slide, magazine, sight
+## dots, muzzle flash and display (showing that gun's own rounds).
+static func _build_dual(root: Node3D, parts: Dictionary, m: Dictionary, first_person: bool, compact: bool) -> void:
+	var spread := DUAL_CRATE_SPREAD if compact else (DUAL_SPREAD if first_person else DUAL_HELD_SPREAD)
+	var guns: Array[Node3D] = []
+	for side in 2:
+		var gun := Node3D.new()
+		gun.name = "GunR" if side == 0 else "GunL"
+		gun.position = Vector3(spread if side == 0 else -spread, 0, 0)
+		root.add_child(gun)
+		var gp := parts if side == 0 else {"root": gun, "glow": [], "travel": Vector3.ZERO}
+		gp["muzzle"] = MUZZLES["dual"]
+		_build_dual_gun(gun, gp, m)
+		_build_flash(gun, gp, "dual")
+		_build_display(gun, gp, "dual", first_person)
+		gp["gun"] = gun
+		guns.append(gun)
+		if side == 1:
+			parts["twin"] = gp
+	parts["guns"] = guns
+
+
+## One of the Dual Pistols, in its own frame (the Pistol's: barrel along -Z, the sight line on x = 0).
+static func _build_dual_gun(gun: Node3D, gp: Dictionary, m: Dictionary) -> void:
+	var asset := "weapon_dual"
+	Models.asset_mesh(gun, asset, "Body", {"Accent": m["accent"]})
+	var slide := Node3D.new()
+	slide.name = "Slide"
+	gun.add_child(slide)
+	Models.asset_mesh(slide, asset, "Slide")
+	for x: float in [-0.0095, 0.0095]:
+		Models.sphere(slide, Vector3(x, 0.0735, 0.0625), 0.0018, m["tritium"], Vector3.ONE, 8)
+	Models.sphere(slide, Vector3(0, 0.0725, -0.1175), 0.0018, m["tritium"], Vector3.ONE, 8)
+	var mag := Node3D.new()
+	mag.name = "Mag"
+	mag.position = Vector3(0, -0.055, 0.043)
+	mag.rotation_degrees = Vector3(-15, 0, 0)
+	gun.add_child(mag)
+	Models.asset_mesh(mag, asset, "Mag")
+	gp["mag"] = mag
+	gp["slide"] = slide
+	gp["travel"] = Vector3(0, 0, 0.04)
+	gp["port"] = Vector3(0.024, 0.054, -0.012)
+	gp["eye"] = Vector3(0, 0.0735, 0.5)
+	gp["front"] = Vector3(0, 0.0725, -0.1175)
+	gp["display_at"] = [Vector3(0, 0.016, 0.0915), Vector3(0, 0.32, 1.0), Vector2(0.032, 0.016)]
+
+
+## The Dual Pistols' gun that fires next with `ammo` rounds left in both (0 the right, 1 the left:
+## they take turns, the right first after a reload).
+static func twin_side(id: String, ammo: int) -> int:
+	return (mag(id) - ammo) % 2
+
+
+## How many rounds each of the Dual Pistols has left with `ammo` in both: [right, left].
+static func twin_rounds(id: String, ammo: int) -> Vector2i:
+	var fired := mag(id) - ammo
+	var half := mag(id) / 2
+	return Vector2i(half - (fired + 1) / 2, half - fired / 2)
+
+
+## True for a weapon of two guns that take turns (the Dual Pistols).
+static func is_twin(id: String) -> bool:
+	return bool(def(id).get("twin", false))
+
+
+## A heavy six-shot revolver, a Blender-made model: a big frame, a barrel with a vented rib and a
+## full-length lug under it, a fluted cylinder that turns a chamber after every shot (the hammer
+## flicks back and falls as it fires), and a notch in the top strap and a blade with a glowing bead
+## (made here) to aim with. It reloads from a moon clip: the cylinder swings out to the left on its
+## crane, the spent clip (six cases on a steel star) drops out of the back and a full one goes in.
 static func _build_revolver(root: Node3D, parts: Dictionary, m: Dictionary) -> void:
-	var bore := 0.036
+	var asset := "weapon_revolver"
 	var axis := 0.022
-	# The frame: the top strap over the cylinder (the rear sight's notch on it), the part under the
-	# cylinder, the front the barrel screws into, the recoil shield behind the cylinder.
-	_box(root, Vector3(0, 0.0545, -0.002), Vector3(0.026, 0.008, 0.052), m["gun"])
-	for x: float in [-0.0045, 0.0045]:
-		_box(root, Vector3(x, 0.0605, 0.016), Vector3(0.0035, 0.004, 0.01), m["dark"])
-	_box(root, Vector3(0, -0.006, -0.002), Vector3(0.028, 0.012, 0.052), m["gun"])
-	_box(root, Vector3(0, 0.023, -0.033), Vector3(0.028, 0.07, 0.014), m["gun"])
-	_box(root, Vector3(0, 0.023, 0.0325), Vector3(0.03, 0.07, 0.016), m["gun"])
-	# The barrel, its vented rib with the front sight's blade and bead at the end, the lug under it.
-	_cyl(root, Vector3(0, bore, -0.106), 0.0088, 0.132, m["steel"])
-	_cyl(root, Vector3(0, bore, -0.1725), 0.0048, 0.002, m["black"])
-	_box(root, Vector3(0, 0.0465, -0.106), Vector3(0.009, 0.004, 0.13), m["gun"])
-	for i in 4:
-		_box(root, Vector3(0, 0.0465, -0.06 - i * 0.03), Vector3(0.0096, 0.0022, 0.012), m["black"])
-	_box(root, Vector3(0, 0.022, -0.1), Vector3(0.012, 0.014, 0.12), m["gun"])
-	_box(root, Vector3(0, 0.0545, -0.16), Vector3(0.0035, 0.012, 0.016), m["dark"])
+	Models.asset_mesh(root, asset, "Body", {"Accent": m["accent"]})
 	Models.sphere(root, Vector3(0, 0.0605, -0.155), 0.0021, m["bead"], Vector3.ONE, 8)
-	# The hammer, on top of the recoil shield.
 	var hammer := Node3D.new()
 	hammer.name = "Hammer"
 	hammer.position = Vector3(0, 0.05, 0.036)
 	root.add_child(hammer)
-	_box(hammer, Vector3(0, 0.004, 0.003), Vector3(0.007, 0.014, 0.008), m["dark"])
-	_box(hammer, Vector3(0, 0.011, 0.01), Vector3(0.01, 0.004, 0.012), m["dark"], Vector3(-20, 0, 0))
-	# The grip with its wooden panels, the trigger guard and the trigger.
-	_box(root, Vector3(0, -0.056, 0.048), Vector3(0.03, 0.1, 0.04), m["gun"], Vector3(-18, 0, 0))
-	for x: float in [-0.0158, 0.0158]:
-		_box(root, Vector3(x, -0.058, 0.049), Vector3(0.003, 0.084, 0.034), m["wood"], Vector3(-18, 0, 0))
-	_box(root, Vector3(0, -0.026, 0.002), Vector3(0.008, 0.004, 0.042), m["dark"])
-	_box(root, Vector3(0, -0.017, -0.019), Vector3(0.008, 0.02, 0.004), m["dark"])
-	_box(root, Vector3(0, -0.016, 0.006), Vector3(0.005, 0.016, 0.005), m["steel"], Vector3(15, 0, 0))
-	_box(root, Vector3(-0.0152, 0.008, 0.012), Vector3(0.002, 0.006, 0.03), m["accent"])
-	# The crane (it pivots under the cylinder, at the front) and the cylinder on it: fluted, its six
-	# chambers' mouths at the front, the moon clip at the back.
+	Models.asset_mesh(hammer, asset, "Hammer")
+	# The crane (it pivots under the cylinder), the cylinder on it, the moon clip at its back.
 	var crane := Node3D.new()
 	crane.name = "Crane"
 	crane.position = Vector3(-0.004, axis - 0.028, -0.001)
 	root.add_child(crane)
+	Models.asset_mesh(crane, asset, "Crane")
 	var cyl := Node3D.new()
 	cyl.name = "Cylinder"
 	cyl.position = Vector3(0.004, 0.028, 0)
 	crane.add_child(cyl)
-	_cyl(cyl, Vector3.ZERO, 0.0225, 0.046, m["gun"])
-	_cyl(cyl, Vector3(0, 0, -0.0245), 0.004, 0.003, m["steel"])
-	for k in 6:
-		var a := PI * 0.5 + k * TAU / 6.0
-		_cyl(cyl, Vector3(cos(a) * 0.014, sin(a) * 0.014, -0.0232), 0.0056, 0.0016, m["black"])
-		var f := a + TAU / 12.0
-		_box(cyl, Vector3(cos(f) * 0.0212, sin(f) * 0.0212, 0.002), Vector3(0.0045, 0.003, 0.032), m["black"],
-			Vector3(0, 0, rad_to_deg(f) - 90.0))
+	Models.asset_mesh(cyl, asset, "Cylinder")
 	var clip := Node3D.new()
 	clip.name = "Mag"
 	clip.position = Vector3(0, 0, 0.0232)
 	cyl.add_child(clip)
-	_cyl(clip, Vector3(0, 0, 0.0007), 0.0185, 0.0012, m["dark"])
-	for k in 6:
-		var a := PI * 0.5 + k * TAU / 6.0
-		var at := Vector2(cos(a), sin(a)) * 0.014
-		_cyl(clip, Vector3(at.x, at.y, -0.014), 0.0055, 0.028, m["brass"])
-		_cyl(clip, Vector3(at.x, at.y, 0.0016), 0.0062, 0.0012, m["brass"])
-		_cyl(clip, Vector3(at.x, at.y, 0.0023), 0.0018, 0.0004, m["copper"])
+	Models.asset_mesh(clip, asset, "Clip")
 	parts["mag"] = clip
 	parts["crane"] = crane
 	parts["cylinder"] = cyl
@@ -468,54 +505,23 @@ static func _build_revolver(root: Node3D, parts: Dictionary, m: Dictionary) -> v
 	parts["display_at"] = [Vector3(0, 0.012, 0.076), Vector3(0, 0.3, 1.0), Vector2(0.03, 0.015)]
 
 
-## A drum-fed submachine gun, WW2 style: a stamped steel receiver, a slotted cooling jacket round the
-## barrel with a slanted lip over the muzzle, a bolt handle on the right that runs back and forth
-## with every shot, a 64-round drum under it, a wooden pistol grip, and a peep sight at the back
-## with a hooded post at the front.
+## A drum-fed submachine gun, WW2 style, a Blender-made model: a stamped steel receiver, a slotted
+## cooling jacket round the barrel with a slanted lip over the muzzle, a bolt handle on the right
+## that runs back and forth with every shot, a 64-round drum under it, a wooden pistol grip, and a
+## peep sight at the back with a hooded post at the front.
 static func _build_smg(root: Node3D, parts: Dictionary, m: Dictionary) -> void:
-	var bore := 0.012
-	_box(root, Vector3.ZERO, Vector3(0.048, 0.056, 0.25), m["gun"])
-	_box(root, Vector3(0, 0.032, 0.01), Vector3(0.044, 0.008, 0.2), m["dark"])
-	_box(root, Vector3(0, -0.004, 0.128), Vector3(0.044, 0.046, 0.008), m["dark"])
-	# The cooling jacket with its slots, the lip over the muzzle and the bore.
-	_cyl(root, Vector3(0, bore, -0.235), 0.021, 0.22, m["gun"])
-	for k in 7:
-		var z := -0.15 - k * 0.028
-		_box(root, Vector3(0, bore, z), Vector3(0.0436, 0.007, 0.013), m["black"])
-		_box(root, Vector3(0, bore, z - 0.014), Vector3(0.007, 0.0436, 0.011), m["black"])
-	_box(root, Vector3(0, bore + 0.019, -0.35), Vector3(0.046, 0.028, 0.008), m["dark"], Vector3(-35, 0, 0))
-	_cyl(root, Vector3(0, bore, -0.3455), 0.0065, 0.002, m["black"])
-	# The bolt handle in its slot on the right, the ejection port in front of it.
-	_box(root, Vector3(0.0242, 0.008, 0.02), Vector3(0.002, 0.006, 0.09), m["black"])
+	var asset := "weapon_smg"
+	Models.asset_mesh(root, asset, "Body", {"Accent": m["accent"]})
 	var bolt := Node3D.new()
 	bolt.name = "Bolt"
 	bolt.position = Vector3(0.0255, 0.008, -0.02)
 	root.add_child(bolt)
-	_box(bolt, Vector3(0.004, 0, 0), Vector3(0.008, 0.008, 0.01), m["steel"])
-	_box(root, Vector3(0.0242, 0.019, -0.065), Vector3(0.002, 0.012, 0.03), m["black"])
-	# The pistol grip, the trigger guard and the trigger.
-	_box(root, Vector3(0, -0.072, 0.078), Vector3(0.034, 0.1, 0.045), m["wood"], Vector3(-15, 0, 0))
-	_box(root, Vector3(0, -0.044, 0.03), Vector3(0.008, 0.004, 0.05), m["dark"])
-	_box(root, Vector3(0, -0.036, 0.006), Vector3(0.008, 0.02, 0.004), m["dark"])
-	_box(root, Vector3(0, -0.036, 0.034), Vector3(0.005, 0.016, 0.005), m["steel"], Vector3(15, 0, 0))
-	_box(root, Vector3(-0.0245, 0.0, 0.03), Vector3(0.002, 0.01, 0.12), m["accent"])
-	# The drum: its neck into the receiver, the drum itself with two ribs, the winding key.
+	Models.asset_mesh(bolt, asset, "Bolt")
 	var mag := Node3D.new()
 	mag.name = "Mag"
 	mag.position = Vector3(0, -0.028, -0.075)
 	root.add_child(mag)
-	_box(mag, Vector3(0, -0.01, 0), Vector3(0.026, 0.03, 0.036), m["dark"])
-	_cyl(mag, Vector3(0, -0.07, -0.006), 0.054, 0.04, m["steel"], Vector3(0, 0, 90))
-	for x: float in [-0.014, 0.014]:
-		_cyl(mag, Vector3(x, -0.07, -0.006), 0.0555, 0.004, m["dark"], Vector3(0, 0, 90))
-	_cyl(mag, Vector3(-0.0215, -0.07, -0.006), 0.012, 0.004, m["dark"], Vector3(0, 0, 90))
-	_box(mag, Vector3(-0.0245, -0.07, -0.006), Vector3(0.003, 0.004, 0.022), m["steel"])
-	# The peep sight on its post at the back, and the post in its hood at the front.
-	_box(root, Vector3(0, 0.0425, 0.095), Vector3(0.006, 0.013, 0.004), m["dark"])
-	_ring(root, Vector3(0, 0.056, 0.095), 0.0035, 0.0075, m["dark"], 16)
-	_box(root, Vector3(0, 0.0445, -0.33), Vector3(0.0025, 0.023, 0.004), m["dark"])
-	_ring(root, Vector3(0, 0.054, -0.33), 0.009, 0.0115, m["dark"], 16)
-	_box(root, Vector3(0, 0.0385, -0.33), Vector3(0.024, 0.011, 0.006), m["dark"])
+	Models.asset_mesh(mag, asset, "Mag")
 	parts["mag"] = mag
 	parts["slide"] = bolt
 	parts["travel"] = Vector3(0, 0, 0.05)
@@ -563,61 +569,44 @@ static func _build_rifle(root: Node3D, parts: Dictionary, m: Dictionary) -> void
 	parts["display_at"] = [Vector3(0, 0.064, 0.135), Vector3(0, 0.45, 1.0), Vector2(0.034, 0.017)]
 
 
-## The photon rifle: an olive receiver with a glass chamber on its left (the photon core in it glows
-## hotter as the rifle heats up and flashes with every shot) and capacitor cans on its right, an
-## emitter barrel of cooling fins on a copper core (the fins glow with the heat) ending in a lens, a
-## holographic sight with a cyan ring, and a hatch on the side that opens to vent.
+## The photon rifle, a Blender-made model: an olive receiver with a glass chamber on its left (the
+## photon core in it glows hotter as the rifle heats up and flashes with every shot; the glass is
+## made here) and capacitor cans on its right, an emitter barrel of cooling fins on a copper core
+## (the fins glow with the heat) ending in a lens, a round holographic sight (its glass and cyan
+## ring made here), and a hatch on the side that opens to vent.
 static func _build_photon(root: Node3D, parts: Dictionary, m: Dictionary) -> void:
+	var asset := "weapon_photon"
 	var col: Color = DEFS["photon"]["color"]
 	var glow := _glow_mat(parts, col, 0.5)
-	_box(root, Vector3(0, 0, 0.03), Vector3(0.06, 0.08, 0.34), m["olive"])
-	_box(root, Vector3(0, 0.042, 0.04), Vector3(0.05, 0.006, 0.2), m["dark"])
-	# The emitter: a copper core through the fins, a shroud and the lens at the end.
-	_cyl(root, Vector3(0, 0, -0.31), 0.012, 0.32, m["copper"])
-	for k in 9:
-		_box(root, Vector3(0, 0, -0.17 - k * 0.032), Vector3(0.05, 0.05, 0.005), glow)
-	_cyl(root, Vector3(0, 0, -0.485), 0.028, 0.04, m["dark"])
-	_cyl(root, Vector3(0, 0, -0.5065), 0.017, 0.003, glow)
-	# The glass chamber on the left with its glowing core and end caps; capacitor cans on the right.
+	Models.asset_mesh(root, asset, "Body", {"Accent": m["accent"], "Glow": glow})
 	_cyl(root, Vector3(-0.037, 0.012, -0.01), 0.013, 0.17, Models.glass(Color(0.6, 0.9, 1.0, 0.18)))
-	_cyl(root, Vector3(-0.037, 0.012, -0.01), 0.0055, 0.16, glow)
-	for z: float in [-0.095, 0.075]:
-		_cyl(root, Vector3(-0.037, 0.012, z), 0.016, 0.012, m["steel"])
-	for z: float in [-0.07, 0.01]:
-		_cyl(root, Vector3(0.037, -0.005, z), 0.015, 0.07, m["steel"])
-		_cyl(root, Vector3(0.037, -0.005, z - 0.036), 0.009, 0.004, m["ceramic"])
-	# The grips.
-	_box(root, Vector3(0, -0.085, 0.13), Vector3(0.036, 0.1, 0.048), m["grip"], Vector3(-15, 0, 0))
-	_box(root, Vector3(0, -0.072, -0.1), Vector3(0.032, 0.07, 0.035), m["grip"])
-	_box(root, Vector3(0.0302, -0.03, 0.12), Vector3(0.002, 0.012, 0.12), m["accent"])
-	# The holographic sight: a window in a hooded frame on a base, its cyan ring on the glass.
-	_box(root, Vector3(0, 0.049, 0.0), Vector3(0.05, 0.008, 0.044), m["dark"])
-	for x: float in [-0.023, 0.023]:
-		_box(root, Vector3(x, 0.074, 0.0), Vector3(0.004, 0.044, 0.036), m["dark"])
-	_box(root, Vector3(0, 0.097, 0.0), Vector3(0.05, 0.004, 0.04), m["dark"])
 	var glass := MeshInstance3D.new()
-	var gq := QuadMesh.new()
-	gq.size = Vector2(0.042, 0.042)
-	glass.mesh = gq
+	var gc := CylinderMesh.new()
+	gc.top_radius = 0.0213
+	gc.bottom_radius = 0.0213
+	gc.height = 0.001
+	gc.radial_segments = 32
+	gc.rings = 1
+	glass.mesh = gc
 	glass.material_override = Models.glass(Color(0.5, 0.8, 0.85, 0.1))
 	glass.position = Vector3(0, 0.074, 0.0)
+	glass.rotation_degrees = Vector3(90, 0, 0)
 	root.add_child(glass)
 	var ret := MeshInstance3D.new()
 	var rq := QuadMesh.new()
 	rq.size = Vector2(0.016, 0.016)
 	ret.mesh = rq
 	ret.material_override = holo_material()
-	ret.position = Vector3(0, 0.074, -0.0005)
+	ret.position = Vector3(0, 0.074, -0.0008)
 	root.add_child(ret)
-	# The vent hatch on the right, behind the cans.
 	var vent := Node3D.new()
 	vent.name = "Vent"
 	vent.position = Vector3(0.031, 0.025, 0.12)
 	root.add_child(vent)
-	_box(vent, Vector3(0.002, -0.015, 0), Vector3(0.004, 0.03, 0.08), m["steel"])
+	Models.asset_mesh(vent, asset, "Vent")
 	parts["vent"] = vent
 	parts["eye"] = Vector3(0, 0.074, 0.4)
-	parts["front"] = Vector3(0, 0.074, -0.0005)
+	parts["front"] = Vector3(0, 0.074, -0.0008)
 	parts["display_at"] = [Vector3(0, 0.048, 0.212), Vector3(0, 0.4, 1.0), Vector2(0.034, 0.017)]
 
 
@@ -631,44 +620,26 @@ static func holo_material() -> ShaderMaterial:
 	return _cache["holo"]
 
 
-## The marksman rifle: a heavy semi-automatic rifle with a steel receiver, a wooden handguard and
-## pistol grip, a long barrel with a ported muzzle brake, a ten-round box magazine and a bolt handle
-## on the right that runs back with every shot. A short, wide prism scope sits on top: aimed, you
-## look through its eyepiece at a red chevron, with the world round the scope still in view. The
-## scope's body flares out from the eyepiece exactly as the eye's view through it does (SCOPE_*),
-## so from the eye its inside is never seen: only the world through it.
+## The marksman rifle, a Blender-made model: a heavy semi-automatic rifle with a steel receiver, a
+## wooden handguard and pistol grip, a long barrel with a ported muzzle brake, a ten-round box
+## magazine and a bolt handle on the right that runs back with every shot. A short, wide prism scope
+## sits on top (made here): aimed, you look through its eyepiece at a red chevron, with the world
+## round the scope still in view. The scope's body flares out from the eyepiece exactly as the eye's
+## view through it does (SCOPE_*), so from the eye its inside is never seen: only the world through it.
 static func _build_marksman(root: Node3D, parts: Dictionary, m: Dictionary) -> void:
-	var bore := 0.006
+	var asset := "weapon_marksman"
 	var sy := 0.085
-	_box(root, Vector3(0, 0, 0.02), Vector3(0.05, 0.066, 0.22), m["gun"])
-	_box(root, Vector3(0, -0.002, -0.2), Vector3(0.056, 0.05, 0.22), m["wood"])
-	_box(root, Vector3(0, -0.002, -0.305), Vector3(0.058, 0.052, 0.012), m["steel"])
-	_cyl(root, Vector3(0, bore, -0.47), 0.0105, 0.32, m["gun"])
-	_cyl(root, Vector3(0, bore, -0.65), 0.016, 0.04, m["dark"])
-	for z: float in [-0.642, -0.658]:
-		_box(root, Vector3(0, bore, z), Vector3(0.0336, 0.007, 0.007), m["black"])
-	_cyl(root, Vector3(0, bore, -0.6705), 0.0055, 0.002, m["black"])
-	_box(root, Vector3(0, 0.022, -0.34), Vector3(0.02, 0.022, 0.02), m["dark"])
-	# The magazine, the grip, the trigger guard and trigger, the bolt handle in its slot and the
-	# ejection port.
+	Models.asset_mesh(root, asset, "Body", {"Accent": m["accent"]})
 	var mag := Node3D.new()
 	mag.name = "Mag"
 	mag.position = Vector3(0, -0.04, -0.04)
 	root.add_child(mag)
-	_box(mag, Vector3(0, -0.04, 0), Vector3(0.03, 0.09, 0.07), m["dark"], Vector3(8, 0, 0))
-	_box(mag, Vector3(0, -0.085, 0.006), Vector3(0.034, 0.008, 0.076), m["steel"], Vector3(8, 0, 0))
-	_box(root, Vector3(0, -0.08, 0.1), Vector3(0.036, 0.1, 0.048), m["wood"], Vector3(-15, 0, 0))
-	_box(root, Vector3(0, -0.05, 0.045), Vector3(0.01, 0.006, 0.06), m["dark"])
-	_box(root, Vector3(0, -0.04, 0.045), Vector3(0.006, 0.018, 0.006), m["steel"], Vector3(15, 0, 0))
-	_box(root, Vector3(0.0252, 0.012, 0.06), Vector3(0.002, 0.008, 0.1), m["black"])
+	Models.asset_mesh(mag, asset, "Mag")
 	var bolt := Node3D.new()
 	bolt.name = "Bolt"
 	bolt.position = Vector3(0.0265, 0.012, 0.02)
 	root.add_child(bolt)
-	_box(bolt, Vector3(0.006, 0, 0), Vector3(0.012, 0.01, 0.012), m["steel"])
-	Models.sphere(bolt, Vector3(0.013, 0, 0), 0.007, m["steel"], Vector3.ONE, 8)
-	_box(root, Vector3(0.0252, 0.02, -0.03), Vector3(0.002, 0.014, 0.04), m["black"])
-	_box(root, Vector3(-0.0257, -0.005, 0.03), Vector3(0.002, 0.012, 0.12), m["accent"])
+	Models.asset_mesh(bolt, asset, "Bolt")
 	# The scope on its two mounts: its flared body, the rims round the eyepiece and the objective,
 	# the adjusters' caps, the objective lens and the reticle on the eyepiece's lens.
 	var scope := _scope_mat()
@@ -731,34 +702,22 @@ static func reticle_material() -> ShaderMaterial:
 	return _cache["reticle"]
 
 
-## A pistol-grip pump shotgun fed from a box magazine (no stock): the pump runs back and forward
-## after every shot and throws the shell out; a bead on a post at the muzzle and a ghost ring at
-## the back to aim with.
+## A pistol-grip pump shotgun fed from a box magazine (no stock), a Blender-made model: the pump runs
+## back and forward after every shot and throws the shell out; a bead (made here) on a post at the
+## muzzle and a ghost ring at the back to aim with.
 static func _build_shotgun(root: Node3D, parts: Dictionary, m: Dictionary) -> void:
-	_box(root, Vector3(0, 0.0, 0.0), Vector3(0.064, 0.08, 0.28), m["dark"])
-	_cyl(root, Vector3(0, 0.025, -0.32), 0.016, 0.4, m["gun"])
-	_cyl(root, Vector3(0, 0.025, -0.5205), 0.011, 0.003, m["black"])
-	_box(root, Vector3(0, 0.0445, -0.3), Vector3(0.008, 0.006, 0.34), m["dark"])
-	_box(root, Vector3(0, 0.0595, -0.468), Vector3(0.005, 0.029, 0.006), m["dark"])
+	var asset := "weapon_shotgun"
+	Models.asset_mesh(root, asset, "Body", {"Accent": m["accent"]})
 	Models.sphere(root, Vector3(0, 0.074, -0.468), 0.0035, Models.emissive(Color(1.0, 0.75, 0.35), 2.0), Vector3.ONE, 8)
-	_ring(root, Vector3(0, 0.074, 0.09), 0.008, 0.012, m["dark"], 16)
-	_box(root, Vector3(0, 0.053, 0.09), Vector3(0.008, 0.026, 0.008), m["dark"])
-	_box(root, Vector3(0, -0.075, 0.1), Vector3(0.036, 0.1, 0.048), m["wood"], Vector3(-15, 0, 0))
-	_box(root, Vector3(0, -0.002, 0.148), Vector3(0.05, 0.07, 0.016), m["grip"])
-	_box(root, Vector3(0.0322, 0.0, 0.0), Vector3(0.002, 0.012, 0.15), m["accent"])
 	var pump := Node3D.new()
 	pump.name = "Pump"
 	root.add_child(pump)
-	_box(pump, Vector3(0, -0.006, -0.27), Vector3(0.056, 0.048, 0.15), m["grip"])
-	for i in 3:
-		_box(pump, Vector3(0, -0.006, -0.32 + i * 0.05), Vector3(0.058, 0.05, 0.006), m["black"])
+	Models.asset_mesh(pump, asset, "Pump")
 	var mag := Node3D.new()
 	mag.name = "Mag"
 	mag.position = Vector3(0, -0.04, -0.05)
 	root.add_child(mag)
-	_box(mag, Vector3(0, -0.05, 0), Vector3(0.05, 0.1, 0.085), m["dark"])
-	_box(mag, Vector3(0, -0.102, 0), Vector3(0.054, 0.008, 0.089), m["steel"])
-	_cyl(mag, Vector3(0, 0.005, -0.005), 0.009, 0.06, Models.mat(Color(0.62, 0.08, 0.06), 0.2, 0.6))
+	Models.asset_mesh(mag, asset, "Mag")
 	parts["mag"] = mag
 	parts["slide"] = pump
 	parts["travel"] = Vector3(0, 0, 0.075)
@@ -768,74 +727,45 @@ static func _build_shotgun(root: Node3D, parts: Dictionary, m: Dictionary) -> vo
 	parts["display_at"] = [Vector3(0, 0.0505, 0.13), Vector3(0, 0.42, 1.0), Vector2(0.03, 0.014)]
 
 
-## The multiple grenade launcher: a revolving cylinder of six 40 mm grenades between the plates of
-## a heavy frame, a short wide barrel with a foregrip under it, a pistol grip, and a WW2-style ring
-## sight (a ring with cross wires up front, a bead at the back). The cylinder turns a chamber after
-## every shot (the rounds' ends show in the chambers' mouths until they are fired); to reload it
-## swings out to the left on its crane, the six spent cases tumble out of the back and six new
-## rounds slide in.
+## The multiple grenade launcher, a Blender-made model: a revolving cylinder of six 40 mm grenades
+## between the plates of a heavy frame, a short wide barrel with a foregrip under it, a pistol grip,
+## and a WW2-style ring sight (a ring with cross wires up front, a glowing bead at the back, made
+## here). The cylinder turns a chamber after every shot (the rounds' noses show in the chambers'
+## mouths until they are fired); to reload it swings out to the left on its crane, the six spent
+## cases tumble out of the back and six new rounds slide in.
 static func _build_mgl(root: Node3D, parts: Dictionary, m: Dictionary) -> void:
+	var asset := "weapon_mgl"
 	var bore := 0.03
 	var axis := bore - 0.046
-	var olive: Material = m["olive"]
-	# The frame: a strap over the cylinder, the front plate the barrel sits in, the rear plate, a rail
-	# under the cylinder and the trigger housing under the rear plate.
-	_box(root, Vector3(0, 0.062, -0.015), Vector3(0.05, 0.014, 0.17), m["dark"])
-	_box(root, Vector3(0, -0.01, -0.09), Vector3(0.07, 0.15, 0.016), olive)
-	_box(root, Vector3(0, -0.01, 0.063), Vector3(0.07, 0.15, 0.018), olive)
-	_box(root, Vector3(0, -0.092, -0.015), Vector3(0.03, 0.01, 0.17), m["dark"])
-	_box(root, Vector3(0, -0.1, 0.07), Vector3(0.036, 0.03, 0.07), m["dark"])
-	_box(root, Vector3(-0.0352, -0.03, 0.063), Vector3(0.002, 0.05, 0.012), m["accent"])
-	# The barrel with its rings, its bore, and the foregrip under it.
-	_cyl(root, Vector3(0, bore, -0.18), 0.026, 0.17, m["gun"])
-	for z: float in [-0.13, -0.2, -0.255]:
-		_cyl(root, Vector3(0, bore, z), 0.0285, 0.01, m["dark"])
-	_cyl(root, Vector3(0, bore, -0.2665), 0.0205, 0.002, m["black"])
-	_box(root, Vector3(0, -0.035, -0.19), Vector3(0.03, 0.075, 0.035), m["grip"])
-	# The pistol grip, the trigger guard and the trigger.
-	_box(root, Vector3(0, -0.16, 0.1), Vector3(0.036, 0.1, 0.05), m["grip"], Vector3(-15, 0, 0))
-	_box(root, Vector3(0, -0.135, 0.045), Vector3(0.008, 0.005, 0.05), m["dark"])
-	_box(root, Vector3(0, -0.125, 0.02), Vector3(0.008, 0.025, 0.005), m["dark"])
-	_box(root, Vector3(0, -0.122, 0.048), Vector3(0.005, 0.018, 0.005), m["steel"], Vector3(15, 0, 0))
-	# The ring sight on its post, and the bead on its post at the back.
-	_ring(root, Vector3(0, 0.125, -0.1), 0.018, 0.0215, m["dark"])
-	_box(root, Vector3(0, 0.125, -0.1), Vector3(0.036, 0.0012, 0.0012), m["dark"])
-	_box(root, Vector3(0, 0.125, -0.1), Vector3(0.0012, 0.036, 0.0012), m["dark"])
-	_box(root, Vector3(0, 0.0865, -0.1), Vector3(0.006, 0.035, 0.006), m["dark"])
-	_box(root, Vector3(0, 0.0955, 0.06), Vector3(0.006, 0.053, 0.006), m["dark"])
+	Models.asset_mesh(root, asset, "Body", {"Accent": m["accent"]})
 	Models.sphere(root, Vector3(0, 0.125, 0.06), 0.0035, m["tritium"], Vector3.ONE, 8)
-	# The crane (pivoting low on the left) and the cylinder on it: the chambers' mouths at the front,
-	# flutes between them, and the six rounds ("mag": their noses in the mouths, their bases at the back).
+	# The crane (pivoting low on the left), the cylinder on it, and its six rounds ("mag": their
+	# bases at the back, a nose in each chamber's mouth).
 	var crane := Node3D.new()
 	crane.name = "Crane"
 	crane.position = Vector3(-0.02, axis - 0.05, -0.015)
 	root.add_child(crane)
+	Models.asset_mesh(crane, asset, "Crane")
 	var cyl := Node3D.new()
 	cyl.name = "Cylinder"
 	cyl.position = Vector3(0.02, 0.05, 0)
 	crane.add_child(cyl)
-	_cyl(cyl, Vector3.ZERO, 0.0705, 0.128, olive)
-	_cyl(cyl, Vector3(0, 0, -0.066), 0.012, 0.006, m["steel"])
+	Models.asset_mesh(cyl, asset, "Cylinder")
 	var rounds := Node3D.new()
 	rounds.name = "Mag"
 	cyl.add_child(rounds)
+	Models.asset_mesh(rounds, asset, "Rounds")
 	var noses: Array[Node3D] = []
 	var chambers: Array[Vector2] = []
-	var nose_mat := Models.mat(Color(0.3, 0.32, 0.22), 0.25, 0.6)
 	for k in 6:
 		var a := PI * 0.5 + k * TAU / 6.0
 		var at := Vector2(cos(a), sin(a)) * 0.046
 		chambers.append(at)
-		_cyl(cyl, Vector3(at.x, at.y, -0.0642), 0.0195, 0.0012, m["black"])
-		_ring(cyl, Vector3(at.x, at.y, -0.064), 0.0195, 0.0225, m["dark"], 16)
-		var f := a + TAU / 12.0
-		_box(cyl, Vector3(cos(f) * 0.066, sin(f) * 0.066, 0.0), Vector3(0.012, 0.01, 0.11), m["black"], Vector3(0, 0, rad_to_deg(f) - 90.0))
-		var nose := _cyl(rounds, Vector3(at.x, at.y, -0.0648), 0.0172, 0.0016, nose_mat)
-		# (The nose's own frame is turned: its axis is its Y, its face towards -Y.)
-		_ring(nose, Vector3(0, -0.0008, 0), 0.0135, 0.0165, m["brass"], 16).rotation_degrees = Vector3.ZERO
+		var nose := Node3D.new()
+		nose.position = Vector3(at.x, at.y, -0.0648)
+		rounds.add_child(nose)
+		Models.asset_mesh(nose, asset, "Nose")
 		noses.append(nose)
-		_cyl(rounds, Vector3(at.x, at.y, 0.0645), 0.0185, 0.0012, m["steel"])
-		_cyl(rounds, Vector3(at.x, at.y, 0.0652), 0.004, 0.0006, m["brass"])
 	parts["mag"] = rounds
 	parts["noses"] = noses
 	parts["chambers"] = chambers
@@ -847,36 +777,19 @@ static func _build_mgl(root: Node3D, parts: Dictionary, m: Dictionary) -> void:
 	parts["display_at"] = [Vector3(0, 0.035, 0.085), Vector3(0, 0.42, 1.0), Vector2(0.034, 0.017)]
 
 
-## The lightning thrower: a body with capacitor cans, a copper rod wound with coils (they glow as
-## it charges), and a fork of two prongs the bolt leaps from; a ring and notch to aim with.
+## The Storm Lance, a Blender-made model: a body with capacitor cans, a copper rod wound with coils
+## (they glow as it charges), and a fork of two prongs the bolt leaps from; a ring and notch to aim
+## with, and a hatch on top that opens to vent.
 static func _build_lightning(root: Node3D, parts: Dictionary, m: Dictionary) -> void:
+	var asset := "weapon_lightning"
 	var col: Color = DEFS["lightning"]["color"]
 	var glow := _glow_mat(parts, col, 0.25)
-	_box(root, Vector3(0, 0, 0.02), Vector3(0.085, 0.095, 0.34), m["olive"])
-	for x: float in [-0.052, 0.052]:
-		for z: float in [-0.06, 0.06]:
-			_cyl(root, Vector3(x, 0.005, z), 0.02, 0.08, m["steel"])
-			_cyl(root, Vector3(x, 0.005, z - 0.041), 0.012, 0.004, m["ceramic"])
-	_cyl(root, Vector3(0, 0, -0.27), 0.012, 0.22, m["copper"])
-	for z: float in [-0.2, -0.245, -0.29, -0.335]:
-		_ring(root, Vector3(0, 0, z), 0.014, 0.022, glow, 14)
-	_cyl(root, Vector3(0, 0, -0.165), 0.03, 0.02, m["ceramic"])
-	for x: float in [-0.03, 0.03]:
-		_box(root, Vector3(x, 0, -0.38), Vector3(0.012, 0.02, 0.13), m["dark"])
-		Models.sphere(root, Vector3(x * 0.87, 0, -0.448), 0.009, glow, Vector3.ONE, 10)
-	_box(root, Vector3(0, -0.085, 0.1), Vector3(0.036, 0.1, 0.048), m["grip"], Vector3(-15, 0, 0))
-	_box(root, Vector3(0, -0.07, -0.12), Vector3(0.032, 0.07, 0.035), m["grip"])
-	_box(root, Vector3(0.0432, -0.02, 0.12), Vector3(0.002, 0.012, 0.12), m["accent"])
-	_ring(root, Vector3(0, 0.1, -0.15), 0.014, 0.017, m["dark"], 18)
-	_box(root, Vector3(0, 0.066, -0.15), Vector3(0.006, 0.037, 0.006), m["dark"])
-	_box(root, Vector3(0, 0.07, 0.12), Vector3(0.024, 0.044, 0.008), m["dark"])
-	for x: float in [-0.008, 0.008]:
-		_box(root, Vector3(x, 0.098, 0.12), Vector3(0.005, 0.012, 0.008), m["dark"])
+	Models.asset_mesh(root, asset, "Body", {"Accent": m["accent"], "Glow": glow})
 	var vent := Node3D.new()
 	vent.name = "Vent"
 	vent.position = Vector3(0, 0.0485, 0.02)
 	root.add_child(vent)
-	_box(vent, Vector3(0, 0.002, 0.03), Vector3(0.05, 0.004, 0.06), m["steel"])
+	Models.asset_mesh(vent, asset, "Vent")
 	parts["vent"] = vent
 	parts["prongs"] = [Vector3(-0.026, 0, -0.448), Vector3(0.026, 0, -0.448)]
 	parts["eye"] = Vector3(0, 0.1, 0.48)
@@ -884,9 +797,12 @@ static func _build_lightning(root: Node3D, parts: Dictionary, m: Dictionary) -> 
 	parts["display_at"] = [Vector3(0, 0.058, 0.168), Vector3(0, 0.42, 1.0), Vector2(0.034, 0.017)]
 
 
-## The muzzle flash (hidden until a shot): the gun pods' flame blades, small, and a light.
+## The muzzle flash (hidden until a shot): the gun pods' flame blades, small, and a light. A
+## weapon's "flash" [size, glow, light energy] tones it down (the fast-firing ones, whose flash
+## would otherwise hide what they shoot at); the others are FLASH_SIZES big, glowing at 5.
 static func _build_flash(root: Node3D, parts: Dictionary, id: String) -> void:
 	var d := def(id)
+	var fl: Array = d.get("flash", [FLASH_SIZES.get(id, 0.34), 5.0, 2.4])
 	var flash := Node3D.new()
 	flash.name = "Flash"
 	flash.position = parts["muzzle"]
@@ -895,27 +811,26 @@ static func _build_flash(root: Node3D, parts: Dictionary, id: String) -> void:
 	if id != "lightning":
 		var mi := MeshInstance3D.new()
 		mi.mesh = GunPod.flash_mesh()
-		mi.material_override = flash_material(d["color"] if uses_heat(id) else Color(1.0, 0.62, 0.25))
+		mi.material_override = flash_material(d["color"] if uses_heat(id) else Color(1.0, 0.62, 0.25), float(fl[1]))
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		var sizes := {"pistol": 0.3, "revolver": 0.38, "smg": 0.28, "marksman": 0.44, "shotgun": 0.45, "mgl": 0.5}
-		mi.scale = Vector3.ONE * float(sizes.get(id, 0.34))
+		mi.scale = Vector3.ONE * float(fl[0])
 		flash.add_child(mi)
 	var light := OmniLight3D.new()
 	light.light_color = d["color"] if uses_heat(id) else Color(1.0, 0.7, 0.35)
 	light.omni_range = 4.5
-	light.light_energy = 2.4
+	light.light_energy = float(fl[2])
 	light.position = Vector3(0, 0, -0.05)
 	flash.add_child(light)
 	parts["flash"] = flash
 
 
-## The flash's material in a colour (shared per colour).
-static func flash_material(col: Color) -> ShaderMaterial:
-	var key := "flash" + col.to_html()
+## The flash's material in a colour and glow (shared).
+static func flash_material(col: Color, energy := 5.0) -> ShaderMaterial:
+	var key := "flash%s|%.2f" % [col.to_html(), energy]
 	if not _cache.has(key):
 		var mat := GunPod.flash_material().duplicate() as ShaderMaterial
 		mat.set_shader_parameter("color", Color(col.r, col.g, col.b))
-		mat.set_shader_parameter("energy", 5.0)
+		mat.set_shader_parameter("energy", energy)
 		_cache[key] = mat
 	return _cache[key]
 
@@ -1081,12 +996,22 @@ static func shot_fx(id: String, from: Vector3, ends: PackedVector3Array, normals
 		var hit := (hit_mask & (1 << i)) != 0
 		var flesh := (flesh_mask & (1 << i)) != 0
 		flesh_any = flesh_any or flesh
+		var strengths := {"shotgun": 0.85, "rifle": 0.6, "smg": 0.6, "photon": 0.8, "revolver": 1.2, "marksman": 1.7}
+		var strength := float(strengths.get(id, 1.0))
+		var spark := Color(0.5, 0.95, 1.0) if id == "photon" else Color(1.0, 0.6, 0.3)
+		var at := ends[i]
+		var n := normals[i] if i < normals.size() else Vector3.UP
+		var strike := func() -> void:
+			Fx.impact(at, n, Color(0.6, 1.0, 0.3) if flesh else spark, strength * (1.2 if flesh else 1.0))
 		match id:
 			"marksman":
 				Fx.tracer(from, ends[i], col, 0.014, 0.06)
 			"photon":
-				Fx.tracer(from, ends[i], col, 0.022, 0.07)
-				Fx.tracer(from, ends[i], Color(0.85, 1.0, 1.0), 0.008, 0.05)
+				# A glowing bolt that flies to where the shot ends and strikes there.
+				var b: Array = d["bolt"]
+				Fx.bolt(from, ends[i], col, float(b[0]), float(b[1]), Game.mission.ship if Game.mission else null,
+					strike if hit else Callable())
+				hit = false
 			"shotgun":
 				Fx.tracer(from, ends[i], col, 0.008, 0.05)
 			"rifle", "pistol", "smg", "revolver":
@@ -1097,11 +1022,7 @@ static func shot_fx(id: String, from: Vector3, ends: PackedVector3Array, normals
 			_:
 				Fx.tracer(from, ends[i], col, 0.02, 0.06)
 		if hit:
-			var strengths := {"shotgun": 0.85, "rifle": 0.6, "smg": 0.6, "photon": 0.8, "revolver": 1.2, "marksman": 1.7}
-			var strength := float(strengths.get(id, 1.0))
-			var spark := Color(0.5, 0.95, 1.0) if id == "photon" else Color(1.0, 0.6, 0.3)
-			Fx.impact(ends[i], normals[i] if i < normals.size() else Vector3.UP,
-				Color(0.6, 1.0, 0.3) if flesh else spark, strength * (1.2 if flesh else 1.0))
+			strike.call()
 	if local:
 		Sfx.play(str(d["sound"]), null, float(d["volume"]) - 5.0, float(d["pitch"]) * pitch)
 	else:

@@ -32,7 +32,12 @@ var last_carrier_pos := Vector3.ZERO
 
 
 func _init() -> void:
-	NetUtil.add_sync(self, [], ["item", "carrier", "net_pos", "net_yaw", "price"], 0.05)
+	NetUtil.add_sync(self, [], ["item", "carrier", "net_pos", "net_yaw", "price"] + _synced(), 0.05)
+
+
+## More replicated properties (sent when they change), for crates that do more (see Sentry).
+func _synced() -> Array:
+	return []
 
 
 func setup(data: Dictionary) -> void:
@@ -98,10 +103,12 @@ func _build_shell() -> void:
 	_built_item = item
 	if RunItems.is_credits(item):
 		_build_strongbox()
+		Models.flatten(_visual)
 		return
 	var col := RunItems.color(item)
 	var shell := Models.panel_mat(Color(0.22, 0.24, 0.27), 0.5, 0.5, 1.2)
-	var band := Models.emissive(col, 2.2, col * 0.3)
+	# (Muted towards a warm white: the colour still tells what it holds without a neon glare.)
+	var band := Models.emissive(col.lerp(Color(0.95, 0.8, 0.6), 0.35), 1.1, col * 0.25)
 	Models.box(_visual, Vector3.ZERO, SIZE, shell)
 	for x: float in [-0.3, 0.3]:
 		Models.box(_visual, Vector3(x, 0, 0), Vector3(0.07, SIZE.y + 0.02, SIZE.z + 0.02), band)
@@ -130,9 +137,11 @@ func _build_shell() -> void:
 			Models.box(_visual, face, Vector3(0.18, 0.18, 0.01), band, Vector3(0, 0, 45))
 	if RunItems.is_crew_weapon(item):
 		# The weapon itself lies on the lid.
-		var w := CrewWeapons.build_model(_visual, RunItems.crew_weapon_of(item), col, false)
+		var w := CrewWeapons.build_model(_visual, RunItems.crew_weapon_of(item), col, false, true)
 		w.position = Vector3(0, SIZE.y * 0.5 + 0.09, 0)
 		w.rotation = Vector3(0, PI / 2.0, PI / 2.0)
+	# (A crate is dozens of pieces, a weapon on it a hundred more: merged, a few draw calls.)
+	Models.flatten(_visual)
 
 
 ## A credit box: a heavy steel strongbox with brass corners and handles, a dial lock, what it is
@@ -208,8 +217,11 @@ func _physics_process(_delta: float) -> void:
 				position = c.position + Basis(Vector3.UP, yaw) * Vector3(0, 1.0, -0.58)
 			rotation = Vector3(0, yaw + PI / 2.0, 0)
 	else:
-		position = net_pos
-		rotation = Vector3(0, net_yaw, 0)
+		# (Only when it moved: a crate at rest costs nothing.)
+		if position != net_pos:
+			position = net_pos
+		if rotation != Vector3(0, net_yaw, 0):
+			rotation = Vector3(0, net_yaw, 0)
 	if carrier != _last_carrier:
 		_last_carrier = carrier
 		reset_physics_interpolation()

@@ -21,10 +21,10 @@ const PRICE_STEP := 0.25
 const SELL_SHARE := 0.25
 ## How much more likely an auto turret is than another upgrade while a turret slot is free.
 const TURRET_WEIGHT := 3.0
-## How likely each hand weapon is compared with an upgrade (shops and salvage). With eight of them
+## How likely each hand weapon is compared with an upgrade (shops and salvage). With nine of them
 ## (all but the Pistol) a little over a fifth of a shop's random picks is a hand weapon, as when
 ## there were five at 1.0.
-const CREW_WEAPON_WEIGHT := 0.7
+const CREW_WEAPON_WEIGHT := 0.62
 
 const SHIP_COLOR := Color(0.35, 0.8, 1.0)
 const SCOUT_COLOR := Color(0.75, 0.55, 1.0)
@@ -33,7 +33,8 @@ const WEAPON_COLOR := Color(1.0, 0.3, 0.25)
 const CREW_WEAPON_COLOR := Color(1.0, 0.45, 0.85)
 const CREDITS_COLOR := Color(1.0, 0.74, 0.28)
 
-## Item id -> name, description, base price and crate colour. Guns use ids "weapon:<id>" (Game.GUNS).
+## Item id -> name, description, base price and crate colour. Guns for the gun pods use ids
+## "weapon:<id>" (GunPod.WEAPONS: names and prices).
 const ITEMS := {
 	"hull_kit": {"name": "Hull Repair Kit", "desc": "Restores 30% hull integrity", "price": 70, "color": Color(1.0, 0.5, 0.2)},
 	"autocannon": {"name": "Auto Turret", "desc": "Fills an empty turret slot and shoots aliens by itself", "price": 200, "color": Color(1.0, 0.85, 0.2)},
@@ -57,16 +58,15 @@ const ITEMS := {
 	"blaster_mod": {"name": "Gunsmith Kit", "desc": "+25% damage for every crew hand weapon", "price": 70, "color": CREW_COLOR},
 	"power_tools": {"name": "Power Tools", "desc": "+30% repair speed", "price": 70, "color": CREW_COLOR},
 	"crew_armor": {"name": "Crew Armor", "desc": "+20 crew health", "price": 60, "color": CREW_COLOR},
+	# (Only found in the abandoned stations, never sold: see Sentry.)
+	"sentry": {"name": "Sentry Turret", "desc": "Set it down in a station and press F: it guards 45 degrees either side of its front",
+		"price": 120, "color": Color(1.0, 0.55, 0.15)},
 }
 ## General upgrades a shop can stock (ship systems, scouts, then crew gear).
 const UPGRADE_POOL := ["plating", "shield_cell", "shield_coil", "coolant", "calibration", "fuel_tank",
 	"injectors", "thrusters", "mining_lens", "overcharge", "tractor", "nanobots", "dampers",
 	"scout_plating", "scout_guns", "scout_cargo", "scout_thrusters", "blaster_mod", "power_tools", "crew_armor"]
-## Base price of each gun in a shop.
-const WEAPON_PRICES := {"pulse": 60, "flak": 150, "plasma": 190, "rail": 230}
-
-
-## A gun for the ship's gun consoles ("weapon:<Game.GUNS id>").
+## A gun for the ship's gun consoles ("weapon:<GunPod.WEAPONS id>").
 static func is_weapon(item: String) -> bool:
 	return item.begins_with("weapon:")
 
@@ -104,7 +104,7 @@ static func credits_item(amount: int) -> String:
 
 static func display_name(item: String) -> String:
 	if is_weapon(item):
-		return str(Game.GUNS.get(weapon_of(item), {}).get("name", "Gun"))
+		return str(GunPod.WEAPONS.get(weapon_of(item), {}).get("name", "Gun"))
 	if is_crew_weapon(item):
 		return CrewWeapons.display_name(crew_weapon_of(item))
 	if is_credits(item):
@@ -114,7 +114,7 @@ static func display_name(item: String) -> String:
 
 static func describe(item: String) -> String:
 	if is_weapon(item):
-		return "%s - mount it at a gun console" % str(Game.GUNS.get(weapon_of(item), {}).get("short", "Gun"))
+		return "%s - mount it at a gun console" % str(GunPod.WEAPONS.get(weapon_of(item), {}).get("short", "Gun"))
 	if is_crew_weapon(item):
 		return "Hand weapon: %s" % str(CrewWeapons.def(crew_weapon_of(item))["short"]).to_lower()
 	if is_credits(item):
@@ -140,6 +140,8 @@ static func install_hint(item: String, hub_room := "engine room") -> String:
 		return "put it down and press F to equip it"
 	if is_credits(item):
 		return "carry it aboard the ship and put it down to deposit it"
+	if item == "sentry":
+		return "set it down in a station and press F to open it"
 	return "fit it at the INSTALL HUB in the %s" % hub_room
 
 
@@ -149,7 +151,7 @@ static func price(item: String, k: int) -> int:
 		return credits_of(item)
 	var base := 100
 	if is_weapon(item):
-		base = int(WEAPON_PRICES.get(weapon_of(item), 150))
+		base = int(GunPod.WEAPONS.get(weapon_of(item), {}).get("price", 150))
 	elif is_crew_weapon(item):
 		base = int(CrewWeapons.def(crew_weapon_of(item))["price"])
 	else:

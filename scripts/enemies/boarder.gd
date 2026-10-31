@@ -18,11 +18,13 @@ extends Node3D
 ## Everything shared lives here: replication, the hit area, damage and death, picking a target
 ## among the crew out in the station (the closest, sticking to the one it is after, turning on
 ## whoever shoots it, a pack spreading out over the crew), and walking the station's waypoint graph.
+## A sentry turret (Sentry) that shoots one is a target too: the alien goes for it instead (it is
+## after the turret that hurt it, not every turret it passes).
 
 const KIND_STATS := {
 	"boarder": {"hp": 55.0, "speed": 3.8, "damage": 13.0, "cooldown": 1.1, "reach": 1.7, "radius": 0.6, "height": 1.8,
 		"name": "Boarder"},
-	"stalker": {"hp": 400.0, "speed": 2.8, "damage": 10.0, "cooldown": 0.5, "reach": 2.0, "radius": 0.55, "height": 2.4,
+	"stalker": {"hp": 250.0, "speed": 2.8, "damage": 10.0, "cooldown": 0.5, "reach": 2.0, "radius": 0.55, "height": 2.4,
 		"name": "Stalker"},
 	"barnacle": {"hp": 40.0, "speed": 0.0, "damage": 5.0, "cooldown": 0.9, "reach": 1.9, "radius": 0.5, "height": 1.0,
 		"name": "Barnacle"},
@@ -51,6 +53,10 @@ const STICKY := 0.75
 const PROVOKED := 0.6
 const PROVOKE_TIME := 4.0
 const CROWD := 1.6
+## A sentry turret that shot it counts for SENTRY_PROVOKE_TIME, its distance scaled by
+## SENTRY_PROVOKED (a turret firing at it is the first thing it wants dead).
+const SENTRY_PROVOKED := 0.3
+const SENTRY_PROVOKE_TIME := 6.0
 ## Aliens push apart when closer than this.
 const PERSONAL_SPACE := 0.9
 ## In a station an alien keeps its middle its radius (at most 0.5) plus WALL_GAP off the walls and
@@ -349,16 +355,37 @@ func _think_outside(delta: float, ship: Mothership) -> void:
 	_separate(delta)
 
 
-## A claw at a crew member.
-func _claw(ship: Mothership, victim: CrewMember, damage := -1.0) -> void:
-	victim.hurt((stat("damage") if damage < 0.0 else damage) * dmg_mult)
-	Game.mission.fx_event.rpc("claw", ship.to_global(victim.position + Vector3(0, 1.0, 0)), 0)
+## A claw at a crew member (or a sentry turret).
+func _claw(ship: Mothership, victim: Node3D, damage := -1.0) -> void:
+	var amount := (stat("damage") if damage < 0.0 else damage) * dmg_mult
+	if victim is Sentry:
+		(victim as Sentry).hurt(amount)
+	elif victim is CrewMember:
+		(victim as CrewMember).hurt(amount)
+	Game.mission.fx_event.rpc("claw", ship.to_global(victim.position + Vector3(0, aim_height(victim) - 0.15, 0)), 0)
 
 
-## The crew member this alien is after: once noticed, it keeps chasing until the target gets away,
-## but now and then it looks again and switches to someone better placed (see RETARGET_TIME).
-## `notice` and `chase` override NOTICE_RANGE and CHASE_RANGE.
-func _station_target(delta: float, ship: Mothership, notice := NOTICE_RANGE, chase := CHASE_RANGE) -> CrewMember:
+## True while a target (a crew member, or a sentry turret standing open) is still worth going for:
+## out in the station, conscious (or not wrecked).
+static func target_ok(ship: Mothership, t: Node3D) -> bool:
+	if t == null or not is_instance_valid(t) or t.is_queued_for_deletion():
+		return false
+	if t is Sentry:
+		return (t as Sentry).standing() and not ship.is_aboard(t.position)
+	var p := t as CrewMember
+	return p != null and p.alive and not ship.is_aboard(p.position)
+
+
+## How far above a target's `position` to aim (and look) at it: a crew member's chest, a sentry
+## turret's gun (over its box).
+static func aim_height(t: Node3D) -> float:
+	return 0.6 if t is Sentry else 1.15
+
+
+## The crew member (or sentry turret) this alien is after: once noticed, it keeps chasing until the
+## target gets away, but now and then it looks again and switches to someone better placed (see
+## RETARGET_TIME). `notice` and `chase` override NOTICE_RANGE and CHASE_RANGE.
+func _station_target(delta: float, ship: Mothership, notice := NOTICE_RANGE, chase := CHASE_RANGE) -> Node3D:
 	_provoke_t = maxf(0.0, _provoke_t - delta)
 	var current := _outside_crew(ship, _target_id)
 	if current:
@@ -390,6 +417,14 @@ func _station_target(delta: float, ship: Mothership, notice := NOTICE_RANGE, cha
 		if score < best_score:
 			best_score = score
 			best = p
+	# A sentry turret that just shot it (it knows where that came from: no need to see it).
+	if _provoke_t > 0.0 and _provoker != 0:
+		var st := instance_from_id(_provoker) as Sentry
+		if st and st != current and target_ok(ship, st) and st.position.distance_to(position) < chase:
+			var score := _target_score(st, false)
+			if score < best_score:
+				best_score = score
+				best = st
 	if best == null or best == current:
 		return best
 	var fresh := _target_id == 0
@@ -412,24 +447,24 @@ func _alert_pack() -> void:
 			mate._retarget_t = randf_range(0.1, 0.4)
 
 
-## A conscious crew member (player or bot) out in the station, by instance id, or null.
-func _outside_crew(ship: Mothership, id: int) -> CrewMember:
+## A conscious crew member (player or bot) out in the station, or a sentry turret standing open
+## there, by instance id, or null.
+func _outside_crew(ship: Mothership, id: int) -> Node3D:
 	if id == 0:
 		return null
-	var p := instance_from_id(id) as CrewMember
-	if p == null or not is_instance_valid(p) or not p.alive or ship.is_aboard(p.position):
-		return null
-	return p
+	var t := instance_from_id(id) as Node3D
+	return t if target_ok(ship, t) else null
 
 
-## How good a target a crew member is (lower is better): its distance, shrunk for the one already
-## being chased and for whoever just shot this alien, plus room for each pack mate already on it.
-func _target_score(p: CrewMember, is_current: bool) -> float:
+## How good a target a crew member (or sentry turret) is (lower is better): its distance, shrunk for
+## the one already being chased and for whoever just shot this alien, plus room for each pack mate
+## already on it.
+func _target_score(p: Node3D, is_current: bool) -> float:
 	var score := p.position.distance_to(position)
 	if is_current:
 		score *= STICKY
 	if _provoke_t > 0.0 and p.get_instance_id() == _provoker:
-		score *= PROVOKED
+		score *= SENTRY_PROVOKED if p is Sentry else PROVOKED
 	var id := p.get_instance_id()
 	for c in get_parent().get_children():
 		var mate := c as Boarder
@@ -438,10 +473,10 @@ func _target_score(p: CrewMember, is_current: bool) -> float:
 	return score
 
 
-## Line of sight from this alien's eyes to a crew member's chest (station walls and doors and the
-## ship block it).
-func _sees(ship: Mothership, p: CrewMember) -> bool:
-	return _clear_from(ship, center_global() + ship.global_basis.y * (stat("height") * 0.3), ship.to_global(p.position) + ship.global_basis.y * 1.2)
+## Line of sight from this alien's eyes to a crew member's chest, or a sentry turret's gun (station
+## walls and doors and the ship block it).
+func _sees(ship: Mothership, p: Node3D) -> bool:
+	return _clear_from(ship, center_global() + ship.global_basis.y * (stat("height") * 0.3), ship.to_global(p.position) + ship.global_basis.y * aim_height(p))
 
 
 func _clear_from(ship: Mothership, from: Vector3, to: Vector3) -> bool:
@@ -520,7 +555,7 @@ func _keep_inside(delta: float, ship: Mothership, before: Vector3) -> void:
 	position.z = kept.z
 
 
-func _chase(delta: float, ship: Mothership, victim: CrewMember, speed := -1.0) -> void:
+func _chase(delta: float, ship: Mothership, victim: Node3D, speed := -1.0) -> void:
 	if _repath <= 0.0 or _goal.distance_to(victim.position) > 1.5:
 		_set_goal(ship, _graph(ship), victim.position)
 	_follow_path(delta, speed)
@@ -646,21 +681,24 @@ func _investigate(delta: float, ship: Mothership) -> bool:
 	return true
 
 
-## Server: damage from the crew. `info["by"]` is the shooter's peer id (crew bots included) when known.
+## Server: damage from the crew. `info["by"]` is the shooter's peer id (crew bots included) when known;
+## `info["sentry"]` the name of the sentry turret (Mothership's cargo) that fired.
 func take_damage(amount: float, info: Dictionary) -> void:
 	if not multiplayer.is_server() or hp <= 0.0:
 		return
 	hp -= amount
-	var shooter: CrewMember = null
+	var shooter: Node3D = null
 	if outside:
 		var ship := _ship()
 		shooter = ship.crew_root.get_node_or_null(str(info.get("by", 0))) as CrewMember
-		if shooter and (not shooter.alive or ship.is_aboard(shooter.position)):
+		if info.has("sentry"):
+			shooter = ship.cargo_root.get_node_or_null(str(info["sentry"])) as Sentry
+		if shooter and not target_ok(ship, shooter):
 			shooter = null
 		if shooter:
 			# Shot at: the shooter becomes the prime suspect for a while.
 			_provoker = shooter.get_instance_id()
-			_provoke_t = PROVOKE_TIME
+			_provoke_t = SENTRY_PROVOKE_TIME if shooter is Sentry else PROVOKE_TIME
 			_retarget_t = 0.0
 		if _target_id == 0 and stat("speed") > 0.0:
 			# Go and find the shooter (or whoever is closest if it doesn't know who).
@@ -680,8 +718,9 @@ func take_damage(amount: float, info: Dictionary) -> void:
 	_hurt(amount, shooter)
 
 
-## A hit that didn't kill it (subclasses react).
-func _hurt(_amount: float, _shooter: CrewMember) -> void:
+## A hit that didn't kill it (subclasses react); `_shooter`: the crew member or sentry turret, if
+## known.
+func _hurt(_amount: float, _shooter: Node3D) -> void:
 	pass
 
 

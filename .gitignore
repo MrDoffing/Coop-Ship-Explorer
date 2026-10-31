@@ -5,3 +5,6 @@
 # Blender preview renders and work textures (tools/blender)
 tools/blender/previews/
 __pycache__/
+
+# Exported game builds
+/export/

@@ -20,6 +20,9 @@ const DEPTH := 0.12
 const KEYS := [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["C", "0", "<"]]
 const KEY_SIZE := Vector2(0.085, 0.066)
 const KEY_GAP := Vector2(0.105, 0.082)
+const KEY_DEPTH := 0.034
+## The readout's phosphor (amber, not a neon green).
+const DISPLAY_COLOR := Color(1.0, 0.66, 0.28)
 ## The wiring board: cord rows and the terminals' x either side.
 const ROW_TOP := -0.08
 const ROW_STEP := 0.08
@@ -83,23 +86,29 @@ func build(d: Dictionary, di: int, m: Dictionary) -> void:
 		var lm := StandardMaterial3D.new()
 		lm.albedo_color = Color(0.05, 0.05, 0.05)
 		lm.emission_enabled = true
-		lm.emission_energy_multiplier = 2.6
+		lm.emission_energy_multiplier = 0.7
 		Models.cylinder(self, Vector3(lx, 0.47, DEPTH + 0.022), 0.025, 0.01, lm, Vector3(90, 0, 0), -1.0, 12)
 		_code_lamps.append(lm)
 	b.box(Vector3(-0.04, 0.37, DEPTH + 0.008), Vector3(0.36, 0.075, 0.01), m["dead_glass"])
+	b.box(Vector3(-0.04, 0.37, DEPTH + 0.005), Vector3(0.39, 0.105, 0.008), m["gunmetal"])
+	# The keys' bed, and the armoured conduit from the housing down into the wall.
+	b.box(Vector3(-0.04, 0.27 - KEY_GAP.y * 1.5, DEPTH + 0.004), Vector3(KEY_GAP.x * 3.0 + 0.02, KEY_GAP.y * 4.0 + 0.02, 0.008), m["gunmetal"])
+	b.cyl(Vector3(SIZE.x * 0.3, -SIZE.y * 0.5 - 0.17, 0.05), 0.024, 0.34, m["dark"], Vector3.ZERO, -1.0, 8)
+	b.box(Vector3(SIZE.x * 0.3, -SIZE.y * 0.5 - 0.02, 0.05), Vector3(0.08, 0.05, 0.06), m["steel"])
+	b.box(Vector3(SIZE.x * 0.3, -SIZE.y * 0.5 - 0.36, 0.025), Vector3(0.08, 0.06, 0.05), m["steel"])
 	_display = Label3D.new()
 	_display.font = GunPod.mono_font()
 	_display.font_size = 40
 	_display.pixel_size = 0.0016
 	_display.outline_size = 0
-	_display.modulate = Color(0.45, 1.0, 0.55)
+	_display.modulate = DISPLAY_COLOR
 	_display.position = Vector3(-0.04, 0.37, DEPTH + 0.015)
 	add_child(_display)
 	for i in OutpostLayout.HACK_TRIES:
 		var tm := StandardMaterial3D.new()
 		tm.albedo_color = Color(0.05, 0.05, 0.05)
 		tm.emission_enabled = true
-		tm.emission_energy_multiplier = 2.0
+		tm.emission_energy_multiplier = 1.3
 		Models.sphere(self, Vector3(0.22, 0.4 - i * 0.04, DEPTH + 0.012), 0.012, tm)
 		_try_lamps.append(tm)
 	_key_mat = StandardMaterial3D.new()
@@ -118,16 +127,16 @@ func build(d: Dictionary, di: int, m: Dictionary) -> void:
 			var key := MeshInstance3D.new()
 			key.mesh = _key_mesh()
 			key.material_override = _key_mat
-			key.position = Vector3(centre.x, centre.y, DEPTH + 0.012)
+			key.position = Vector3(centre.x, centre.y, DEPTH + 0.02)
 			add_child(key)
 			var l := Label3D.new()
 			l.text = label
 			l.font = GunPod.mono_font()
 			l.font_size = 36
-			l.pixel_size = 0.0014
+			l.pixel_size = 0.001
 			l.outline_size = 0
-			l.modulate = Color(0.95, 0.9, 0.75) if label.is_valid_int() else Color(1.0, 0.65, 0.3)
-			l.position = Vector3(0, 0, 0.011)
+			l.modulate = Color(0.78, 0.74, 0.62) if label.is_valid_int() else Color(0.85, 0.55, 0.28)
+			l.position = Vector3(0, 0, KEY_DEPTH * 0.5 + 0.001)
 			key.add_child(l)
 			_keys.append({"label": label, "centre": centre, "node": key})
 	# The wiring board behind the hatch: terminals, digits, colours and the tangled cords.
@@ -209,7 +218,7 @@ func build(d: Dictionary, di: int, m: Dictionary) -> void:
 static func _key_mesh() -> BoxMesh:
 	if _key_box == null:
 		_key_box = BoxMesh.new()
-		_key_box.size = Vector3(KEY_SIZE.x, KEY_SIZE.y, 0.02)
+		_key_box.size = Vector3(KEY_SIZE.x, KEY_SIZE.y, KEY_DEPTH)
 	return _key_box
 
 
@@ -271,6 +280,13 @@ func _cord_mesh(left: int, right: int, rng: RandomNumberGenerator) -> ArrayMesh:
 # --- Using it ----------------------------------------------------------------------------------
 
 ## The camera for a close look at the panel (global).
+## The space in front of the panel (panel-local) that must stay clear of the station's fittings: the
+## panel's face and a margin round it, out to where the close look's view is (VIEW_AT).
+static func clear_box() -> AABB:
+	var margin := 0.05
+	return AABB(Vector3(-SIZE.x * 0.5 - margin, -SIZE.y * 0.5 - margin, 0.008), Vector3(SIZE.x + margin * 2.0, SIZE.y + margin * 2.0, VIEW_AT.z + 0.15))
+
+
 func view_transform() -> Transform3D:
 	var eye := to_global(VIEW_AT)
 	return Transform3D(Basis.looking_at(to_global(Vector3(0, -0.01, 0)) - eye, global_basis.y), eye)
@@ -382,9 +398,9 @@ func show_state(state: int, tries: int, now: float) -> void:
 		else:
 			lm.emission = Color(0.6, 0.03, 0.02) * float(fposmod(now * 2.0, 1.0) < 0.5)
 	for i in _try_lamps.size():
-		_try_lamps[i].emission = Color(1.0, 0.1, 0.05) if i < tries else Color(0.15, 0.85, 0.25)
+		_try_lamps[i].emission = Color(0.9, 0.12, 0.05) if i < tries else Color(0.3, 0.7, 0.2)
 	var text := ""
-	var col := Color(0.45, 1.0, 0.55)
+	var col := DISPLAY_COLOR
 	if _flash_t > 0.0 and fposmod(_flash_t * 4.0, 1.0) < 0.75:
 		text = _flash_text
 		col = _flash_col

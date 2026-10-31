@@ -27,9 +27,11 @@ const FIRE_TOLERANCE := 0.045
 ## Seconds a bot studies a new target before opening fire.
 const REACTION := 0.35
 ## Gun pods: a bot stops firing once the heat reaches POD_HEAT_STOP and waits for it to fall to
-## POD_HEAT_RESUME, so it never fires hot (that would damage the weapon systems).
+## POD_HEAT_RESUME, so it never fires hot (that would damage the weapon systems). With rockets it
+## fires salvos: it waits until POD_SALVO rockets are loaded, then lets them all go.
 const POD_HEAT_STOP := 0.85
 const POD_HEAT_RESUME := 0.4
+const POD_SALVO := 6
 ## Self-defence: boarders closer than this (and in line of sight) are shot on sight. Bots react
 ## and shoot a little slower and less accurately than a player would.
 const DEFEND_RANGE := 10.0
@@ -390,7 +392,14 @@ func _do_gun(delta: float) -> void:
 		_choose_target(t)
 	var firing := false
 	var heat := ship.gun_heat_of(gun)
-	if heat >= POD_HEAT_STOP:
+	if ship.gun_weapon(gun) == "mrls":
+		# Rockets: hold off while the loader fills the tubes, then a whole salvo.
+		var loaded := ship.gun_ammo_of(gun)
+		if loaded <= 0:
+			_cooling = true
+		elif loaded >= POD_SALVO:
+			_cooling = false
+	elif heat >= POD_HEAT_STOP:
 		_cooling = true
 	elif heat <= POD_HEAT_RESUME:
 		_cooling = false
@@ -784,8 +793,10 @@ func _target_point(t: Turret) -> Vector3:
 	var p := alien.global_position
 	var muzzle := ship.to_global(t.muzzle_local(_aim))
 	var rel_v := alien.net_vel - ship.velocity
+	# (Rockets home in by themselves: only a little lead for them.)
+	var speed := GunPod.SPEED if ship.gun_weapon(gun) != "mrls" else Projectiles.ROCKET_SPEED * 2.0
 	for i in 2:
-		p = alien.global_position + rel_v * (muzzle.distance_to(p) / GunPod.SPEED)
+		p = alien.global_position + rel_v * (muzzle.distance_to(p) / speed)
 	return p
 
 

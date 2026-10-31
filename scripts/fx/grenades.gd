@@ -24,11 +24,11 @@ const RADIUS := 0.03
 const MASK := Game.LAYER_INTERIOR | Game.LAYER_HULL | Game.LAYER_STATION | Game.LAYER_CAVE
 ## A copy goes off by itself this long after its fuse if the shooter's word never came.
 const LATE := 0.6
-## The blast: the fireball's radius (the damage reaches CrewWeapons "splash") and colour, and how
+## The blast: the fireball's radius (the damage, and a ring racing out over the floor, reach CrewWeapons "splash") and colour, and how
 ## far away (m) a crew member still feels it shake their view.
-const BLAST_RADIUS := 2.6
+const BLAST_RADIUS := 3.2
 const BLAST_COLOR := Color(1.0, 0.55, 0.2)
-const SHAKE_REACH := 14.0
+const SHAKE_REACH := 18.0
 
 var ship: Mothership
 ## {"id", "pos", "vel", "age", "fuse", "owned", "on_burst", "node", "lamp", "rolling", "bounces",
@@ -236,8 +236,9 @@ func _model() -> Node3D:
 func _blast(at: Vector3) -> void:
 	var pos := ship.to_global(at)
 	Fx.explosion(pos, BLAST_RADIUS, BLAST_COLOR)
-	Fx.sparks(pos, Color(1.0, 0.72, 0.35), 30, 10.0, 0.05, 0.6)
-	Fx.flash(pos, BLAST_COLOR, 7.0, 12.0, 0.35)
+	Fx.sparks(pos, Color(1.0, 0.72, 0.35), 40, 13.0, 0.05, 0.7)
+	Fx.ring(pos, Vector3.UP, BLAST_COLOR * 0.5, float(CrewWeapons.DEFS["mgl"]["grenade"]["splash"]), 0.4)
+	Fx.flash(pos, BLAST_COLOR, 8.0, 15.0, 0.38)
 	Sfx.play("grenade_blast", pos, 1.0, randf_range(0.95, 1.05))
 	var lp: CrewMember = Game.mission.local_player if Game.mission else null
 	if lp and lp.camera and lp.alive:

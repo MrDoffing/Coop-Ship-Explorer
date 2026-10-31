@@ -17,6 +17,15 @@ extends Node3D
 ## metres of its target (or once it runs out after MISSILE_LIFE seconds): full damage to what it
 ## hits, splash damage up to MISSILE_SPLASH metres round. The clients' copies fly the same way and
 ## burst where the server's did.
+##
+## The gun pods' rockets (fire_rocket, the Multiple Rocket Launcher System) are smaller and aren't
+## locked on anything: each leaves its tube at the speed it is given and speeds up to ROCKET_SPEED,
+## flying a little crooked at first (a curve of its own, at most ROCKET_CURVE rad/s, dying away over
+## ROCKET_CURVE_TIME seconds), and homes in on the first alien that comes within ROCKET_SEEK_RANGE
+## metres and ROCKET_SEEK radians of its heading (turning at most ROCKET_TURN rad/s). It bursts on
+## rock (once it has flown ROCKET_ARM seconds), on any alien in its way or within ROCKET_FUSE metres
+## of the one it homes in on, or when it runs out after ROCKET_LIFE seconds: full damage to what it
+## hits and ROCKET_SPLASH_SHARE of it round it, out to ROCKET_SPLASH metres.
 
 ## The scouts' missiles: see above.
 const MISSILE_SPEED := 62.0
@@ -28,6 +37,19 @@ const MISSILE_SEEK := 0.6
 const MISSILE_SEEK_RANGE := 70.0
 const MISSILE_FUSE := 1.2
 const MISSILE_SPLASH := 9.0
+## The gun pods' rockets: see above.
+const ROCKET_SPEED := 72.0
+const ROCKET_ACCEL := 110.0
+const ROCKET_CURVE := 0.9
+const ROCKET_CURVE_TIME := 0.7
+const ROCKET_SEEK := 0.9
+const ROCKET_SEEK_RANGE := 18.0
+const ROCKET_TURN := 3.0
+const ROCKET_ARM := 0.12
+const ROCKET_FUSE := 1.1
+const ROCKET_LIFE := 4.0
+const ROCKET_SPLASH := 4.5
+const ROCKET_SPLASH_SHARE := 0.55
 
 const KINDS := {
 	"pulse": {"color": Color(0.35, 0.85, 1.0), "len": 2.4, "width": 0.13, "life": 1.6},
@@ -134,6 +156,10 @@ func _physics_process(delta: float) -> void:
 			if _missile_step(s, delta, space):
 				_drop(i)
 			continue
+		if s["kind"] == "rocket":
+			if _rocket_step(s, delta, space):
+				_drop(i)
+			continue
 		var from: Vector3 = s["pos"]
 		var vel: Vector3 = s["vel"]
 		var kind: String = s["kind"]
@@ -156,6 +182,11 @@ func _physics_process(delta: float) -> void:
 				var crew := nhit["collider"] as CrewMember
 				if crew and s["auth"]:
 					crew.hurt(float(s["dmg"]))
+				elif s["auth"] and (nhit["collider"] as Object).has_meta("sentry"):
+					# (A sentry turret standing open: its body, a child of the turret.)
+					var sentry := (nhit["collider"] as Node).get_parent() as Sentry
+					if sentry:
+						sentry.hurt(float(s["dmg"]))
 				Fx.sparks(nhit["position"], KINDS[kind]["color"], 6 if crew == null else 12, 4.0 if kind == "needle" else 2.5, 0.03, 0.3 if kind == "needle" else 0.6)
 				if kind == "acid":
 					Sfx.play("acid_hit", nhit["position"], -6.0)
@@ -335,21 +366,172 @@ func _missile_step(s: Dictionary, delta: float, space: PhysicsDirectSpaceState3D
 	return true
 
 
-## The alien nearest to a missile's heading, within MISSILE_SEEK of it and MISSILE_SEEK_RANGE.
-func _seek(pos: Vector3, vel: Vector3) -> Node3D:
+## The alien nearest to a missile's heading, within `cone` radians of it and `reach` metres.
+func _seek(pos: Vector3, vel: Vector3, cone := MISSILE_SEEK, reach := MISSILE_SEEK_RANGE) -> Node3D:
 	var dir := vel.normalized() if vel.length_squared() > 0.01 else Vector3.FORWARD
 	var best: Node3D = null
-	var best_a := MISSILE_SEEK
+	var best_a := cone
 	for a in get_tree().get_nodes_in_group("aliens"):
 		var n := a as Node3D
 		var to := n.global_position - pos
-		if to.length() > MISSILE_SEEK_RANGE:
+		if to.length() > reach:
 			continue
 		var ang := dir.angle_to(to)
 		if ang < best_a:
 			best_a = ang
 			best = n
 	return best
+
+
+# --- Rockets -----------------------------------------------------------------------------------
+
+## Server: launch a gun pod's rocket (see ROCKET_*); `curve` is its crooked turn at first (an angular
+## velocity, rad/s).
+func fire_rocket(pos: Vector3, vel: Vector3, dmg: float, curve: Vector3) -> void:
+	if not multiplayer.is_server():
+		return
+	_missile_seq += 1
+	_spawn_rocket(_missile_seq, pos, vel, curve, dmg, true)
+	_net_rocket.rpc(_missile_seq, pos, vel, curve)
+
+
+@rpc("authority", "call_remote", "reliable")
+func _net_rocket(id: int, pos: Vector3, vel: Vector3, curve: Vector3) -> void:
+	_spawn_rocket(id, pos, vel, curve, 0.0, false)
+
+
+## Server -> clients: rocket `id` burst at `pos`.
+@rpc("authority", "call_remote", "reliable")
+func _net_rocket_end(id: int, pos: Vector3) -> void:
+	_rocket_fx(pos)
+	for i in range(_shots.size() - 1, -1, -1):
+		if _shots[i]["kind"] == "rocket" and int(_shots[i]["id"]) == id:
+			_drop(i)
+			return
+
+
+func _spawn_rocket(id: int, pos: Vector3, vel: Vector3, curve: Vector3, dmg: float, auth: bool) -> void:
+	var node := _rocket_node()
+	node.transform = _xform(pos, vel)
+	add_child(node)
+	node.reset_physics_interpolation()
+	_shots.append({"kind": "rocket", "id": id, "pos": pos, "vel": vel, "life": ROCKET_LIFE, "dmg": dmg, "auth": auth,
+		"node": node, "from": pos, "target": null, "curve": curve, "age": 0.0, "seek_t": 0.0})
+
+
+## One step of a rocket's flight: its own curve (dying away), homing in on an alien once one is close
+## ahead of it, speeding up. The server's bursts on what it meets (true: it is done); a client's copy
+## only flies, until the server says where it burst.
+func _rocket_step(s: Dictionary, delta: float, space: PhysicsDirectSpaceState3D) -> bool:
+	var pos: Vector3 = s["pos"]
+	var vel: Vector3 = s["vel"]
+	var age := float(s["age"]) + delta
+	s["age"] = age
+	var t: Variant = s["target"]
+	var target: Node3D = t if t != null and is_instance_valid(t) and (t as Node3D).is_inside_tree() else null
+	if target == null:
+		s["seek_t"] = float(s["seek_t"]) - delta
+		if float(s["seek_t"]) <= 0.0:
+			s["seek_t"] = 0.08
+			target = _seek(pos, vel, ROCKET_SEEK, ROCKET_SEEK_RANGE)
+		s["target"] = target
+	var dir := vel.normalized() if vel.length_squared() > 0.01 else Vector3.FORWARD
+	var curve: Vector3 = s["curve"]
+	if curve.length_squared() > 1e-8:
+		dir = dir.rotated(curve.normalized(), curve.length() * exp(-age / ROCKET_CURVE_TIME) * delta).normalized()
+	if target:
+		var want := (target.global_position - pos).normalized()
+		var axis := dir.cross(want)
+		if axis.length_squared() > 1e-8:
+			dir = dir.rotated(axis.normalized(), minf(dir.angle_to(want), ROCKET_TURN * delta))
+	vel = dir * minf(vel.length() + ROCKET_ACCEL * delta, ROCKET_SPEED)
+	s["vel"] = vel
+	var to := pos + vel * delta
+	var node := s["node"] as Node3D
+	if not s["auth"]:
+		s["pos"] = to
+		node.global_transform = _xform(to, vel)
+		return float(s["life"]) < -1.0
+	var armed := age >= ROCKET_ARM
+	var q := PhysicsRayQueryParameters3D.create(pos, to, MASK_SHIP if armed else MASK_SHIP & ~Game.LAYER_CAVE)
+	q.collide_with_areas = true
+	var hit := space.intersect_ray(q)
+	var at := to
+	var dmg := float(s["dmg"])
+	var spare: Object = null
+	if not hit.is_empty():
+		at = hit["position"]
+		var col: Object = hit["collider"]
+		if col is Area3D and col.has_meta("target"):
+			_damage(col, dmg, at, "rocket")
+			spare = col
+	elif target and _seg_point_dist(pos, to, target.global_position) < ROCKET_FUSE:
+		at = target.global_position
+		if target.has_method("take_damage"):
+			target.take_damage(dmg, {"source": "rocket", "pos": at})
+		spare = target
+	elif float(s["life"]) > 0.0:
+		s["pos"] = to
+		node.global_transform = _xform(to, vel)
+		return false
+	_splash(at, ROCKET_SPLASH, dmg * ROCKET_SPLASH_SHARE, Game.LAYER_ENEMY, spare)
+	_rocket_fx(at)
+	_net_rocket_end.rpc(int(s["id"]), at)
+	return true
+
+
+## A rocket bursting: a smaller fireball and a shock wave out to the edge of its blast.
+func _rocket_fx(pos: Vector3) -> void:
+	Fx.explosion(pos, 2.0, Color(1.0, 0.6, 0.25))
+	Fx.shockwave(pos, ROCKET_SPLASH, Color(1.0, 0.55, 0.25), 0.25)
+	Sfx.play("explosion", pos, -5.0, 1.6)
+
+
+## A gun pod's rocket under `parent`, pointing down -Z from its middle: olive with a dull red nose and
+## four small fins.
+static func rocket_body(parent: Node3D) -> void:
+	var b := Models.Batch.new()
+	var dark := Models.mat(Color(0.12, 0.12, 0.13), 0.5, 0.5)
+	b.cyl(Vector3.ZERO, 0.05, 0.5, Models.mat(Color(0.3, 0.33, 0.22), 0.3, 0.6), Vector3(90, 0, 0), -1.0, 10)
+	b.cyl(Vector3(0, 0, -0.31), 0.001, 0.12, Models.mat(Color(0.55, 0.13, 0.08), 0.35, 0.5), Vector3(90, 0, 0), 0.05, 10)
+	for k in 4:
+		var a := TAU * k / 4.0 + PI / 4.0
+		b.box(Vector3(cos(a) * 0.07, sin(a) * 0.07, 0.2), Vector3(0.008, 0.06, 0.1), dark, Vector3(0, 0, rad_to_deg(a) - 90.0))
+	b.commit(parent, "Rocket", false)
+
+
+## A gun pod's rocket in flight: its body, the motor's flame and light, a trail of smoke and its hiss.
+func _rocket_node() -> Node3D:
+	var root := Node3D.new()
+	rocket_body(root)
+	Models.sphere(root, Vector3(0, 0, 0.28), 0.04, Models.emissive(Color(1.0, 0.65, 0.25), 6.0))
+	var light := OmniLight3D.new()
+	light.position = Vector3(0, 0, 0.4)
+	light.omni_range = 4.0
+	light.light_energy = 1.6
+	light.light_color = Color(1.0, 0.6, 0.3)
+	root.add_child(light)
+	var trail := GPUParticles3D.new()
+	trail.name = "Trail"
+	trail.position = Vector3(0, 0, 0.3)
+	trail.amount = 36
+	trail.lifetime = 0.9
+	trail.local_coords = false
+	trail.process_material = _trail_material()
+	trail.draw_pass_1 = GunPod.smoke_mesh()
+	trail.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	trail.visibility_aabb = AABB(Vector3(-50, -50, -50), Vector3(100, 100, 100))
+	root.add_child(trail)
+	var audio := AudioStreamPlayer3D.new()
+	audio.stream = Sfx.stream("missile_loop")
+	audio.volume_db = -12.0
+	audio.pitch_scale = 1.3
+	audio.unit_size = 5.0
+	audio.max_distance = 90.0
+	audio.autoplay = true
+	root.add_child(audio)
+	Sfx.track(audio)
+	return root
 
 
 ## A missile bursting: a fireball and a shock wave out to the edge of its blast.

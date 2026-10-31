@@ -3,47 +3,60 @@ extends Node3D
 ## The echolocation scanner on a crew member's suit. Holding Q swings it up on its bracket in front
 ## of the chest (the hand weapon goes down meanwhile, so it can't be fired): a rugged box with a
 ## round green screen that pings like a boat's radar. A beam sweeps round the screen (the top is
-## the way the crew member faces) and paints what the ping bounces off as it passes: a rough
-## outline of the walls, aliens as bright blobs and the rest of the crew as rings. What it painted
-## fades until the beam comes round again, and it only reaches RANGE metres.
+## the way the crew member faces) and paints the walls the ping bounces off as it passes: a clean
+## outline of the rooms and corridors around, out to RANGE metres. Aliens show as orange blobs and
+## the rest of the crew as blue rings, where they are right now; each flares as the beam passes it.
 ##
-## The further out, the rougher it gets: walls blur and break up, blips wander off where they are
-## (more so behind a wall), some don't show at all, and false echoes and speckle creep in towards
-## the edge. Aboard the ship its hull drowns the echoes: the screen shows only static (HULL
-## INTERFERENCE); it works out in the stations.
+## A clear picture: every echo is where the wall is (no scatter, nothing missed, no specks of
+## clutter) and stays at full strength until the beam comes round that way again and paints it
+## afresh (only what it has just painted glows brighter). The ping goes through walls: it maps every
+## wall within range, not only the ones in plain view (up to WALL_LAYERS of them along each ray). It
+## pings at PING_HEIGHT, over the furniture and under the doorways, so what it maps is the walls.
+## Aboard the ship its hull drowns the echoes: the screen shows only static (HULL INTERFERENCE); it
+## works out in the stations.
 ##
 ## Built in the camera's frame by the crew member's own view (CrewMember); the display is drawn in
-## 2D into a small viewport (Screen) shown on the device's screen, updated only while it is up.
+## 2D into a small viewport (Screen) shown on the device's screen, updated only while it is up. What
+## the screen draws costs little: the echoes are kept per bearing (only the newest ray's), and all of
+## them go to the screen in one batched line drawing.
 
 ## How far it reaches (m), seconds per sweep, rays per sweep, and how high above the floor it pings.
-const RANGE := 22.0
+const RANGE := 32.0
 const PERIOD := 2.0
-const BINS := 120
-const CHEST := 1.1
-## How fast echoes fade (per second), and how long they are kept (sweeps).
-const DECAY := 1.1
-const KEEP := 2.2
+const BINS := 180
+const PING_HEIGHT := 2.0
 ## Seconds to swing up (and down).
 const RAISE_TIME := 0.3
-## The noise: wall echoes scatter by WALL_NOISE + WALL_NOISE_SQ * d^2 metres at d metres, and drop
-## out with a chance of DROPOUT * (d / RANGE)^2.5; blips scatter by BLIP_NOISE + BLIP_NOISE_M * d
-## (more behind a wall) and are missed with a chance of MISS * (d / RANGE)^2; a false echo turns up
-## about GHOSTS times a sweep, in the outer half.
-const WALL_NOISE := 0.04
-const WALL_NOISE_SQ := 0.0028
-const DROPOUT := 0.55
-const BLIP_NOISE := 0.12
-const BLIP_NOISE_M := 0.06
-const MISS := 0.35
-const GHOSTS := 0.9
+## How many walls one ray of the ping goes on through, and how far past each wall it starts again.
+const WALL_LAYERS := 6
+const WALL_STEP := 0.05
+## What the beam has just painted glows brighter for FRESH seconds; an alien or crewmate it passes
+## flares, fading over FLARE seconds.
+const FRESH := 0.35
+const FLARE := 0.45
+## Two neighbouring rays' echoes off the same wall are joined into a line: they face the same way
+## (the cosine between their normals over JOIN_FACING), lie in one plane (within JOIN_PLANE m) and
+## are at most JOIN_GAP m apart, or JOIN_SPREAD times the rays' spacing out there. So walls draw as
+## lines and a doorway stays a gap.
+const JOIN_FACING := 0.95
+const JOIN_PLANE := 0.12
+const JOIN_GAP := 0.8
+const JOIN_SPREAD := 2.5
+## Ink: the phosphor, the aliens' blips and the crew's.
+const INK := Color(0.35, 1.0, 0.45)
+const ALIEN_INK := Color(1.0, 0.6, 0.22)
+const CREW_INK := Color(0.35, 0.62, 1.0)
+## The screen's dark ground.
+const GROUND := Color(0.012, 0.035, 0.02)
 ## What the ping bounces off.
 const MASK := Game.LAYER_INTERIOR | Game.LAYER_STATION | Game.LAYER_CAVE
-## Where the device is when up and when stowed (camera frame): position and rotation.
-const UP_POS := Vector3(0.0, -0.08, -0.29)
+## Where the device is when up and when stowed (camera frame): position and rotation, and its size.
+const UP_POS := Vector3(0.0, -0.088, -0.3)
 const UP_ROT := Vector3(-0.27, 0.0, 0.0)
 const DOWN_POS := Vector3(0.07, -0.42, -0.2)
 const DOWN_ROT := Vector3(-1.2, 0.25, 0.5)
-const SCREEN_PX := 256
+const DEVICE_SCALE := 1.2
+const SCREEN_PX := 320
 
 ## The green screen: the viewport's picture, slightly bulged, glowing, with scanlines and a dark
 ## rim, round.
@@ -69,83 +82,131 @@ void fragment() {
 """
 
 
-## The scanner's display, drawn in 2D: range rings, the sweeping beam, the echoes fading behind it,
-## speckle, and the crew member in the middle.
+## The scanner's display, drawn in 2D in three layers over each other: the back (the screen's
+## ground, the range rings with their distances) and the front (whatever lies beyond the rim covered,
+## the rim, the crew member's own mark in the middle and the captions), each drawn once, and between
+## them the picture, drawn every frame: the beam, the walls it painted (the freshest brighter) and
+## the aliens and the crew where they are, or static aboard. A circle, an arc or a line with a width
+## is a polygon of its own here, built afresh each time it is drawn, which is dear every frame; so
+## the picture draws the walls as hairlines (one drawing for all of them) and the blips as round dots
+## (textured squares, drawn together).
 class Screen extends Node2D:
+	enum { BACK, PICTURE, FRONT }
 	var scanner: Scanner
 	var font: Font
+	var layer := PICTURE
 
 	func _draw() -> void:
 		var s := scanner
 		if s == null:
 			return
+		var t0 := Time.get_ticks_usec()
 		var size := float(Scanner.SCREEN_PX)
 		var c := Vector2(size, size) * 0.5
 		var r := size * 0.455
-		var ink := Color(0.35, 1.0, 0.45)
-		draw_rect(Rect2(Vector2.ZERO, Vector2(size, size)), Color(0.012, 0.035, 0.02))
-		for k: float in [1.0 / 3.0, 2.0 / 3.0, 1.0]:
-			draw_arc(c, r * k, 0.0, TAU, 72, Color(ink, 0.22 if k < 1.0 else 0.4), 1.2, true)
-		draw_line(c - Vector2(r, 0), c + Vector2(r, 0), Color(ink, 0.08), 1.0)
-		draw_line(c - Vector2(0, r), c + Vector2(0, r), Color(ink, 0.08), 1.0)
-		var now := s.clock
+		var k := size / 256.0
+		match layer:
+			BACK:
+				_draw_back(c, r, k, size)
+			FRONT:
+				_draw_front(c, r, k, size)
+			_:
+				_draw_picture(s, c, r, k, size)
+				s.draw_us = float(Time.get_ticks_usec() - t0)
+
+	## The ground, the range rings every quarter of the range with their distances, and the cross.
+	func _draw_back(c: Vector2, r: float, k: float, size: float) -> void:
+		var ink := Scanner.INK
+		draw_rect(Rect2(Vector2.ZERO, Vector2(size, size)), Scanner.GROUND)
+		for i in 3:
+			var rr := r * float(i + 1) / 4.0
+			draw_arc(c, rr, 0.0, TAU, 72, Color(ink, 0.16), 1.2 * k, true)
+			_text(c + Vector2(0.0, -rr + 9.0 * k), "%d" % int(Scanner.RANGE * float(i + 1) / 4.0), int(10 * k), Color(ink, 0.35))
+		draw_line(c - Vector2(r, 0), c + Vector2(r, 0), Color(ink, 0.07), 1.0)
+		draw_line(c - Vector2(0, r), c + Vector2(0, r), Color(ink, 0.07), 1.0)
+
+	## The beam, the walls, the blips (or the static aboard).
+	func _draw_picture(s: Scanner, c: Vector2, r: float, k: float, size: float) -> void:
+		var ink := Scanner.INK
 		if s.interference:
-			for i in 260:
+			draw_rect(Rect2(Vector2.ZERO, Vector2(size, size)), Scanner.GROUND)
+			for i in 140:
 				var p := c + Vector2(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * r
 				if p.distance_to(c) < r:
-					draw_rect(Rect2(p, Vector2(randf_range(1.0, 3.0), 1.0)), Color(ink, randf_range(0.05, 0.4)))
-			_text(Vector2(c.x, c.y - 6.0), "HULL", 15, Color(ink, 0.8))
-			_text(Vector2(c.x, c.y + 12.0), "INTERFERENCE", 15, Color(ink, 0.8))
-			_text(Vector2(c.x, size - 6.0), "NO RETURN", 13, Color(ink, 0.6))
+					draw_rect(Rect2(p, Vector2(randf_range(1.0, 3.0), 1.0) * k), Color(ink, randf_range(0.05, 0.4)))
+			_text(Vector2(c.x, c.y - 6.0 * k), "HULL", int(15 * k), Color(ink, 0.8))
+			_text(Vector2(c.x, c.y + 12.0 * k), "INTERFERENCE", int(15 * k), Color(ink, 0.8))
+			_text(Vector2(c.x, size - 6.0 * k), "NO RETURN", int(13 * k), Color(ink, 0.6))
 			return
 		# The beam and the glow trailing behind it.
 		var pts := PackedVector2Array([c])
-		var cols := PackedColorArray([Color(ink, 0.3)])
+		var cols := PackedColorArray([Color(ink, 0.22)])
 		for i in 17:
-			var a := s.sweep - 0.75 * float(i) / 16.0
+			var a := s.sweep - 0.6 * float(i) / 16.0
 			pts.append(c + Vector2(sin(a), -cos(a)) * r)
-			cols.append(Color(ink, 0.26 * (1.0 - float(i) / 16.0)))
+			cols.append(Color(ink, 0.18 * (1.0 - float(i) / 16.0)))
 		draw_polygon(pts, cols)
-		draw_line(c, c + Vector2(sin(s.sweep), -cos(s.sweep)) * r, Color(ink, 0.85), 2.0, true)
-		var px := r / Scanner.RANGE
-		for e: Dictionary in s.walls:
-			var alpha := exp(-(now - float(e["t"])) * Scanner.DECAY)
-			var a_px := c + s.to_display(e["a"]) * px
-			var b_px := c + s.to_display(e["b"]) * px
-			if a_px.distance_to(c) > r + 2.0 and b_px.distance_to(c) > r + 2.0:
+		draw_line(c, c + Vector2(sin(s.sweep), -cos(s.sweep)) * r, Color(ink, 0.85), 2.0 * k)
+		# The walls: every bearing's echoes in one drawing, what was just painted in a second, brighter.
+		var xf := s.display_xform(c, r / Scanner.RANGE)
+		var settled := PackedVector2Array()
+		var fresh := PackedVector2Array()
+		for b in Scanner.BINS:
+			var lines: PackedVector2Array = s._bin_lines[b]
+			if lines.is_empty():
 				continue
-			var w := clampf(1.3 + float(e["w"]) * 5.0, 1.3, 5.0)
-			var col := Color(ink, clampf(alpha * (1.1 - 0.06 * float(e["w"])), 0.0, 1.0))
-			if a_px.distance_squared_to(b_px) < 1.0:
-				draw_circle(a_px, w * 0.6, col)
+			if s.clock - s._bin_time[b] < Scanner.FRESH:
+				fresh.append_array(lines)
 			else:
-				draw_line(a_px, b_px, col, w, true)
-		for e: Dictionary in s.contacts:
-			var alpha := exp(-(now - float(e["t"])) * Scanner.DECAY)
-			var p := c + s.to_display(e["p"]) * px
-			if p.distance_to(c) > r:
-				continue
-			match int(e["kind"]):
-				1:
-					draw_arc(p, 4.0, 0.0, TAU, 16, Color(0.75, 1.0, 0.9, alpha), 1.6, true)
-				_:
-					var size_px := 3.5 + float(e["size"]) * 3.0
-					draw_circle(p, size_px * 1.9, Color(1.0, 0.6, 0.2, alpha * 0.22))
-					draw_circle(p, size_px, Color(1.0, 0.72, 0.3, alpha))
-		# Speckle, thicker towards the edge.
-		for i in 70:
-			var rr := r * pow(randf(), 0.35)
-			var a := randf() * TAU
-			var p := c + Vector2(sin(a), -cos(a)) * rr
-			draw_rect(Rect2(p, Vector2(1.0, 1.0)), Color(ink, randf() * 0.35 * pow(rr / r, 2.0)))
-		draw_colored_polygon(PackedVector2Array([c + Vector2(0, -6), c + Vector2(4.5, 4), c + Vector2(-4.5, 4)]), Color(ink, 0.9))
-		_text(Vector2(c.x, size - 6.0), "%d M" % int(Scanner.RANGE), 13, Color(ink, 0.6))
-		_text(Vector2(26.0, 18.0), "ECHO", 13, Color(ink, 0.6))
+				settled.append_array(lines)
+		_lines(settled, xf, Color(ink, 0.9))
+		_lines(fresh, xf, Color(ink.lightened(0.55), 1.0))
+		# The aliens and the rest of the crew, where they are.
+		for e: Array in s.blips():
+			var p := xf * (e[1] as Vector2)
+			var flare := s.flare_of(int(e[3]))
+			if int(e[0]) == 1:
+				var crew_ink := Scanner.CREW_INK
+				_dot(Scanner.dot_texture(0), p, (9.0 + 4.0 * flare) * k, Color(crew_ink, 0.3 + 0.35 * flare))
+				_dot(Scanner.dot_texture(2), p, 7.5 * k, crew_ink)
+				_dot(Scanner.dot_texture(1), p, 2.8 * k, crew_ink.lightened(0.3))
+			else:
+				var size_px := (3.5 + float(e[2]) * 3.0) * k
+				var alien_ink := Scanner.ALIEN_INK
+				_dot(Scanner.dot_texture(0), p, size_px * (2.0 + flare), Color(alien_ink, 0.45 + 0.4 * flare))
+				_dot(Scanner.dot_texture(1), p, size_px, alien_ink.lightened(0.45 * flare))
+
+	## Over the picture: whatever lies beyond the rim (echoes painted before the crew member moved on)
+	## covered, the rim, the crew member's own mark and the captions.
+	func _draw_front(c: Vector2, r: float, k: float, size: float) -> void:
+		var ink := Scanner.INK
+		draw_arc(c, r + size * 0.2, 0.0, TAU, 72, Scanner.GROUND, size * 0.4 - 2.0, false)
+		draw_arc(c, r, 0.0, TAU, 72, Color(ink, 0.4), 1.2 * k, true)
+		draw_colored_polygon(PackedVector2Array([c + Vector2(0, -6) * k, c + Vector2(4.5, 4) * k, c + Vector2(-4.5, 4) * k]), Color(ink, 0.95))
+		_text(Vector2(c.x, size - 6.0 * k), "%d M" % int(Scanner.RANGE), int(13 * k), Color(ink, 0.6))
+		_text(Vector2(26.0 * k, 18.0 * k), "ECHO", int(13 * k), Color(ink, 0.6))
+
+	## Lines (pairs of ship-local points, put on the screen by `xf`) about two pixels thick: hairlines
+	## (all of them one drawing), three times a pixel apart.
+	func _lines(points: PackedVector2Array, xf: Transform2D, col: Color) -> void:
+		if points.is_empty():
+			return
+		for off: Vector2 in [Vector2.ZERO, Vector2(1, 0), Vector2(0, 1)]:
+			draw_set_transform_matrix(Transform2D(0.0, off) * xf)
+			draw_multiline(points, col)
+		draw_set_transform_matrix(Transform2D.IDENTITY)
+
+	## A round dot `radius` pixels across at `p`.
+	func _dot(tex: Texture2D, p: Vector2, radius: float, col: Color) -> void:
+		draw_texture_rect(tex, Rect2(p - Vector2(radius, radius), Vector2(radius, radius) * 2.0), false, col)
 
 	func _text(at: Vector2, text: String, font_size: int, col: Color) -> void:
 		var w := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
 		draw_string(font, Vector2(at.x - w * 0.5, at.y), text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, col)
 
+
+## The blips' dots (see dot_texture()).
+static var _dots: Array[Texture2D] = []
 
 ## The crew member wearing it.
 var crew: CrewMember
@@ -156,28 +217,35 @@ var sweep := 0.0
 var clock := 0.0
 ## Aboard the ship: nothing but static.
 var interference := false
-## The echoes: walls {"a", "b" (ship-local xz; the same point for a dot), "t" (when painted), "w"
-## (how rough, m)} and blips {"p", "t", "kind" (0 alien, 1 crew, 2 false echo), "size"}.
-var walls: Array[Dictionary] = []
-var contacts: Array[Dictionary] = []
+## How long the screen's last drawing took (microseconds; for the tests).
+var draw_us := 0.0
 var _device: Node3D
 var _vp: SubViewport
 var _screen: Screen
+## The screen's back and front layers (drawn once; hidden while it shows static).
+var _frame: Array[Screen] = []
 var _screen_mesh: MeshInstance3D
 var _lamp: StandardMaterial3D
 var _status: Label3D
 var _static: AudioStreamPlayer
 var _lamp_t := 0.0
-## The last wall echo painted (to join the next one to it).
-var _last_hit := Vector2.ZERO
-var _last_ok := false
-var _last_d := 0.0
+## The wall echoes per bearing on the screen (BINS of them): the lines the last ray that way painted
+## (pairs of ship-local x/z points), and when.
+var _bin_lines: Array[PackedVector2Array] = []
+var _bin_time := PackedFloat32Array()
+## The abandoned station the echoes were painted in (another one, or none: they are wiped).
+var _painted_k := -1
+## The last ray's echoes, [point, normal] (x/z) each, to join the next ray's to.
+var _last_hits: Array = []
+## When the beam last passed each alien or crewmate (instance id -> clock).
+var _swept: Dictionary = {}
 
 
 func build(c: CrewMember) -> void:
 	crew = c
 	_device = Node3D.new()
 	_device.name = "Device"
+	_device.scale = Vector3.ONE * DEVICE_SCALE
 	add_child(_device)
 	_build_device()
 	_vp = SubViewport.new()
@@ -186,10 +254,16 @@ func build(c: CrewMember) -> void:
 	_vp.transparent_bg = false
 	_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	add_child(_vp)
-	_screen = Screen.new()
-	_screen.scanner = self
-	_screen.font = GunPod.mono_font()
-	_vp.add_child(_screen)
+	for layer: int in [Screen.BACK, Screen.PICTURE, Screen.FRONT]:
+		var s := Screen.new()
+		s.scanner = self
+		s.font = GunPod.mono_font()
+		s.layer = layer
+		_vp.add_child(s)
+		if layer == Screen.PICTURE:
+			_screen = s
+		else:
+			_frame.append(s)
 	var m := ShaderMaterial.new()
 	var sh := Shader.new()
 	sh.code = SCREEN_SHADER
@@ -202,6 +276,8 @@ func build(c: CrewMember) -> void:
 	add_child(_static)
 	for n in find_children("*", "GeometryInstance3D", true, false):
 		(n as GeometryInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_bin_lines.resize(BINS)
+	_bin_time.resize(BINS)
 	visible = false
 
 
@@ -256,14 +332,12 @@ func _build_device() -> void:
 	_device.add_child(_status)
 
 
-## Ship-local point (xz) -> the screen's frame (m, x right, y down, the top the way the crew member
-## faces), from where the crew member is now.
-func to_display(p: Vector2) -> Vector2:
-	var v := p - Vector2(crew.position.x, crew.position.z)
-	var yaw := crew.look_yaw
-	var fwd := Vector2(-sin(yaw), -cos(yaw))
-	var right := Vector2(cos(yaw), -sin(yaw))
-	return Vector2(v.dot(right), -v.dot(fwd))
+## Ship-local x/z -> the screen's pixels: centred on `c`, `px` pixels a metre, the top the way the
+## crew member faces.
+func display_xform(c: Vector2, px: float) -> Transform2D:
+	var xf := Transform2D(crew.look_yaw, Vector2(px, px), 0.0, Vector2.ZERO)
+	xf.origin = c - xf.basis_xform(Vector2(crew.position.x, crew.position.z))
+	return xf
 
 
 ## Swing up while `held`, sweep and paint while up (or show static aboard).
@@ -283,6 +357,11 @@ func update(delta: float, held: bool) -> void:
 	_device.rotation = DOWN_ROT.lerp(UP_ROT, e)
 	_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS if visible else SubViewport.UPDATE_DISABLED
 	interference = crew.ship.is_aboard(crew.position)
+	for s in _frame:
+		s.visible = not interference
+	if crew.ship.derelict_k != _painted_k:
+		_painted_k = crew.ship.derelict_k
+		_wipe()
 	var on := raise >= 0.6 and crew.alive
 	var hiss := visible and interference
 	if hiss != _static.playing:
@@ -293,8 +372,7 @@ func update(delta: float, held: bool) -> void:
 	if on and not interference:
 		_scan(delta)
 	elif not on:
-		_last_ok = false
-	_prune()
+		_last_hits.clear()
 	_lamp_t = maxf(0.0, _lamp_t - delta * 3.0)
 	_lamp.emission_energy_multiplier = 0.3 + 3.0 * _lamp_t
 	CrewWeapons.set_text(_status, "NO RETURN" if interference else "RNG %d M  SWEEP %.0f S" % [int(RANGE), PERIOD])
@@ -302,8 +380,15 @@ func update(delta: float, held: bool) -> void:
 		_screen.queue_redraw()
 
 
-## The beam moves on, painting the bins it passes: a ray each for the walls, and whatever moves
-## within the slice. A ping sounds as it passes the top.
+## Forget every echo (a new station).
+func _wipe() -> void:
+	for b in BINS:
+		_bin_lines[b] = PackedVector2Array()
+	_last_hits.clear()
+	_swept.clear()
+
+
+## The beam moves on, painting the bearings it passes. A ping sounds as it passes the top.
 func _scan(delta: float) -> void:
 	var step := TAU / BINS
 	var from := sweep
@@ -311,85 +396,132 @@ func _scan(delta: float) -> void:
 	var b0 := int(floor(from / step))
 	var b1 := int(floor(sweep / step))
 	for b in range(b0 + 1, b1 + 1):
-		_paint(fposmod(b * step, TAU), step)
+		_paint(posmod(b, BINS))
 	if sweep >= TAU:
 		sweep -= TAU
 		_lamp_t = 1.0
 		Sfx.play("scan_ping", null, -17.0)
 
 
-## Paint one bin at screen angle `a` (`width` wide).
-func _paint(a: float, width: float) -> void:
+## Paint bearing `bin`: a ray goes out that way, on through every wall it meets (up to WALL_LAYERS),
+## and each echo is joined to the last ray's echo off the same wall. Aliens and crewmates in the
+## slice flare (an alien's echo blips).
+func _paint(bin: int) -> void:
+	var width := TAU / BINS
+	var a := float(bin) * width
 	var ship := crew.ship
 	var space := get_world_3d().direct_space_state
 	var yaw := crew.look_yaw
 	var fwd := Vector2(-sin(yaw), -cos(yaw))
 	var right := Vector2(cos(yaw), -sin(yaw))
 	var dir := right * sin(a) + fwd * cos(a)
-	var side := Vector2(-dir.y, dir.x)
 	var me := Vector2(crew.position.x, crew.position.z)
-	var origin := crew.position + Vector3(0, CHEST, 0)
-	var q := PhysicsRayQueryParameters3D.create(ship.to_global(origin), ship.to_global(origin + Vector3(dir.x, 0, dir.y) * RANGE), MASK)
-	q.exclude = [crew.get_rid()]
-	var hit := space.intersect_ray(q)
-	var ok := false
-	if not hit.is_empty():
-		var d := origin.distance_to(ship.to_local(hit["position"]))
-		var k := d / RANGE
-		if randf() >= DROPOUT * pow(k, 2.5):
-			var sigma := WALL_NOISE + WALL_NOISE_SQ * d * d
-			var p := me + dir * (d + randfn(0.0, sigma)) + side * randfn(0.0, sigma * 0.5)
-			var joined := _last_ok and p.distance_to(_last_hit) < maxf(1.5, 0.35 * d) and absf(d - _last_d) < maxf(1.2, 0.3 * d)
-			walls.append({"a": _last_hit if joined else p, "b": p, "t": clock, "w": sigma})
-			_last_hit = p
-			_last_d = d
-			ok = true
-	_last_ok = ok
-	# Clutter: false wall echoes out towards the edge.
-	if randf() < 0.05 * GHOSTS:
-		var rr := RANGE * randf_range(0.5, 0.98)
-		walls.append({"a": me + dir * rr, "b": me + dir * rr, "t": clock, "w": 1.5})
-	if randf() < GHOSTS / BINS:
-		contacts.append({"p": me + dir * RANGE * randf_range(0.55, 0.98), "t": clock, "kind": 2, "size": 0.6})
-	# Whatever moves in this slice: aliens and the rest of the crew.
+	var origin := crew.position + Vector3(0, PING_HEIGHT, 0)
+	var dir3 := Vector3(dir.x, 0, dir.y)
+	var to := ship.to_global(origin + dir3 * RANGE)
+	var step := ship.global_basis * dir3 * WALL_STEP
+	var from := ship.to_global(origin)
+	var inv := ship.global_basis.inverse()
+	var lines := PackedVector2Array()
+	var hits: Array = []
+	for layer in WALL_LAYERS:
+		var q := PhysicsRayQueryParameters3D.create(from, to, MASK)
+		q.exclude = [crew.get_rid()]
+		var hit := space.intersect_ray(q)
+		if hit.is_empty():
+			break
+		var at: Vector3 = hit["position"]
+		# (A ray that starts just inside a wall passes out of it without a hit, on to the next.)
+		from = at + step
+		var n3: Vector3 = inv * (hit["normal"] as Vector3)
+		var n := Vector2(n3.x, n3.z)
+		if n.length_squared() < 0.25:
+			# A floor, a ceiling or a slope: not a wall.
+			continue
+		n = n.normalized()
+		var local := ship.to_local(at)
+		var p := Vector2(local.x, local.z)
+		var reach := maxf(JOIN_GAP, JOIN_SPREAD * me.distance_to(p) * width)
+		for prev: Array in _last_hits:
+			var pp: Vector2 = prev[0]
+			if (prev[1] as Vector2).dot(n) > JOIN_FACING and absf((p - pp).dot(n)) < JOIN_PLANE and pp.distance_to(p) < reach:
+				lines.append(pp)
+				lines.append(p)
+				break
+		hits.append([p, n])
+	_last_hits = hits
+	_bin_lines[bin] = lines
+	_bin_time[bin] = clock
+	for e: Array in blips():
+		var disp := (e[1] as Vector2) - me
+		var bearing := fposmod(atan2(disp.dot(right), disp.dot(fwd)), TAU)
+		if absf(angle_difference(bearing, a)) <= width * 0.5:
+			_swept[int(e[3])] = clock
+			if int(e[0]) == 0:
+				var k := disp.length() / RANGE
+				Sfx.play("scan_blip", null, -24.0 + (1.0 - k) * 6.0, lerpf(1.25, 0.95, k))
+
+
+## What shows as blips right now, within range: [kind (0 an alien, 1 a crewmate), where (ship-local
+## x/z), size (m), instance id] each. The crew's suits answer the ping, so crewmates always show.
+func blips() -> Array:
+	var out: Array = []
+	var ship := crew.ship
+	var me := Vector2(crew.position.x, crew.position.z)
 	for n in ship.boarder_root.get_children():
 		var bd := n as Boarder
 		if bd and bd.hp > 0.0 and not bd.is_queued_for_deletion():
-			_blip(bd.position, bd.stat("height") * 0.5, 0, clampf(bd.stat("radius") * 2.0, 0.4, 1.2), a, width, space)
+			var p := Vector2(bd.position.x, bd.position.z)
+			if p.distance_to(me) < RANGE:
+				out.append([0, p, clampf(bd.stat("radius") * 2.0, 0.4, 1.2), bd.get_instance_id()])
 	for n in ship.crew_root.get_children():
 		var cm := n as CrewMember
 		if cm and cm != crew and cm.alive:
-			_blip(cm.position, CHEST, 1, 1.0, a, width, space)
+			var p := Vector2(cm.position.x, cm.position.z)
+			if p.distance_to(me) < RANGE:
+				out.append([1, p, 1.0, cm.get_instance_id()])
+	return out
 
 
-## A blip for something at ship-local `pos` if it is within RANGE and in the slice the beam just
-## passed (centred on screen angle `a`).
-func _blip(pos: Vector3, up: float, kind: int, size: float, a: float, width: float, space: PhysicsDirectSpaceState3D) -> void:
-	var flat := Vector2(pos.x, pos.z)
-	var disp := to_display(flat)
-	var d := disp.length()
-	if d > RANGE or d < 0.3:
-		return
-	var ang := fposmod(atan2(disp.x, -disp.y), TAU)
-	var off := absf(angle_difference(ang, a))
-	if off > width * 0.5:
-		return
-	var ship := crew.ship
-	var q := PhysicsRayQueryParameters3D.create(ship.to_global(crew.position + Vector3(0, CHEST, 0)), ship.to_global(pos + Vector3(0, up, 0)), MASK)
-	q.exclude = [crew.get_rid()]
-	var hidden := not space.intersect_ray(q).is_empty()
-	var k := d / RANGE
-	if randf() < MISS * k * k * (1.6 if hidden else 1.0):
-		return
-	var sigma := (BLIP_NOISE + BLIP_NOISE_M * d) * (1.8 if hidden else 1.0)
-	contacts.append({"p": flat + Vector2(randfn(0.0, sigma), randfn(0.0, sigma)), "t": clock, "kind": kind, "size": size})
-	if kind == 0:
-		Sfx.play("scan_blip", null, -24.0 + (1.0 - k) * 6.0, lerpf(1.25, 0.95, k))
+## How strongly a blip flares (1 as the beam passes it, fading over FLARE seconds).
+func flare_of(id: int) -> float:
+	return clampf(1.0 - (clock - float(_swept.get(id, -100.0))) / FLARE, 0.0, 1.0)
 
 
-func _prune() -> void:
-	var keep := PERIOD * KEEP
-	while not walls.is_empty() and clock - float(walls[0]["t"]) > keep:
-		walls.pop_front()
-	while not contacts.is_empty() and clock - float(contacts[0]["t"]) > keep:
-		contacts.pop_front()
+## A round dot for the blips, white (tinted when drawn), 64 pixels across: 0 a soft glow, 1 a disc
+## with a crisp edge, 2 a ring.
+static func dot_texture(kind: int) -> Texture2D:
+	if _dots.is_empty():
+		var clear := Color(1, 1, 1, 0)
+		var white := Color(1, 1, 1, 1)
+		for stops: Array in [[[0.0, 1.0], [white, clear]], [[0.0, 0.78, 0.94], [white, white, clear]],
+				[[0.0, 0.62, 0.7, 0.84, 0.92], [clear, clear, white, white, clear]]]:
+			var g := Gradient.new()
+			g.offsets = PackedFloat32Array(stops[0])
+			g.colors = PackedColorArray(stops[1])
+			var t := GradientTexture2D.new()
+			t.gradient = g
+			t.fill = GradientTexture2D.FILL_RADIAL
+			t.fill_from = Vector2(0.5, 0.5)
+			t.fill_to = Vector2(1.0, 0.5)
+			t.width = 64
+			t.height = 64
+			_dots.append(t)
+	return _dots[kind]
+
+
+## Every wall echo on the screen now (ship-local x/z; the end of each line; for the tests).
+func wall_points() -> PackedVector2Array:
+	var out := PackedVector2Array()
+	for lines in _bin_lines:
+		for i in range(1, lines.size(), 2):
+			out.append(lines[i])
+	return out
+
+
+## How many echoes it holds right now (for the tests).
+func echo_text() -> String:
+	var segs := 0
+	for lines in _bin_lines:
+		segs += lines.size() / 2
+	return "%d wall lines, %d blips" % [segs, blips().size()]

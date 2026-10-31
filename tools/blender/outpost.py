@@ -6,7 +6,10 @@
 - outpost_floor: steel tread plate, plates of 1 m with the raised diamond pattern, worn shiny on
   top, dirt in the seams and patches of rust.
 - outpost_grate: bar grating for the corridors and the pier, 1 m to the tile: bearing bars with
-  cross rods over a dark pit.
+  cross rods, the gaps cut out (alpha) so the trench under it shows.
+- outpost_paint / outpost_bare: near-white worn painted steel and bare metal, tinted per material
+  (the frames, pipes and furniture).
+- outpost_hazard: worn yellow and black stripes.
 
 Each comes as <name>_albedo, <name>_orm (occlusion, roughness, metallic) and <name>_normal, drawn
 with numpy (the helpers are the same as decals.py's); Blender only writes the PNGs.
@@ -221,10 +224,12 @@ def floor():
 	a = np.where(turn, lx + ly, lx - ly)
 	b = np.where(turn, lx - ly, lx + ly)
 	dia = smooth(0.12, 0.06, np.sqrt((a / 0.42) ** 2 + (b / 0.11) ** 2) * 0.12)
-	noise = fbm(s, s, 128, 5, rng)
+	noise = fbm(s, s, 256, 6, rng)
 	fine = fbm(s, s, 16, 3, rng)
-	dirt = smooth(0.48, 0.75, noise) * 0.8 + seam * 0.6
-	rust = smooth(0.66, 0.8, fbm(s, s, 64, 4, rng)) * 0.7
+	# Dirt: a soft wash with little contrast (big dark blotches repeat visibly every tile), packed
+	# into the seams and the diamonds' feet.
+	dirt = smooth(0.4, 0.85, noise) * 0.38 + seam * 0.6 + (1.0 - dia) * smooth(0.45, 0.7, fine) * 0.12
+	rust = smooth(0.7, 0.84, fbm(s, s, 64, 4, rng)) * 0.55
 	worn = dia * smooth(0.3, 0.7, fine)
 	steel = 0.37 + (noise - 0.5) * 0.08 + worn * 0.12
 	r = mix(mix(steel, 0.34, rust), 0.1, dirt * 0.6)
@@ -252,21 +257,119 @@ def grate():
 	solid = np.maximum(bar, rod * 0.9)
 	noise = fbm(s, s, 64, 4, rng)
 	fine = fbm(s, s, 8, 2, rng)
-	dirt = smooth(0.45, 0.8, noise) * 0.7
-	steel = 0.42 + (fine - 0.5) * 0.1
-	pit = 0.025
-	r = mix(pit, mix(steel, 0.12, dirt), solid)
-	g = mix(pit, mix(steel, 0.11, dirt), solid)
-	bl = mix(pit, mix(steel * 0.97, 0.09, dirt), solid)
+	dirt = smooth(0.5, 0.85, noise) * 0.45
+	# Worn bare steel on the bars' tops, a darker galvanised grey on the rods. The gaps are cut out
+	# (alpha), so whatever lies under the grating shows through.
+	steel = 0.52 + (fine - 0.5) * 0.12 + bar * 0.06
+	r = mix(0.1, mix(steel, 0.2, dirt), solid)
+	g = mix(0.1, mix(steel * 0.98, 0.18, dirt), solid)
+	bl = mix(0.1, mix(steel * 0.93, 0.14, dirt), solid)
 	albedo = rgb(r, g, bl)
+	albedo[..., 3] = smooth(0.35, 0.6, solid)
 	height = bar * 1.5 + rod * 1.0 - (1.0 - solid) * 1.5
-	ao = np.clip(0.15 + solid * 0.85 - rod * bar * 0.1, 0, 1)
-	rough = np.clip(mix(1.0, 0.45 + dirt * 0.35, solid), 0, 1)
-	metal = np.clip(solid * (0.85 - dirt * 0.5), 0, 1)
+	ao = np.clip(0.35 + solid * 0.65 - rod * bar * 0.15, 0, 1)
+	rough = np.clip(mix(1.0, 0.4 + dirt * 0.35, solid), 0, 1)
+	metal = np.clip(solid * (0.9 - dirt * 0.5), 0, 1)
 	save_set("outpost_grate", albedo, height, 3.0, ao, rough, metal)
 
 
-wall()
-floor()
-grate()
+# --- Tintable worn surfaces for the frames, props and fittings ------------------------------------------
+
+def paint():
+	"""Painted steel, 1 m to the tile at 512 px, near white so a material's tint gives its colour
+	(olive drab, khaki, red, white enamel): brush marks and a mottled tone, chips down to dark bare
+	steel, scratches, and grime gathered in patches. Rough and non-metallic but where chipped."""
+	rng = np.random.default_rng(74)
+	s = 512
+	noise = fbm(s, s, 128, 5, rng)
+	mottle = fbm(s, s, 32, 3, rng)
+	fine = fbm(s, s, 8, 2, rng)
+	# Brush strokes: faint streaks one way.
+	brush = blur(np.repeat(rng.random((s, 1)), s, 1), 0, 1) * 0.5 + blur(rng.random((s, s)), 1, 1) * 0.5
+	chips = smooth(0.755, 0.775, noise * 0.6 + fine * 0.4)
+	chip_rim = smooth(0.72, 0.755, noise * 0.6 + fine * 0.4) - chips
+	# Scratches: short straight lines at random angles.
+	scratch = np.zeros((s, s))
+	yy, xx = np.mgrid[0:s, 0:s].astype(np.float64)
+	for _ in range(28):
+		cx, cy = rng.random(2) * s
+		a = rng.random() * math.pi
+		ln = rng.uniform(8, 35)
+		dx, dy = math.cos(a), math.sin(a)
+		px = (xx - cx + s / 2) % s - s / 2
+		py = (yy - cy + s / 2) % s - s / 2
+		t = np.clip(px * dx + py * dy, -ln, ln)
+		d = np.sqrt((px - t * dx) ** 2 + (py - t * dy) ** 2)
+		scratch = np.maximum(scratch, smooth(1.0, 0.2, d) * rng.uniform(0.2, 0.55))
+	grime = smooth(0.5, 0.85, fbm(s, s, 256, 4, rng)) * 0.28 + smooth(0.65, 0.9, mottle) * 0.1
+	base = 0.68 * (1.0 + (mottle - 0.5) * 0.16 + (brush - 0.5) * 0.08)
+	# Chips show a lighter grey-brown primer and steel, never black.
+	bare = 0.52 + (fine - 0.5) * 0.08
+	v = mix(base, bare, np.maximum(chips, scratch * 0.7))
+	v = v * (1.0 - chip_rim * 0.18) * (1.0 - grime * 0.5)
+	# Grime is a warm brown, not just darker: a little more red than blue.
+	albedo = rgb(v * (1.0 + grime * 0.08), v, v * (1.0 - grime * 0.12))
+	height = (1.0 - chips) * 0.8 - scratch * 0.3 + (brush - 0.5) * 0.15 + (noise - 0.5) * 0.1
+	ao = np.clip(1.0 - chip_rim * 0.3 - grime * 0.2, 0, 1)
+	rough = np.clip(0.72 + (fine - 0.5) * 0.1 - chips * 0.25 + grime * 0.12, 0, 1)
+	metal = np.clip(np.maximum(chips, scratch * 0.8), 0, 1)
+	save_set("outpost_paint", albedo, height, 1.6, ao, rough, metal)
+
+
+def bare():
+	"""Bare worn metal (steel, gunmetal, bronze by tint), 1 m to the tile at 512 px: brushed grain,
+	scuffs worn shiny, dull oxidised patches and grime. Metallic throughout."""
+	rng = np.random.default_rng(75)
+	s = 512
+	grain = blur(np.repeat(rng.random((s, 1)), s, 1), 1, 1) * 0.6 + blur(rng.random((s, s)), 0, 1) * 0.4
+	noise = fbm(s, s, 128, 5, rng)
+	fine = fbm(s, s, 16, 3, rng)
+	scuff = smooth(0.6, 0.75, fbm(s, s, 32, 3, rng))
+	oxide = smooth(0.55, 0.8, noise) * 0.7
+	grime = smooth(0.5, 0.85, fbm(s, s, 256, 4, rng)) * 0.6
+	v = 0.72 * (1.0 + (grain - 0.5) * 0.12 + (fine - 0.5) * 0.1 + scuff * 0.12)
+	v = v * (1.0 - oxide * 0.35) * (1.0 - grime * 0.5)
+	albedo = rgb(v * (1.0 + grime * 0.05), v, v * (1.0 - oxide * 0.06 - grime * 0.1))
+	height = (grain - 0.5) * 0.3 + (noise - 0.5) * 0.2
+	ao = np.clip(1.0 - grime * 0.25, 0, 1)
+	rough = np.clip(0.6 + oxide * 0.2 + grime * 0.15 - scuff * 0.12 + (grain - 0.5) * 0.08, 0, 1)
+	metal = np.clip(0.95 - oxide * 0.35 - grime * 0.4, 0, 1)
+	save_set("outpost_bare", albedo, height, 1.0, ao, rough, metal)
+
+
+def hazard():
+	"""Yellow and black hazard stripes at 45 degrees, painted on steel: 0.5 m to the tile at 512 px
+	(stripes 12.5 cm wide), worn through at random and grimy, the yellow a dull ochre rather than a
+	bright one."""
+	rng = np.random.default_rng(76)
+	s = 512
+	yy, xx = np.mgrid[0:s, 0:s].astype(np.float64)
+	period = s / 2.0
+	t = ((xx + yy) % period) / period
+	edge = np.minimum(np.abs(t - 0.25), np.abs(t - 0.75))
+	band = smooth(-1.5, 1.5, (0.25 - np.abs(t - 0.5)) * period * 1.0)
+	noise = fbm(s, s, 128, 5, rng)
+	fine = fbm(s, s, 8, 2, rng)
+	worn = smooth(0.64, 0.7, noise * 0.6 + fine * 0.4)
+	grime = smooth(0.4, 0.85, fbm(s, s, 256, 4, rng)) * 0.5
+	yellow = np.array([0.62, 0.46, 0.1])
+	black = np.array([0.05, 0.05, 0.045])
+	steel = np.array([0.32, 0.31, 0.29])
+	col = np.zeros((s, s, 4), np.float32)
+	for i in range(3):
+		c = mix(black[i], yellow[i] * (1.0 + (fine - 0.5) * 0.15), band)
+		c = mix(c, steel[i], worn)
+		col[..., i] = c * (1.0 - grime * 0.6)
+	col[..., 3] = 1.0
+	height = (1.0 - worn) * 0.6 + (noise - 0.5) * 0.15 - smooth(2.0, 0.0, edge * period) * 0.05
+	ao = np.clip(1.0 - grime * 0.2, 0, 1)
+	rough = np.clip(0.7 - worn * 0.2 + grime * 0.15, 0, 1)
+	metal = np.clip(worn * 0.8, 0, 1)
+	save_set("outpost_hazard", col, height, 1.4, ao, rough, metal)
+
+
+only = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
+for fn in (wall, floor, grate, paint, bare, hazard):
+	if not only or fn.__name__ in only:
+		fn()
 print("[outpost] done", flush=True)

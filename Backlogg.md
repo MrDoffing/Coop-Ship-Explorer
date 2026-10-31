@@ -44,46 +44,32 @@ Barnacles can spawn in the ceiling, these can grab nearby a player so they cant 
 There are small critters that move on the wall and ceiling. Almost like face-huggers from Aliens. They jump at the player, damaging them and landing on the floor again. They move back up on the wall or ceiling to attack again. They arent very fast but they can come in numbers. They dont tend to hunt the players but rather stay in their room or corridor. However if they are shot, they will hunt the player within a certain radius of its nest. Their nests are sponge looking extrusions with holes.
 There are four legged spider looking aliens that are aggresive and spit at players. They often dont stand still and scurry around between their shots (stands still when spitting). The can walk on walls and ceilings. (Dev note, their legs are procedurally animated to stand on surfaces and take steps when moving too far away from the body)
 
-## Issues
+## Changes
 
-* Grime on visor behaves much better now. Have detected new visual bug however. When light source is approx 60-90 degrees from visor a linear cut appears. Looks like some culling error. Could you look in to it.
+--- CURRENT BATCH ---
 
-* SMG: The muzzle flash is too intense, cant see while spraying. Decrease slightly.
+* Add crew weapon dual pistols (Dual Berettas). Fires alternating. Create blender model.
 
-* Photon Rifle: Muzzle flash too intense. Decrease slightly. Also remove the long glowing cylinder effect when firing. Rather have glowing bullets (kind of like star wars blasters). Change the shape of the sight from rectangular to circular.
+* Generator still has floating parts. The pulley hold isnt connected to generator. The pipes at the bottom are now connected to the floor but not connected to the generator. However i dont like them so simply remove them. The panel on its side (with green/red light) is not connected.
 
-* MGL: Switch it to full-automatic firing. The explosion area should be larger for the grenades.
+* The scanner is hard to read. For experimentation, lets make it super clear. No fake dots, no noise or falloff.
 
-* Pulse Rifle: Higher recoil when firing.
+* The performance is lowered significantly when viewing the scanner. Why is that? Could you fix it?
 
-* Mining decals should fade quicker.
+* Lets improve the camera room in outpost. Lets refactor this into a control hub room. This room shall have a map over the outpost, showing the layout (rooms, walls and corridors), doors (locked, unlocked and unique door id) and name of each room (generator, science lab, armory etc). The camera screens should still be here but placed higher up towards the roof so other equipment can fit. The control hub can also lock and unlock doors by using the control computer. The control computer is primarily a console the player can interact with and type commands into. For example "lock d11" or "unlock d11". If a player want to enter a locked room, he needs to identify which door id that locks it by looking at the map and then unlocking it in the computer. If a room is filled with enemies, it might be better to not opened it or at least prepare for the wave that pours out, if opened. The console hub only works if the power is on. Create a rough version of this I can give feedback to and dont spend too much time making it the same quality as the rest of the outpost.
 
-* Echoscanner: It shouldnt give false information on enemies. Dont fake red dots. Teammates is difficult to see in the scanner, change the color to blue. Increase range of scanner. The scanner doesnt need line of sight to map walls. Simply show nearby walls but with more noise the further away it is (may remove dots for walls if far away).
+* Add portable turret boxes in outposts. They look pretty similar to other upgrade/loot boxes and can be picked up similarly. They are however only used in the outpost as stationary defensive turrets. By pressing 'F' on them (when placed on ground), they will open/transform into a turret looking straight forward. Should be easy to see on the box which side is the front. The turret can rotate 45 degrees left and right to aim and shoot. They will auto fire at enemies infront of them. Its a machine gun firing rapidly. It deals heavy damage and is better than normal crew weapons. Enemies will target the turrets if they are damaged by them. If an enemy isnt damaged by the turret, it might run past if hunting the player. If a turret is destroyed, it cannot be repaired. A destroyed turret is slightly bent and have sparks flying out of it and with a little bit of smoke. The turrets have limited ammo that are displayed at the back of it. These turret are planned to be used as defence when opening a locked door with lots of enemies behind.
 
-* Cracks on helmet's visor should start to crack at higher health. Make it start on 50 health.
+* Ship Weapon: Multiple Rocket Launcher System (MRLS). Two vertical boxes at each side holding 8 missiles each. Aiming not really required for they auto home when close to enemy. They curve slightly when they fly. High spread when firing. Has good burst potential but takes a long time to reload as each missile needs to be reloaded one at the time (auto now but when manual reloading is implemented then each ammo box might reload 2 missile at the time).
 
----
+--- NEXT BATCH ---
 
-* Increase health of roaming alien.
+* Scanner: Dont use any complex ray casting or anything. Simply show all rooms and corridors.
 
-* Bug: Enemies aggro through locked doors.
+* Bullet visuals: As visuals are starting to becomes better overall I want to upgrade the bullet visuals a bit. Dont want large glowing cylindrical meshes but rather more realistic effects that are more subtle. I want more focus on the muzzle flash and bullet collision. Bullet hitting something should leave a decal and create more visually pleasing sparks. Use an agent critic that will acts as an art director which evaluates the visuals, provides feedback and you fix that feedback until the agent critic is satisfied (by a score).
 
-* Bug: Enemies walk through walls??
-
-* Barnacles shouldn't be easy to spot. Their tongue only come out to grab player. Make it dark and more flat so it blends in better with roof. Increase their grab range as well.
-
-* Leg of spiders stretch all over the place. Or they sometimes dont follow the body. Inconsistent.
-
-* Add credit boxes. Earn credits when deposited in mothership. 
-
-* The security room with all the cameras is very laggy. Any way to optimize it?
-
-* Update all crew weapon models to use blender generated models (similar to Pulse Rifle).
+* Control hub: Mount the entire hub against a wall. The computer screen is clipping against computer model (too close too eachother). Add autocomplete to commands by pressing 'tab' (crew status window opens with tab but should not work when on computer). The control hub cant open keypad locked doors, show these as red doors on map and show closed doors as yellow on map (yellow means it is unlocked but closed, green means unlocked and open).
 
 ## Future (not prioritized)
 
-* Spawn an agent and let it act as the art director. Let it evaluate the outpost environment's visuals, immersion and credibility according to the visual design "A retro-futuristic industrial military spaceship corridor, heavy olive-drab and bronze metal construction, thick angular bulkheads, exposed hydraulic pipes, ribbed wall panels, reinforced mechanical door frames, grated steel flooring, symmetrical modular architecture, repeating octagonal structures receding into the distance, warm amber utility lights, subtle grime and wear, deep shadows, low-key cinematic lighting, tactile hard-surface details, late-1990s science-fiction video game atmosphere, grounded and functional design, no sleek minimalist surfaces, no bright neon colors.".
-
 * Proximity Chat
-
-* Ship Weapon: Multiple Rocket Launcher System (MRLS). Two vertical boxes at each side holding 8 missiles each. Aiming not really required for they auto home when close to enemy. They curve slightly when they fly. High spread when firing. Has good burst potential but takes a long time to reload as each missile needs to be reloaded one at the time (auto now but when manual reloading is implemented then each ammo box might reload 2 missile at the time).

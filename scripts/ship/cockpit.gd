@@ -1246,8 +1246,11 @@ func _update_weapons(powered: bool) -> void:
 		var i := ship.gun_index(id)
 		var loading := ship.gun_reloading(id)
 		var ammo := ship.gun_ammo_of(id)
-		var fill := float(ammo) / GunPod.BELT
-		if loading and i >= 0 and i < ship.gun_reload.size():
+		# (Rockets: how many are loaded; the loader trickles them in, so it never shows LOAD.)
+		var rockets := ship.gun_weapon(id) == "mrls"
+		var full := GunPod.MRLS_TUBES if rockets else GunPod.BELT
+		var fill := float(ammo) / full
+		if loading and not rockets and i >= 0 and i < ship.gun_reload.size():
 			fill = clampf(1.0 - ship.gun_reload[i] / GunPod.RELOAD_TIME, 0.0, 1.0)
 		var on := 1.0 if powered and ship.weapons_online else 0.3
 		var am: MeshInstance3D = row["ammo"]
@@ -1258,8 +1261,8 @@ func _update_weapons(powered: bool) -> void:
 		ht.set_instance_shader_parameter("value", ship.gun_heat_of(id) if powered else 0.0)
 		ht.set_instance_shader_parameter("power", on)
 		var count: Label3D = row["count"]
-		_set_text(count, ("LOAD" if loading else "%03d" % ammo) if powered else "")
-		count.modulate = AMBER if loading or ammo * 5 <= GunPod.BELT else GREEN
+		_set_text(count, ("LOAD" if loading and not rockets else ("R%02d" % ammo if rockets else "%03d" % ammo)) if powered else "")
+		count.modulate = AMBER if (loading and not rockets) or ammo * 5 <= full else GREEN
 
 
 ## The thrust lever follows the throttle; the gear stick leans with the pilot's turn and climb

@@ -185,6 +185,62 @@ static func tracer(from: Vector3, to: Vector3, color: Color, width := 0.05, life
 	tw.tween_callback(mi.queue_free)
 
 
+## A glowing bolt, like a blaster's (the Photon Rifle): a short streak, white-hot down its middle,
+## that flies from `from` to `to` (global) at `speed` m/s, lighting what it passes, and calls
+## `on_arrive` where it ends. `parent` is the frame it flies in (the ship, so a bolt fired aboard keeps
+## up with the ship's interior); the effects root by default.
+static func bolt(from: Vector3, to: Vector3, color: Color, speed: float, length: float, parent: Node3D = null,
+		on_arrive := Callable()) -> void:
+	var r := parent if parent != null and is_instance_valid(parent) else _root()
+	var d := to - from
+	var dist := d.length()
+	if r == null or dist < 0.05:
+		if on_arrive.is_valid():
+			on_arrive.call()
+		return
+	var dir := d / dist
+	var l := minf(length, dist)
+	if not _meshes.has("bolt"):
+		var cm := CylinderMesh.new()
+		cm.top_radius = 1.0
+		cm.bottom_radius = 1.0
+		cm.height = 1.0
+		cm.radial_segments = 8
+		cm.rings = 1
+		_meshes["bolt"] = cm
+	var key := "bolt_mats" + color.to_html()
+	if not _meshes.has(key):
+		_meshes[key] = [Models.glow(Color(color.r * 2.2, color.g * 2.2, color.b * 2.2, 0.55)), Models.glow(Color(2.4, 2.6, 2.6, 1.0))]
+	var mats: Array = _meshes[key]
+	var node := Node3D.new()
+	node.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	var inv := r.global_transform.affine_inverse()
+	var up := Vector3.UP if absf(dir.y) < 0.99 else Vector3.RIGHT
+	var start := inv * (from + dir * l * 0.5)
+	var end := inv * (to - dir * l * 0.5)
+	node.transform = Transform3D(inv.basis * Basis.looking_at(dir, up), start)
+	# The halo, then the core (each a cylinder along the bolt's -Z).
+	for k in 2:
+		var mi := MeshInstance3D.new()
+		mi.mesh = _meshes["bolt"]
+		mi.material_override = mats[k]
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var w := 0.03 if k == 0 else 0.011
+		mi.transform = Transform3D(Basis(Vector3.RIGHT, PI / 2.0) * Basis.from_scale(Vector3(w, l, w)), Vector3.ZERO)
+		node.add_child(mi)
+	var light := OmniLight3D.new()
+	light.light_color = color
+	light.light_energy = 0.7
+	light.omni_range = 2.4
+	node.add_child(light)
+	r.add_child(node)
+	var tw := node.create_tween()
+	tw.tween_property(node, "position", end, maxf((dist - l) / speed, 0.01))
+	if on_arrive.is_valid():
+		tw.tween_callback(on_arrive)
+	tw.tween_callback(node.queue_free)
+
+
 ## Expanding ring on a surface (shield and breach effects).
 static func ring(pos: Vector3, normal: Vector3, color: Color, radius := 2.0, life := 0.4) -> void:
 	var r := _root()

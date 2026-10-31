@@ -3,8 +3,8 @@ extends RefCounted
 ## The furniture and machinery of an abandoned station's rooms (see OutpostLayout for where each
 ## piece stands and DerelictBuilder for the rooms round them). Everything static goes into the
 ## station's mesh batch, with a collision box over each piece's footprint; what moves or glows on
-## its own (the specimen tanks, the generator, the security desk's screens) are nodes the Derelict
-## animates.
+## its own (the specimen tanks, the generator, the control hub's screens, map and computer) are nodes
+## the Derelict animates.
 ##
 ## A piece's frame: its floor point under its middle, turned by its yaw, facing its local +z (into
 ## the room for pieces against a wall). "size" is its width (local x), height and depth (local z).
@@ -15,8 +15,8 @@ extends RefCounted
 const TANK_SHADER := """
 shader_type spatial;
 render_mode blend_mix, depth_draw_never, cull_disabled, shadows_disabled;
-uniform vec3 liquid : source_color = vec3(0.25, 0.9, 0.35);
-uniform float glow = 1.2;
+uniform vec3 liquid : source_color = vec3(0.35, 0.5, 0.18);
+uniform float glow = 0.32;
 instance uniform float level = 0.92;
 instance uniform float seed = 0.0;
 varying vec3 lp;
@@ -38,10 +38,10 @@ void fragment() {
 	vec2 cell = floor(g);
 	vec2 f = fract(g) - 0.5;
 	float r = hash(cell + seed);
-	float bubble = (1.0 - smoothstep(0.05, 0.16, length(f + vec2(sin(TIME * 2.0 + r * 6.0) * 0.12, 0.0)))) * step(0.72, r);
+	float bubble = (1.0 - smoothstep(0.03, 0.1, length(f + vec2(sin(TIME * 2.0 + r * 6.0) * 0.12, 0.0)))) * step(0.88, r);
 	float sway = 0.75 + 0.25 * sin(TIME * 0.7 + h * 5.0 + seed);
 	ALBEDO = mix(vec3(0.6, 0.7, 0.7), liquid * 0.35, wet);
-	EMISSION = (liquid * glow * sway * (0.45 + 0.55 * h) + vec3(0.8, 1.0, 0.85) * bubble * 1.5) * wet + vec3(0.25, 0.3, 0.3) * fres * 0.3;
+	EMISSION = (liquid * glow * sway * (0.45 + 0.55 * h) + liquid * bubble * 0.6) * wet + vec3(0.25, 0.3, 0.3) * fres * 0.3;
 	ROUGHNESS = 0.05;
 	SPECULAR = 0.9;
 	ALPHA = clamp(mix(0.06 + fres * 0.35, 0.5 + fres * 0.3, wet), 0.0, 1.0);
@@ -49,17 +49,31 @@ void fragment() {
 """
 
 static var _shared: Dictionary = {}
+## The node the piece being built puts its model parts under (see _model).
+static var _root: Node3D
+static var _batch: Models.Batch
+## The room's height over its floor, for the piece being built (see build()).
+static var _ceiling := 4.4
+## Furniture made in Blender (tools/blender/outpost_props.py), and the sizes its pieces were made at.
+const MODELS := "outpost_props"
+const CRATE_SIZE := Vector3(0.85, 0.75, 0.85)
+const AMMO_SIZE := Vector3(0.48, 0.3, 0.6)
 
 
 ## Build a piece: into the batch `b`, its collision into `body`. `root` takes the nodes that live
 ## on their own; `out` collects what the Derelict animates ("tanks", "subjects", "generator",
-## "screens", "lights").
-static func build(root: Node3D, b: Models.Batch, body: StaticBody3D, p: Dictionary, m: Dictionary, out: Dictionary) -> void:
+## "screens", "lights"). `ceiling`: the room's height over its floor (pipes and cables run up into
+## it).
+static func build(root: Node3D, b: Models.Batch, body: StaticBody3D, p: Dictionary, m: Dictionary, out: Dictionary,
+		ceiling := OutpostLayout.ROOM_H) -> void:
 	var size: Vector3 = p["size"]
 	var x := Transform3D(Basis(Vector3.UP, float(p["yaw"])), p["pos"])
 	var rng := RandomNumberGenerator.new()
 	rng.seed = int(p["var"]) * 7919 + 13
 	var solid := true
+	_root = root
+	_batch = b
+	_ceiling = ceiling
 	match str(p["kind"]):
 		"shelf":
 			_shelf(b, x, size, m, rng)
@@ -112,8 +126,12 @@ static func build(root: Node3D, b: Models.Batch, body: StaticBody3D, p: Dictiona
 			_table(b, x, size, m, rng)
 		"mess_table":
 			_mess_table(b, x, size, m, rng)
-		"security_desk":
-			_security_desk(root, b, x, size, m, rng, out)
+		"hub_desk":
+			_hub_desk(root, b, x, size, m, rng, out)
+			# (Solid up to the desk top and where the board stands, so the computer can be reached.)
+			_shape(body, x, Vector3(0, 0.465, 0), Vector3(size.x - 0.1, 0.93, size.z))
+			_shape(body, x, Vector3(0, size.y * 0.5, -size.z * 0.5 + 0.12), Vector3(size.x - 0.1, size.y, 0.3))
+			solid = false
 		"generator":
 			_generator(root, b, x, size, m, rng, out)
 		"weapon_bench":
@@ -123,15 +141,30 @@ static func build(root: Node3D, b: Models.Batch, body: StaticBody3D, p: Dictiona
 		"lathe":
 			_lathe(b, x, size, m, rng)
 	if solid:
-		var cs := CollisionShape3D.new()
-		var shape := BoxShape3D.new()
-		shape.size = size
-		cs.shape = shape
-		cs.transform = x * Transform3D(Basis.IDENTITY, Vector3(0, size.y * 0.5, 0))
-		body.add_child(cs)
+		_shape(body, x, Vector3(0, size.y * 0.5, 0), size)
+
+
+## A collision box in a piece's frame.
+static func _shape(body: StaticBody3D, x: Transform3D, p: Vector3, size: Vector3) -> void:
+	var cs := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = size
+	cs.shape = shape
+	cs.transform = x * Transform3D(Basis.IDENTITY, p)
+	body.add_child(cs)
 
 
 # --- Primitives in a piece's frame -------------------------------------------------------------
+
+## A part of the furniture model at `xform` (station-local): drawn with every other one of its kind
+## nearby as one MultiMesh (see Models.Batch.add_instance()).
+static func _model(part: String, xform: Transform3D) -> void:
+	var mesh: Mesh = Models.asset(MODELS)[part]
+	if _batch:
+		_batch.add_instance(mesh, xform)
+	else:
+		Models.asset_mesh(_root, MODELS, part, {}, xform)
+
 
 static func _box(b: Models.Batch, x: Transform3D, p: Vector3, size: Vector3, mat: Material, rot := Vector3.ZERO) -> void:
 	b.box_at(x * Transform3D(Models.euler(rot), p), size, mat)
@@ -168,15 +201,9 @@ static func _screen(b: Models.Batch, x: Transform3D, p: Vector3, w: float, h: fl
 
 ## Heavy steel shelving with crates, canisters and boxes on it.
 static func _shelf(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary, rng: RandomNumberGenerator) -> void:
-	for sx: float in [-1.0, 1.0]:
-		for sz: float in [-1.0, 1.0]:
-			_box(b, x, Vector3(sx * (s.x * 0.5 - 0.04), s.y * 0.5, sz * (s.z * 0.5 - 0.04)), Vector3(0.07, s.y, 0.07), m["steel"])
-	for i in 4:
-		var y := 0.12 + i * (s.y - 0.2) / 3.0
-		_box(b, x, Vector3(0, y, 0), Vector3(s.x, 0.04, s.z), m["olive"])
-		_box(b, x, Vector3(0, y + 0.03, s.z * 0.5 - 0.03), Vector3(s.x, 0.06, 0.03), m["bronze"])
-		if i == 3:
-			continue
+	_model("Shelf", x * Transform3D(Basis.from_scale(s / Vector3(2.2, 2.4, 0.7)), Vector3.ZERO))
+	for i in 3:
+		var y := 0.135 + i * (s.y - 0.2) / 3.0
 		var at := -s.x * 0.5 + 0.15
 		while at < s.x * 0.5 - 0.3:
 			var w := rng.randf_range(0.3, 0.6)
@@ -185,32 +212,58 @@ static func _shelf(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary, r
 			var r := rng.randf()
 			if r < 0.45:
 				var bh := rng.randf_range(0.25, 0.5)
-				_box(b, x, Vector3(at + w * 0.5, y + 0.02 + bh * 0.5, rng.randf_range(-0.05, 0.05)), Vector3(w, bh, s.z * 0.8),
-					m["crate"] if rng.randf() < 0.6 else m["rust"], Vector3(0, rng.randf_range(-8, 8), 0))
+				_crate(b, x, Vector3(at + w * 0.5, y, rng.randf_range(-0.05, 0.05)), Vector3(w, bh, s.z * 0.8), m, rng.randf_range(-8, 8))
 			elif r < 0.7:
 				var ch := rng.randf_range(0.3, 0.55)
-				_cyl(b, x, Vector3(at + 0.15, y + 0.02 + ch * 0.5, 0.0), 0.13, ch, m["yellow"] if rng.randf() < 0.3 else m["steel"])
+				_cyl(b, x, Vector3(at + 0.15, y + ch * 0.5, 0.0), 0.13, ch, m["yellow"] if rng.randf() < 0.3 else m["steel"])
+				_cyl(b, x, Vector3(at + 0.15, y + ch + 0.02, 0.0), 0.06, 0.05, m["dark"])
 				w = 0.32
 			at += w + rng.randf_range(0.05, 0.3)
 
 
-## A bank of lockers, one of them hanging open.
+## A bank of lockers, sometimes one of them standing open: hollow, a shelf and a coat on its rail
+## inside, boots on its floor, its door swung out on its two hinges.
 static func _lockers(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary, rng: RandomNumberGenerator) -> void:
 	var n := 3
 	var w := s.x / n
 	var open := rng.randi() % (n + 2)
+	var depth := s.z - 0.04
+	var zc := -0.02
+	var front := zc + depth * 0.5
+	var t := 0.02
 	for i in n:
 		var cx := -s.x * 0.5 + w * (i + 0.5)
+		var bw := w - 0.03
 		var mat: Material = m["olive"] if rng.randf() < 0.75 else m["rust"]
-		_box(b, x, Vector3(cx, s.y * 0.5, -0.02), Vector3(w - 0.03, s.y, s.z - 0.04), mat)
-		if i == open:
-			_box(b, x, Vector3(cx, s.y * 0.5, s.z * 0.5 - 0.02), Vector3(w - 0.12, s.y - 0.12, 0.02), m["dark"])
-			_box(b, x, Vector3(cx + w * 0.5 + 0.1, s.y * 0.5, s.z * 0.5 + 0.2), Vector3(0.02, s.y - 0.1, w - 0.05), mat, Vector3(0, -70, 0))
-			_box(b, x, Vector3(cx, s.y * 0.62, s.z * 0.5 - 0.15), Vector3(w - 0.2, 0.02, 0.25), m["steel"])
-		else:
+		if i != open:
+			_box(b, x, Vector3(cx, s.y * 0.5, zc), Vector3(bw, s.y, depth), mat)
 			for v in 3:
-				_box(b, x, Vector3(cx, s.y - 0.25 - v * 0.06, s.z * 0.5 - 0.01), Vector3(w * 0.5, 0.025, 0.01), m["dark"])
-			_box(b, x, Vector3(cx + w * 0.3, s.y * 0.52, s.z * 0.5), Vector3(0.04, 0.2, 0.03), m["steel"])
+				_box(b, x, Vector3(cx, s.y - 0.25 - v * 0.06, front + 0.005), Vector3(w * 0.5, 0.025, 0.01), m["dark"])
+			_box(b, x, Vector3(cx + w * 0.3, s.y * 0.52, front + 0.015), Vector3(0.04, 0.2, 0.03), m["steel"])
+			continue
+		# The open locker's shell: back, sides, top and floor; dark inside.
+		_box(b, x, Vector3(cx, s.y * 0.5, zc - depth * 0.5 + t * 0.5), Vector3(bw, s.y, t), mat)
+		for sx: float in [-1.0, 1.0]:
+			_box(b, x, Vector3(cx + sx * (bw - t) * 0.5, s.y * 0.5, zc), Vector3(t, s.y, depth), mat)
+		_box(b, x, Vector3(cx, s.y - t * 0.5, zc), Vector3(bw, t, depth), mat)
+		_box(b, x, Vector3(cx, 0.05, zc), Vector3(bw, 0.1, depth), mat)
+		_box(b, x, Vector3(cx, s.y * 0.5, zc - depth * 0.5 + t + 0.004), Vector3(bw - t * 2.0, s.y - 0.14, 0.008), m["dark"])
+		# A shelf, the coat rail under it with a coat hanging from it, boots on the floor.
+		_box(b, x, Vector3(cx, s.y * 0.8, zc), Vector3(bw - t * 2.0, 0.02, depth - t), m["steel"])
+		_cyl(b, x, Vector3(cx, s.y * 0.74, zc), 0.01, bw - t * 2.0, m["steel"], Vector3(0, 0, 90), -1.0, 8)
+		_box(b, x, Vector3(cx, s.y * 0.735, zc), Vector3(0.12, 0.03, 0.02), m["dark"])
+		_box(b, x, Vector3(cx, s.y * 0.53, zc - 0.03), Vector3(bw * 0.62, s.y * 0.38, 0.14), m["cloth"], Vector3(rng.randf_range(-3, 3), 0, 0))
+		for k in 2:
+			_box(b, x, Vector3(cx - 0.07 + k * 0.14, 0.17, zc + 0.05), Vector3(0.1, 0.14, 0.22), m["rubber"])
+		# The door, swung out on its hinges at its right edge (it covers the front when shut).
+		var dw := bw - 0.01
+		var hinge := x * Transform3D(Basis(Vector3.UP, deg_to_rad(rng.randf_range(100.0, 125.0))), Vector3(cx + bw * 0.5, 0, front + 0.012))
+		_box(b, hinge, Vector3(-dw * 0.5, s.y * 0.5, 0), Vector3(dw, s.y - 0.04, t), mat)
+		for v in 3:
+			_box(b, hinge, Vector3(-dw * 0.5, s.y - 0.25 - v * 0.06, 0.013), Vector3(w * 0.5, 0.025, 0.006), m["dark"])
+		_box(b, hinge, Vector3(-dw * 0.8, s.y * 0.52, 0.02), Vector3(0.04, 0.2, 0.03), m["steel"])
+		for y: float in [s.y * 0.15, s.y * 0.85]:
+			_cyl(b, x, Vector3(cx + bw * 0.5, y, front + 0.012), 0.012, 0.09, m["steel"], Vector3.ZERO, -1.0, 8)
 	_box(b, x, Vector3(0, s.y + 0.02, -0.02), Vector3(s.x + 0.04, 0.04, s.z), m["steel"])
 
 
@@ -223,21 +276,50 @@ static func _crate_stack(b: Models.Batch, x: Transform3D, s: Vector3, m: Diction
 
 
 ## A crate: olive boards with bronze corners and a stencil band.
-static func _crate(b: Models.Batch, x: Transform3D, p: Vector3, size: Vector3, m: Dictionary, yaw: float) -> void:
-	var cx := x * Transform3D(Basis(Vector3.UP, deg_to_rad(yaw)), p)
-	_box(b, cx, Vector3(0, size.y * 0.5, 0), size, m["crate"])
-	for sx: float in [-1.0, 1.0]:
-		for sz: float in [-1.0, 1.0]:
-			_box(b, cx, Vector3(sx * size.x * 0.5, size.y * 0.5, sz * size.z * 0.5), Vector3(0.06, size.y + 0.01, 0.06), m["steel"])
-	_box(b, cx, Vector3(0, size.y * 0.55, size.z * 0.5 + 0.005), Vector3(size.x * 0.6, 0.08, 0.01), m["yellow"])
+static func _crate(_b: Models.Batch, x: Transform3D, p: Vector3, size: Vector3, _m: Dictionary, yaw: float) -> void:
+	_model("Crate", x * Transform3D(Basis(Vector3.UP, deg_to_rad(yaw)) * Basis.from_scale(size / CRATE_SIZE), p))
 
 
-## A low lab cabinet with glass doors and jars inside.
+## A low lab cabinet: a plinth with a drawer row, and above it two shelves of jars behind a pair of
+## framed glass doors (one left ajar).
 static func _cabinet(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary, rng: RandomNumberGenerator) -> void:
-	_box(b, x, Vector3(0, s.y * 0.5, -0.02), Vector3(s.x, s.y, s.z - 0.04), m["white"])
-	_box(b, x, Vector3(0, s.y * 0.55, s.z * 0.5 - 0.06), Vector3(s.x - 0.1, s.y * 0.7, 0.02), m["glass"])
-	for i in 5:
-		_cyl(b, x, Vector3(-s.x * 0.4 + i * s.x * 0.2, s.y * 0.45, 0.05), 0.06, 0.2, m["liquid"] if rng.randf() < 0.6 else m["glass"])
+	var t := 0.03
+	var depth := s.z - 0.04
+	var zc := -0.02
+	var front := zc + depth * 0.5
+	var base := 0.3
+	# The plinth with its drawers, then the case: back, sides and top round the shelves.
+	_box(b, x, Vector3(0, base * 0.5, zc), Vector3(s.x, base, depth), m["white"])
+	for i in 2:
+		_box(b, x, Vector3(-s.x * 0.25 + i * s.x * 0.5, base * 0.55, front + 0.005), Vector3(s.x * 0.46, base * 0.7, 0.012), m["mid"])
+		_box(b, x, Vector3(-s.x * 0.25 + i * s.x * 0.5, base * 0.7, front + 0.015), Vector3(0.12, 0.025, 0.02), m["steel"])
+	_box(b, x, Vector3(0, (base + s.y) * 0.5, zc - depth * 0.5 + t * 0.5), Vector3(s.x, s.y - base, t), m["white"])
+	for sx: float in [-1.0, 1.0]:
+		_box(b, x, Vector3(sx * (s.x - t) * 0.5, (base + s.y) * 0.5, zc), Vector3(t, s.y - base, depth), m["white"])
+	_box(b, x, Vector3(0, s.y - t * 0.5, zc), Vector3(s.x, t, depth), m["white"])
+	_box(b, x, Vector3(0, (base + s.y) * 0.5, zc - depth * 0.5 + t + 0.004), Vector3(s.x - t * 2.0, s.y - base - t, 0.006), m["dark"])
+	var inner := s.y - base - t
+	for k in 2:
+		var y := base + 0.02 + k * inner * 0.5
+		_box(b, x, Vector3(0, y, zc), Vector3(s.x - t * 2.0, 0.02, depth - t), m["steel"])
+		for i in 6:
+			if rng.randf() < 0.25:
+				continue
+			var jh := rng.randf_range(0.12, 0.24)
+			_cyl(b, x, Vector3(-s.x * 0.4 + i * s.x * 0.16, y + 0.01 + jh * 0.5, zc + rng.randf_range(-0.08, 0.08)), 0.05, jh,
+				m["liquid"] if rng.randf() < 0.6 else m["glass"])
+	# The doors: steel frames round their glass, hinged at the case's sides; the right one ajar.
+	var dw := (s.x - t * 2.0) * 0.5
+	for sx: float in [-1.0, 1.0]:
+		var swing := deg_to_rad(rng.randf_range(25.0, 70.0)) if sx > 0.0 else 0.0
+		var hinge := x * Transform3D(Basis(Vector3.UP, swing), Vector3(sx * (s.x * 0.5 - t), base, front + 0.012))
+		var cxl := -sx * dw * 0.5
+		var dh := s.y - base - t
+		_box(b, hinge, Vector3(cxl, dh * 0.5, 0), Vector3(dw - 0.05, dh - 0.05, 0.006), m["glass"])
+		for side: float in [-1.0, 1.0]:
+			_box(b, hinge, Vector3(cxl + side * (dw * 0.5 - 0.015), dh * 0.5, 0), Vector3(0.03, dh, 0.02), m["steel"])
+			_box(b, hinge, Vector3(cxl, dh * 0.5 + side * (dh * 0.5 - 0.015), 0), Vector3(dw, 0.03, 0.02), m["steel"])
+		_box(b, hinge, Vector3(-sx * (dw - 0.06), dh * 0.5, 0.02), Vector3(0.02, 0.1, 0.02), m["dark"])
 	_box(b, x, Vector3(0, s.y + 0.01, 0), Vector3(s.x + 0.04, 0.03, s.z), m["steel"])
 
 
@@ -247,7 +329,11 @@ static func _lab_bench(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionar
 	_box(b, x, Vector3(0, 0.93, 0), Vector3(s.x + 0.04, 0.06, s.z), m["steel"])
 	for i in 3:
 		_box(b, x, Vector3(-s.x * 0.33 + i * s.x * 0.33, 0.5, s.z * 0.5 - 0.05), Vector3(s.x * 0.3, 0.75, 0.02), m["olive"])
+	# The jar shelf over it, on brackets from a splashback up the wall behind the worktop.
+	_box(b, x, Vector3(0, 1.36, -s.z * 0.5 + 0.015), Vector3(s.x, 0.8, 0.03), m["white"])
 	_box(b, x, Vector3(0, 1.7, -s.z * 0.5 + 0.12), Vector3(s.x, 0.04, 0.24), m["steel"])
+	for sx: float in [-0.42, 0.0, 0.42]:
+		_box(b, x, Vector3(s.x * sx, 1.62, -s.z * 0.5 + 0.1), Vector3(0.03, 0.14, 0.18), m["steel"])
 	for i in 7:
 		if rng.randf() < 0.3:
 			continue
@@ -259,11 +345,14 @@ static func _lab_bench(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionar
 		_cyl(b, x, Vector3(rng.randf_range(-0.15, 0.15), 1.02, rng.randf_range(-0.2, 0.2)), 0.045, 0.14, m["liquid"] if rng.randf() < 0.5 else m["glass"])
 
 
+## A microscope: base, arm, stage on the arm, and the tube held out over the stage.
 static func _microscope(b: Models.Batch, x: Transform3D, p: Vector3, m: Dictionary) -> void:
 	_box(b, x, p + Vector3(0, 0.03, 0), Vector3(0.22, 0.06, 0.28), m["white"])
 	_box(b, x, p + Vector3(0, 0.2, -0.08), Vector3(0.06, 0.34, 0.06), m["white"])
-	_cyl(b, x, p + Vector3(0, 0.32, 0.0), 0.03, 0.22, m["dark"], Vector3(30, 0, 0))
-	_box(b, x, p + Vector3(0, 0.13, 0.02), Vector3(0.16, 0.02, 0.14), m["steel"])
+	_box(b, x, p + Vector3(0, 0.13, -0.01), Vector3(0.16, 0.02, 0.16), m["steel"])
+	_box(b, x, p + Vector3(0, 0.33, -0.05), Vector3(0.05, 0.05, 0.08), m["white"])
+	_cyl(b, x, p + Vector3(0, 0.3, 0.0), 0.028, 0.24, m["dark"], Vector3(-25, 0, 0))
+	_cyl(b, x, p + Vector3(0, 0.19, 0.03), 0.018, 0.06, m["steel"])
 
 
 ## A desk console: a cabinet with keys, a sloped panel and a green screen.
@@ -342,14 +431,13 @@ static func _gun_rack(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary
 
 
 ## Ammunition crates: green boxes with yellow bands.
-static func _ammo(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary, rng: RandomNumberGenerator) -> void:
+static func _ammo(_b: Models.Batch, x: Transform3D, s: Vector3, _m: Dictionary, rng: RandomNumberGenerator) -> void:
 	for i in 3:
 		var px := -s.x * 0.5 + 0.28 + i * 0.52
 		var h := rng.randf_range(0.25, 0.35)
 		for k in rng.randi_range(1, 2):
-			_box(b, x, Vector3(px, h * 0.5 + k * h, 0), Vector3(0.48, h - 0.01, s.z - 0.1), m["crate"], Vector3(0, rng.randf_range(-6, 6), 0))
-			_box(b, x, Vector3(px, h * 0.6 + k * h, s.z * 0.5 - 0.04), Vector3(0.5, 0.05, 0.01), m["yellow"])
-			_box(b, x, Vector3(px, h + k * h - 0.01, 0), Vector3(0.2, 0.03, 0.08), m["steel"])
+			var size := Vector3(0.48, h - 0.01, s.z - 0.1)
+			_model("AmmoBox", x * Transform3D(Basis(Vector3.UP, deg_to_rad(rng.randf_range(-6, 6))) * Basis.from_scale(size / AMMO_SIZE), Vector3(px, k * h, 0)))
 
 
 ## Two tall gas tanks plumbed into the wall, with gauges.
@@ -377,8 +465,11 @@ static func _breaker(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary,
 			_box(b, x, Vector3(-s.x * 0.36 + c * s.x * 0.18, 0.7 + r * 0.45, s.z * 0.5 + 0.02), Vector3(0.1, 0.18, 0.05),
 				m["red"] if rng.randf() < 0.06 else m["dark"])
 	_box(b, x, Vector3(0, s.y - 0.25, s.z * 0.5 + 0.005), Vector3(0.5, 0.18, 0.01), m["yellow"])
+	# Cables from its top up into the ceiling, in glands.
+	var rise := maxf(_ceiling - s.y, 0.1)
 	for i in 3:
-		_cyl(b, x, Vector3(-0.4 + i * 0.4, s.y + 1.0, -0.05), 0.04, 2.0, m["rubber"])
+		_cyl(b, x, Vector3(-0.4 + i * 0.4, s.y + rise * 0.5, -0.05), 0.04, rise + 0.1, m["rubber"])
+		_cyl(b, x, Vector3(-0.4 + i * 0.4, s.y + 0.03, -0.05), 0.065, 0.06, m["gunmetal"])
 
 
 ## A wall of monitors: some dead, some still glowing.
@@ -390,14 +481,31 @@ static func _monitor_wall(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictio
 			_screen(b, x, Vector3(-s.x * 0.33 + i * s.x * 0.33, 1.15 + r * 0.48, -s.z * 0.5 + 0.13), 0.62, 0.38, m, rng.randf() < 0.35)
 
 
+## Two filing cabinets of four drawers; now and then a drawer is left pulled out (its sides and
+## bottom run back into the cabinet, folders in it).
 static func _filing(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary, rng: RandomNumberGenerator) -> void:
 	for i in 2:
 		var cx := -s.x * 0.25 + i * s.x * 0.5
+		var dw := s.x * 0.42
 		_box(b, x, Vector3(cx, s.y * 0.5, -0.02), Vector3(s.x * 0.48, s.y, s.z - 0.04), m["steel"])
 		for d in 4:
 			var out := 0.25 if rng.randf() < 0.12 else 0.0
-			_box(b, x, Vector3(cx, 0.2 + d * 0.33, s.z * 0.5 - 0.02 + out), Vector3(s.x * 0.42, 0.28, 0.04), m["olive"])
-			_box(b, x, Vector3(cx, 0.28 + d * 0.33, s.z * 0.5 + out), Vector3(0.12, 0.03, 0.03), m["bronze"])
+			var y := 0.2 + d * 0.33
+			var face := s.z * 0.5 - 0.02 + out
+			if out > 0.0:
+				# The drawer's dark slot in the cabinet, and the drawer itself out of it.
+				_box(b, x, Vector3(cx, y, s.z * 0.5 - 0.035), Vector3(dw, 0.28, 0.01), m["black"])
+				var back := s.z * 0.5 - 0.3
+				var length := face - back
+				for sx: float in [-1.0, 1.0]:
+					_box(b, x, Vector3(cx + sx * (dw * 0.5 - 0.03), y - 0.02, back + length * 0.5), Vector3(0.012, 0.2, length), m["olive_dark"])
+				_box(b, x, Vector3(cx, y - 0.115, back + length * 0.5), Vector3(dw - 0.06, 0.012, length), m["olive_dark"])
+				_box(b, x, Vector3(cx, y - 0.02, back + 0.006), Vector3(dw - 0.06, 0.2, 0.012), m["olive_dark"])
+				for f in 5:
+					_box(b, x, Vector3(cx + rng.randf_range(-0.02, 0.02), y - 0.03, back + 0.04 + f * (length - 0.1) / 4.0),
+						Vector3(dw - 0.1, 0.17, 0.008), m["white"] if f % 2 == 0 else m["yellow"], Vector3(rng.randf_range(-8, 8), 0, 0))
+			_box(b, x, Vector3(cx, y, face), Vector3(dw, 0.28, 0.04), m["olive"])
+			_box(b, x, Vector3(cx, y + 0.08, face + 0.02), Vector3(0.12, 0.03, 0.03), m["bronze"])
 
 
 ## A heavy workbench with a vice and tools, a pegboard over it.
@@ -405,10 +513,30 @@ static func _workbench(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionar
 	_box(b, x, Vector3(0, 0.95, 0), Vector3(s.x, 0.08, s.z), m["steel"])
 	_legs(b, x, s.x, s.z, 0.92, m["olive"], 0.09)
 	_box(b, x, Vector3(0, 0.3, 0), Vector3(s.x - 0.2, 0.04, s.z - 0.2), m["olive"])
+	# The pegboard on two posts from the worktop, its tools hung on pegs.
 	_box(b, x, Vector3(0, 1.75, -s.z * 0.5 + 0.03), Vector3(s.x, 1.1, 0.04), m["olive"])
+	for sx: float in [-1.0, 1.0]:
+		_box(b, x, Vector3(sx * (s.x * 0.5 - 0.05), 1.6, -s.z * 0.5 + 0.03), Vector3(0.06, 1.3, 0.06), m["gunmetal"])
 	for i in 8:
-		_box(b, x, Vector3(-s.x * 0.42 + i * s.x * 0.12, 1.75 + rng.randf_range(-0.3, 0.3), -s.z * 0.5 + 0.08),
-			Vector3(0.05, rng.randf_range(0.15, 0.35), 0.04), m["steel"] if i % 2 == 0 else m["dark"], Vector3(0, 0, rng.randf_range(-20, 20)))
+		var tx := -s.x * 0.42 + i * s.x * 0.12
+		var ty := 1.95 + rng.randf_range(-0.25, 0.15)
+		var tz := -s.z * 0.5 + 0.075
+		var length := rng.randf_range(0.18, 0.34)
+		var mat: Material = m["steel"] if i % 2 == 0 else m["dark"]
+		_cyl(b, x, Vector3(tx, ty, tz - 0.02), 0.006, 0.06, m["steel"], Vector3(90, 0, 0), -1.0, 6)
+		if i % 3 == 0:
+			# A wrench: a shank and an open jaw at its top.
+			_box(b, x, Vector3(tx, ty - length * 0.5, tz), Vector3(0.025, length, 0.012), mat)
+			for jx: float in [-1.0, 1.0]:
+				_box(b, x, Vector3(tx + jx * 0.022, ty + 0.02, tz), Vector3(0.016, 0.05, 0.012), mat)
+		elif i % 3 == 1:
+			# A hammer: a handle and its head across the top.
+			_box(b, x, Vector3(tx, ty - length * 0.5, tz), Vector3(0.022, length, 0.022), m["wood"] if m.has("wood") else m["rust"])
+			_box(b, x, Vector3(tx, ty - 0.01, tz), Vector3(0.11, 0.035, 0.035), mat)
+		else:
+			# A screwdriver: a handle and a blade below it.
+			_cyl(b, x, Vector3(tx, ty - 0.045, tz), 0.014, 0.09, m["red_paint"], Vector3.ZERO, -1.0, 8)
+			_cyl(b, x, Vector3(tx, ty - 0.09 - length * 0.3, tz), 0.004, length * 0.6, m["steel"], Vector3.ZERO, -1.0, 6)
 	_box(b, x, Vector3(s.x * 0.35, 1.08, 0.1), Vector3(0.22, 0.18, 0.2), m["gunmetal"])
 	_box(b, x, Vector3(-s.x * 0.2, 1.05, 0.05), Vector3(0.45, 0.12, 0.25), m["red_paint"])
 
@@ -446,13 +574,20 @@ static func _barrels(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary,
 		_cyl(b, x, p + Vector3(0.1, 0.91, 0.05), 0.04, 0.03, m["dark"])
 
 
-## A bundle of pipes up the wall with valve wheels and brackets.
+## A bundle of pipes up the wall, from flanges on the floor up into the ceiling, with valve wheels
+## and brackets.
 static func _pipes(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary, rng: RandomNumberGenerator) -> void:
+	var h := maxf(_ceiling, s.y)
 	for i in 3:
 		var px := -s.x * 0.33 + i * s.x * 0.33
 		var r := rng.randf_range(0.06, 0.11)
 		var mat: Material = m["bronze"] if i % 2 == 0 else m["olive"]
-		_cyl(b, x, Vector3(px, s.y * 0.5, -s.z * 0.5 + 0.15), r, s.y, mat)
+		var pz := -s.z * 0.5 + 0.15
+		_cyl(b, x, Vector3(px, h * 0.5, pz), r, h + 0.1, mat)
+		_cyl(b, x, Vector3(px, 0.03, pz), r + 0.06, 0.06, m["gunmetal"])
+		_cyl(b, x, Vector3(px, h - 0.06, pz), r + 0.04, 0.12, m["gunmetal"])
+		for k in 2:
+			_cyl(b, x, Vector3(px, h * (0.33 + k * 0.33), pz), r + 0.025, 0.05, mat)
 		if rng.randf() < 0.6:
 			var y := rng.randf_range(0.9, 1.6)
 			_cyl(b, x, Vector3(px, y, -s.z * 0.5 + 0.15 + r + 0.05), r * 1.2, 0.08, m["steel"], Vector3(90, 0, 0))
@@ -461,6 +596,8 @@ static func _pipes(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary, r
 				_box(b, x, Vector3(px, y, -s.z * 0.5 + 0.15 + r + 0.18), Vector3(0.3, 0.025, 0.025), m["red_paint"], Vector3(0, 0, k * 45))
 	for y: float in [0.6, 2.0, 3.3]:
 		_box(b, x, Vector3(0, y, -s.z * 0.5 + 0.08), Vector3(s.x, 0.08, 0.16), m["steel"])
+		for i in 3:
+			_box(b, x, Vector3(-s.x * 0.33 + i * s.x * 0.33, y, -s.z * 0.5 + 0.2), Vector3(0.05, 0.05, 0.2), m["steel"])
 
 
 # --- Free-standing ------------------------------------------------------------------------------
@@ -478,9 +615,12 @@ static func _tube(root: Node3D, b: Models.Batch, x: Transform3D, s: Vector3, m: 
 	for i in 4:
 		var a := i * TAU / 4.0 + PI / 4.0
 		_box(b, x, Vector3(cos(a) * (r - 0.1), s.y * 0.5, sin(a) * (r - 0.1)), Vector3(0.06, s.y - 0.7, 0.06), m["bronze"])
+	# Cables from the cap up into the ceiling, where they go in through a plate.
+	var top := maxf(_ceiling, s.y + 0.3)
 	for i in 3:
 		var a := i * TAU / 3.0
-		_strut(b, x, Vector3(cos(a) * 0.25, s.y, sin(a) * 0.25), Vector3(cos(a) * 0.4, s.y + 1.6, sin(a) * 0.4), 0.04, m["rubber"])
+		_strut(b, x, Vector3(cos(a) * 0.25, s.y, sin(a) * 0.25), Vector3(cos(a) * 0.4, top + 0.05, sin(a) * 0.4), 0.04, m["rubber"])
+	_cyl(b, x, Vector3(0, top - 0.02, 0), 0.6, 0.04, m["gunmetal"], Vector3.ZERO, -1.0, 12)
 	_box(b, x, Vector3(0, 0.5, r - 0.02), Vector3(0.36, 0.22, 0.06), m["dark"])
 	_box(b, x, Vector3(0, 0.5, r + 0.012), Vector3(0.28, 0.14, 0.01), m["screen"] if state < 3 else m["dead_glass"])
 	var glass_h := s.y - 0.84
@@ -523,8 +663,8 @@ static func _tube(root: Node3D, b: Models.Batch, x: Transform3D, s: Vector3, m: 
 	(out["subjects"] as Array).append({"node": subject, "base": subject.transform, "phase": rng.randf() * TAU, "float": state < 3})
 	if state < 3 and v % 2 == 0:
 		var l := OmniLight3D.new()
-		l.light_color = Color(0.35, 1.0, 0.45)
-		l.light_energy = 0.55
+		l.light_color = Color(0.62, 0.75, 0.45)
+		l.light_energy = 0.35
 		l.omni_range = 3.6
 		l.position = x * Vector3(0, s.y * 0.55, 0)
 		root.add_child(l)
@@ -611,13 +751,23 @@ static func _pallet(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary, 
 	for sx: float in [-1.0, 1.0]:
 		_box(b, x, Vector3(sx * 0.6, 0.03, 0), Vector3(0.18, 0.06, s.z - 0.1), m["dark"])
 	var layers := rng.randi_range(1, 2)
+	# How many layers stand in each row of crates (along z): a strap goes over a row only as high
+	# as both its stacks reach.
+	var rows := [layers, layers]
 	for k in layers:
 		for i in 2:
 			for j in 2:
 				if k > 0 and rng.randf() < 0.35:
+					rows[j] = mini(int(rows[j]), k)
 					continue
 				_crate(b, x, Vector3(-0.47 + i * 0.94, 0.14 + k * 0.82, -0.47 + j * 0.94), Vector3(0.88, 0.8, 0.88), m, rng.randf_range(-4, 4))
-	_box(b, x, Vector3(0, 0.14 + layers * 0.82 - 0.4, 0), Vector3(s.x - 0.12, 0.05, s.z - 0.12), m["yellow"])
+	# A strap over each row and down to the pallet.
+	for j in 2:
+		var sz := -0.47 + j * 0.94
+		var top := 0.12 + int(rows[j]) * 0.82
+		_box(b, x, Vector3(0, top + 0.012, sz), Vector3(1.9, 0.02, 0.06), m["yellow"])
+		for sx: float in [-1.0, 1.0]:
+			_box(b, x, Vector3(sx * 0.95, (0.12 + top) * 0.5, sz), Vector3(0.02, top - 0.1, 0.06), m["yellow"])
 
 
 ## A small mess table with four stools.
@@ -629,7 +779,10 @@ static func _table(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary, r
 		var a := i * TAU / 4.0 + rng.randf_range(-0.3, 0.3)
 		var p := Vector3(cos(a), 0, sin(a)) * 0.9
 		if rng.randf() < 0.2:
-			_cyl(b, x, p + Vector3(0, 0.18, 0), 0.2, 0.06, m["olive"], Vector3(80, rad_to_deg(a), 0))
+			# Knocked over: on its side, its seat on edge and its post along the floor.
+			var lie := x * Transform3D(Basis(Vector3.UP, -a), p)
+			b.cyl_at(lie * Transform3D(Basis(Vector3.RIGHT, PI / 2.0), Vector3(0, 0.2, 0.0)), 0.2, 0.06, m["olive"], -1.0, 12)
+			b.cyl_at(lie * Transform3D(Basis(Vector3.RIGHT, PI / 2.0), Vector3(0, 0.2, 0.25)), 0.04, 0.44, m["dark"], -1.0, 12)
 			continue
 		_cyl(b, x, p + Vector3(0, 0.45, 0), 0.2, 0.06, m["olive"])
 		_cyl(b, x, p + Vector3(0, 0.22, 0), 0.04, 0.44, m["dark"])
@@ -660,84 +813,114 @@ static func _mess_table(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictiona
 			_cyl(b, x, Vector3(side * 0.1, 0.85, z + 0.15), 0.04, 0.1, m["white"])
 
 
-## The security desk: a bank of four screens (the camera feeds, set up by the Derelict), a keyboard
-## shelf, a microphone and two chairs.
-static func _security_desk(root: Node3D, b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary, rng: RandomNumberGenerator,
+## The control hub's desk (a rough first version, plain boxes): the control computer (HubConsole: a
+## green-screen terminal and its keyboard) on a desk; behind it a big board with the station's map
+## on it (the Derelict draws it: "hub_map"); up over the board, out of the way, a bridge of four
+## monitors for the camera feeds (set up by the Derelict), tilted down at the desk; a chair in front.
+## The piece faces its +z: the desk's side.
+static func _hub_desk(root: Node3D, b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary, rng: RandomNumberGenerator,
 		out: Dictionary) -> void:
-	_box(b, x, Vector3(0, 0.45, -0.25), Vector3(s.x, 0.9, s.z - 0.5), m["olive"])
-	_box(b, x, Vector3(0, 0.93, 0.0), Vector3(s.x + 0.06, 0.06, s.z), m["steel"])
-	_box(b, x, Vector3(0, 0.98, 0.35), Vector3(s.x * 0.6, 0.04, 0.3), m["dark"], Vector3(-6, 0, 0))
-	_box(b, x, Vector3(0, 1.35, -0.45), Vector3(s.x - 0.1, 0.8, 0.4), m["steel"])
-	_strut(b, x, Vector3(0.6, 0.96, 0.25), Vector3(0.6, 1.25, 0.4), 0.012, m["dark"])
-	_sph(b, x, Vector3(0.6, 1.27, 0.42), 0.03, m["dark"])
+	var half := s.z * 0.5
+	# The desk: a top on two pedestals of drawers, a panel at its back.
+	_box(b, x, Vector3(0, 0.9, half - 0.42), Vector3(s.x - 0.5, 0.06, 0.8), m["olive_dark"])
+	_box(b, x, Vector3(0, 0.935, half - 0.04), Vector3(s.x - 0.5, 0.012, 0.05), m["bronze"])
+	for sx: float in [-1.0, 1.0]:
+		_box(b, x, Vector3(sx * (s.x * 0.5 - 0.55), 0.44, half - 0.42), Vector3(0.5, 0.88, 0.76), m["olive"])
+		for k in 3:
+			_box(b, x, Vector3(sx * (s.x * 0.5 - 0.55), 0.2 + k * 0.24, half - 0.03), Vector3(0.42, 0.19, 0.02), m["mid"])
+			_box(b, x, Vector3(sx * (s.x * 0.5 - 0.55), 0.24 + k * 0.24, half - 0.015), Vector3(0.12, 0.025, 0.02), m["steel"])
+	_box(b, x, Vector3(0, 0.5, half - 0.8), Vector3(s.x - 1.5, 0.8, 0.04), m["olive"])
+	# The map board behind the desk: a heavy frame round the big screen, on two legs.
+	var board_z := -half + 0.12
+	_box(b, x, Vector3(0, 1.72, board_z), Vector3(s.x - 0.1, 1.84, 0.1), m["gunmetal"])
+	for y: float in [0.82, 2.62]:
+		_box(b, x, Vector3(0, y, board_z + 0.06), Vector3(s.x - 0.1, 0.08, 0.06), m["bronze"])
+	for sx: float in [-1.0, 1.0]:
+		_box(b, x, Vector3(sx * (s.x * 0.5 - 0.09), 1.72, board_z + 0.06), Vector3(0.08, 1.84, 0.06), m["bronze"])
+		_box(b, x, Vector3(sx * (s.x * 0.5 - 0.25), 0.4, board_z), Vector3(0.12, 0.8, 0.18), m["gunmetal"])
+	var map := MeshInstance3D.new()
+	var mq := QuadMesh.new()
+	mq.size = Vector2(s.x - 0.34, 1.62)
+	map.mesh = mq
+	map.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	map.transform = x * Transform3D(Basis.IDENTITY, Vector3(0, 1.72, board_z + 0.056))
+	map.set_meta("yaw", atan2(x.basis.z.x, x.basis.z.z))
+	root.add_child(map)
+	out["hub_map"] = map
+	# The monitor bridge over the board: two posts and a beam, four monitors tilted down at the desk.
+	for sx: float in [-1.0, 1.0]:
+		_box(b, x, Vector3(sx * (s.x * 0.5 - 0.3), 2.95, board_z), Vector3(0.08, 0.6, 0.08), m["gunmetal"])
+	_box(b, x, Vector3(0, 3.2, board_z), Vector3(s.x - 0.4, 0.1, 0.12), m["gunmetal"])
 	for i in 4:
-		var sx := -s.x * 0.375 + i * s.x * 0.25
-		var face := Vector3(sx, 1.38, -0.23)
-		_box(b, x, face + Vector3(0, 0, -0.04), Vector3(s.x * 0.23, 0.6, 0.1), m["dark"], Vector3(-6, 0, 0))
+		var sx := -s.x * 0.36 + i * s.x * 0.24
+		var mx := x * Transform3D(Models.euler(Vector3(18, 0, 0)), Vector3(sx, 2.9, board_z + 0.14))
+		b.box_at(mx * Transform3D(Basis.IDENTITY, Vector3(0, 0, -0.08)), Vector3(0.66, 0.5, 0.16), m["dark"])
 		var screen := MeshInstance3D.new()
 		var q := QuadMesh.new()
-		q.size = Vector2(s.x * 0.2, 0.46)
+		q.size = Vector2(0.58, 0.42)
 		screen.mesh = q
 		screen.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		screen.transform = x * Transform3D(Models.euler(Vector3(-6, 0, 0)), face + Vector3(0, 0, 0.015))
+		screen.transform = mx * Transform3D(Basis.IDENTITY, Vector3(0, 0, 0.002))
 		root.add_child(screen)
 		(out["screens"] as Array).append(screen)
-	for i in 2:
-		var cp := Vector3(-0.6 + i * 1.2, 0, 1.1 + rng.randf_range(-0.1, 0.2))
-		var cx := x * Transform3D(Basis(Vector3.UP, rng.randf_range(-0.5, 0.5)), cp)
-		_box(b, cx, Vector3(0, 0.5, 0), Vector3(0.5, 0.08, 0.5), m["olive"])
-		_box(b, cx, Vector3(0, 0.85, 0.24), Vector3(0.48, 0.6, 0.06), m["olive"], Vector3(-8, 0, 0))
-		_cyl(b, cx, Vector3(0, 0.25, 0), 0.04, 0.5, m["dark"])
-		_cyl(b, cx, Vector3(0, 0.03, 0), 0.28, 0.04, m["dark"])
+	# The control computer on the desk, and a chair in front of it.
+	var console := HubConsole.new()
+	console.transform = x * Transform3D(Basis.IDENTITY, Vector3(0, 0.93, half - 0.45))
+	root.add_child(console)
+	console.build(m)
+	out["hub_console"] = console
+	_model("Chair", x * Transform3D(Basis(Vector3.UP, rng.randf_range(-0.3, 0.3)), Vector3(0, 0, half + 0.45)))
 
 
 ## The gas generator: an engine block on a skid with its cylinders, a flywheel (turning when it
-## runs), a radiator, exhaust stacks up into the ceiling, fuel lines, a control box with gauges and
-## the pull starter. The Derelict turns the flywheel, shakes the engine and puffs the exhausts.
+## runs), a radiator, exhaust stacks up into the ceiling, a control box with gauges on a stand on the
+## skid, and the pull starter on the crankcase. The Derelict turns the flywheel, shakes the engine
+## and puffs the exhausts.
 static func _generator(root: Node3D, b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary, _rng: RandomNumberGenerator,
 		out: Dictionary) -> void:
+	# The engine, its skid and the flywheel are a model (tools/blender/outpost_generator.py).
 	var half := s.z * 0.5
-	_box(b, x, Vector3(0, 0.12, 0), Vector3(s.x, 0.24, s.z), m["steel"])
-	for sx: float in [-1.0, 1.0]:
-		_box(b, x, Vector3(sx * (s.x * 0.5 - 0.08), 0.18, 0), Vector3(0.16, 0.36, s.z + 0.1), m["yellow"])
+	Models.asset_mesh(root, "outpost_generator", "Skid", {}, x)
 	var engine := Node3D.new()
 	engine.transform = x
 	root.add_child(engine)
-	var eb := Models.Batch.new()
-	var ex := Transform3D.IDENTITY
-	_box(eb, ex, Vector3(0, 0.95, -0.4), Vector3(1.6, 1.3, 2.4), m["olive"])
-	_box(eb, ex, Vector3(0, 1.65, -0.4), Vector3(1.1, 0.14, 2.2), m["steel"])
-	for i in 4:
-		var cz := -1.35 + i * 0.62
-		for sx: float in [-1.0, 1.0]:
-			_cyl(eb, ex, Vector3(sx * 0.42, 1.95, cz), 0.2, 0.55, m["bronze"], Vector3(0, 0, sx * -25), -1.0, 10)
-			for f in 4:
-				_cyl(eb, ex, Vector3(sx * (0.42 + 0.03 * f), 1.85 + f * 0.08, cz), 0.24, 0.025, m["dark"], Vector3(0, 0, sx * -25), -1.0, 10)
-	_box(eb, ex, Vector3(0, 1.0, 1.35), Vector3(1.9, 1.7, 0.5), m["olive"])
-	for i in 9:
-		_box(eb, ex, Vector3(0, 0.4 + i * 0.15, 1.61), Vector3(1.6, 0.05, 0.03), m["dark"])
-	_box(eb, ex, Vector3(0, 1.2, -1.95), Vector3(0.9, 0.9, 0.4), m["steel"])
-	eb.commit(engine, "Engine")
+	Models.asset_mesh(engine, "outpost_generator", "Engine")
 	var wheel := Node3D.new()
 	wheel.position = Vector3(0, 1.1, -half + 0.25)
 	engine.add_child(wheel)
-	var wb := Models.Batch.new()
-	_cyl(wb, Transform3D.IDENTITY, Vector3.ZERO, 0.78, 0.18, m["gunmetal"], Vector3(90, 0, 0), -1.0, 20)
-	_cyl(wb, Transform3D.IDENTITY, Vector3.ZERO, 0.18, 0.3, m["bronze"], Vector3(90, 0, 0))
-	for i in 5:
-		var a := i * TAU / 5.0
-		_box(wb, Transform3D.IDENTITY, Vector3(cos(a), sin(a), 0) * 0.45, Vector3(0.12, 0.62, 0.12), m["steel"], Vector3(0, 0, rad_to_deg(a) + 90.0))
-	_box(wb, Transform3D.IDENTITY, Vector3(0.62, 0, 0.1), Vector3(0.2, 0.1, 0.04), m["yellow"])
-	wb.commit(wheel, "Flywheel")
+	Models.asset_mesh(wheel, "outpost_generator", "Flywheel")
+	# The exhaust stacks from the manifolds' flanges up through the ceiling, with a bellows each
+	# (the engine shakes; they don't).
 	for sx: float in [-1.0, 1.0]:
-		_cyl(b, x, Vector3(sx * 0.55, 2.4, 0.6), 0.14, 0.9, m["rust"])
-		_cyl(b, x, Vector3(sx * 0.55, 4.6, 0.6), 0.16, 3.6, m["steel"])
-		_cyl(b, x, Vector3(sx * 0.55, 2.9, 0.6), 0.2, 0.12, m["bronze"])
-	_strut(b, x, Vector3(0.9, 0.9, 1.2), Vector3(s.x * 0.5 + 0.6, 0.9, 1.6), 0.06, m["rubber"])
-	_strut(b, x, Vector3(-0.8, 0.6, -1.5), Vector3(-s.x * 0.5 - 0.7, 0.3, -1.9), 0.05, m["bronze"])
-	# The control box: gauges, a lamp, and the pull starter's handle on its side.
-	var ctrl := Vector3(s.x * 0.5 + 0.05, 1.05, -0.6)
+		_cyl(b, x, Vector3(sx * 0.85, 2.55, 0.6), 0.15, 0.22, m["rubber"], Vector3.ZERO, -1.0, 14)
+		for k in 3:
+			_cyl(b, x, Vector3(sx * 0.85, 2.47 + k * 0.08, 0.6), 0.165, 0.025, m["dark"], Vector3.ZERO, -1.0, 14)
+		_cyl(b, x, Vector3(sx * 0.85, 4.2, 0.6), 0.13, 3.1, m["steel"], Vector3.ZERO, -1.0, 12)
+		_cyl(b, x, Vector3(sx * 0.85, 2.7, 0.6), 0.16, 0.05, m["steel"], Vector3.ZERO, -1.0, 12)
+		_cyl(b, x, Vector3(sx * 0.85, 3.9, 0.6), 0.15, 0.04, m["bronze"], Vector3.ZERO, -1.0, 12)
+	# The control box with its gauges and lamp, on a stand bolted to the skid's rail (two legs on a
+	# foot plate), its cables running into the crankcase.
+	var ctrl := Vector3(1.1, 1.05, -0.6)
 	_box(b, x, ctrl, Vector3(0.12, 0.8, 0.9), m["steel"])
+	_box(b, x, Vector3(1.08, 0.215, -0.6), Vector3(0.2, 0.03, 0.8), m["gunmetal"])
+	for dz: float in [-0.32, 0.32]:
+		_box(b, x, Vector3(1.1, 0.44, -0.6 + dz), Vector3(0.06, 0.42, 0.06), m["gunmetal"])
+		for sz: float in [-0.06, 0.06]:
+			_cyl(b, x, Vector3(1.1 + sz * 0.9, 0.235, -0.6 + dz + sz), 0.012, 0.012, m["steel"], Vector3.ZERO, -1.0, 6)
+	_box(b, x, Vector3(1.1, 0.67, -0.6), Vector3(0.08, 0.04, 0.76), m["gunmetal"])
+	for i in 3:
+		_strut(b, x, Vector3(1.04, 0.82 + i * 0.07, -0.78 + i * 0.16), Vector3(0.6, 0.62 + i * 0.1, -0.62 + i * 0.12), 0.016, m["rubber"])
+		_cyl(b, x, Vector3(0.61, 0.62 + i * 0.1, -0.62 + i * 0.12), 0.03, 0.03, m["gunmetal"], Vector3(0, 0, 90), -1.0, 8)
+	# The pull starter: a recoil drum bolted to the crankcase's side, its cord out of the middle of
+	# the drum to the handle resting against it.
+	var drum := Vector3(0.69, 0.75, 0.3)
+	_cyl(b, x, Vector3(0.615, drum.y, drum.z), 0.18, 0.03, m["gunmetal"], Vector3(0, 0, 90), -1.0, 18)
+	for k in 6:
+		var a := TAU * k / 6.0
+		_cyl(b, x, Vector3(0.635, drum.y + sin(a) * 0.155, drum.z + cos(a) * 0.155), 0.012, 0.014, m["steel"], Vector3(0, 0, 90), -1.0, 6)
+	_cyl(b, x, drum, 0.15, 0.14, m["olive_dark"], Vector3(0, 0, 90), -1.0, 20)
+	_cyl(b, x, drum + Vector3(0.075, 0, 0), 0.12, 0.012, m["steel"], Vector3(0, 0, 90), -1.0, 20)
+	_cyl(b, x, drum + Vector3(0.088, 0, 0), 0.032, 0.02, m["dark"], Vector3(0, 0, 90), -1.0, 10)
 	for i in 2:
 		_cyl(b, x, ctrl + Vector3(0.07, 0.15, -0.2 + i * 0.4), 0.11, 0.03, m["white"], Vector3(0, 0, 90))
 		_box(b, x, ctrl + Vector3(0.085, 0.17, -0.2 + i * 0.4), Vector3(0.005, 0.12, 0.012), m["dark"], Vector3(30 - i * 50, 0, 0))
@@ -750,8 +933,9 @@ static func _generator(root: Node3D, b: Models.Batch, x: Transform3D, s: Vector3
 	lamp.material_override = m["red"]
 	lamp.transform = x * Transform3D(Basis.IDENTITY, ctrl + Vector3(0.08, 0.32, 0.3))
 	root.add_child(lamp)
+	# (The handle's stem rests against the drum's cord guide; pulled, the cord runs out of the drum.)
 	var handle := Node3D.new()
-	handle.transform = x * Transform3D(Basis.IDENTITY, Vector3(s.x * 0.5 + 0.2, 0.95, 0.35))
+	handle.transform = x * Transform3D(Basis.IDENTITY, Vector3(0.92, drum.y, drum.z))
 	root.add_child(handle)
 	Models.cylinder(handle, Vector3(0, 0, 0), 0.025, 0.24, m["dark"], Vector3(0, 0, 90))
 	Models.box(handle, Vector3(0.12, 0, 0), Vector3(0.05, 0.05, 0.22), m["red_paint"])
@@ -763,25 +947,19 @@ static func _generator(root: Node3D, b: Models.Batch, x: Transform3D, s: Vector3
 	area.set_meta("generator", true)
 	var cs := CollisionShape3D.new()
 	var shape := BoxShape3D.new()
-	shape.size = Vector3(0.6, 1.0, 1.5)
+	shape.size = Vector3(0.6, 0.9, 0.9)
 	cs.shape = shape
 	area.add_child(cs)
-	area.transform = x * Transform3D(Basis.IDENTITY, Vector3(s.x * 0.5 + 0.2, 1.0, 0.0))
+	area.transform = x * Transform3D(Basis.IDENTITY, Vector3(1.05, 0.8, drum.z))
 	root.add_child(area)
 	out["generator"] = {"engine": engine, "rest": engine.transform, "wheel": wheel, "handle": handle, "handle_rest": handle.transform,
-		"cord": cord, "lamp": lamp, "exhausts": [x * Vector3(0.55, 3.0, 0.6), x * Vector3(-0.55, 3.0, 0.6)],
+		"cord": cord, "lamp": lamp, "exhausts": [x * Vector3(0.85, 3.0, 0.6), x * Vector3(-0.85, 3.0, 0.6)],
 		"pos": x * Vector3(0, 1.3, 0), "outward": x.basis * Vector3(1, 0, 0)}
 
 
 ## A bench with a rifle in pieces on it and toolboxes.
-static func _weapon_bench(b: Models.Batch, x: Transform3D, s: Vector3, m: Dictionary, rng: RandomNumberGenerator) -> void:
-	_box(b, x, Vector3(0, 0.92, 0), Vector3(s.x, 0.08, s.z), m["steel"])
-	_legs(b, x, s.x, s.z, 0.88, m["olive"], 0.08)
-	_box(b, x, Vector3(-0.3, 0.99, 0.0), Vector3(0.9, 0.08, 0.14), m["gunmetal"], Vector3(0, rng.randf_range(-15, 15), 0))
-	_cyl(b, x, Vector3(0.4, 0.99, 0.1), 0.025, 0.6, m["dark"], Vector3(0, 0, 90))
-	_box(b, x, Vector3(0.2, 0.99, -0.3), Vector3(0.12, 0.06, 0.25), m["dark"])
-	_box(b, x, Vector3(0.75, 1.06, -0.3), Vector3(0.45, 0.22, 0.25), m["red_paint"])
-	_box(b, x, Vector3(-0.8, 1.02, 0.35), Vector3(0.3, 0.12, 0.2), m["crate"])
+static func _weapon_bench(_b: Models.Batch, x: Transform3D, _s: Vector3, _m: Dictionary, _rng: RandomNumberGenerator) -> void:
+	_model("WeaponBench", x)
 
 
 ## A surgery table under a lamp arm, with a monitor cart.

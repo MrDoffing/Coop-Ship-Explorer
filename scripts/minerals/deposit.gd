@@ -25,6 +25,8 @@ var _chunks_out := 0
 var _cluster: Node3D
 var _mat: StandardMaterial3D
 var _last_hp := -1.0
+## The health the deposit's look was last set for (NAN: not yet).
+var _shown_hp := NAN
 var _flash := 0.0
 
 
@@ -106,9 +108,14 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
-	if hp < _last_hp - 0.01:
+	var hit := hp < _last_hp - 0.01
+	if hit:
 		_flash = 1.0
 	_last_hp = hp
+	# (Only while something changes: hundreds of deposits sit untouched in the cave.)
+	if not hit and _flash <= 0.0 and _shown_hp == hp:
+		return
+	_shown_hp = hp
 	_flash = maxf(0.0, _flash - delta * 4.0)
 	var f := clampf(hp / max_hp, 0.0, 1.0)
 	_cluster.scale = Vector3.ONE * lerpf(0.45, 1.0, f)

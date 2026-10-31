@@ -53,6 +53,10 @@ const VIS_GLASS := 8
 ## interiors don't carry them, so a decal on the hull never paints whoever stands by it.
 const VIS_HULL := 16
 const VIS_ROCK := 32
+## Render layer bit of an abandoned station's walls, floors, ceilings and doors: the only things
+## crewmates' flashlights cast shadows from (enough to keep their light from going through walls;
+## the local player's own flashlight casts them from everything).
+const VIS_SHELL := 64
 
 const PLAYER_COLORS: Array[Color] = [
 	Color(0.25, 0.65, 1.0), Color(1.0, 0.55, 0.2), Color(0.4, 0.95, 0.45), Color(0.95, 0.4, 0.85),

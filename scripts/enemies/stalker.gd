@@ -222,7 +222,7 @@ func _hide_spot(ship: Mothership, graph: AStar3D) -> Vector3:
 	return best
 
 
-func _hurt(_amount: float, shooter: CrewMember) -> void:
+func _hurt(_amount: float, shooter: Node3D) -> void:
 	if hp < max_hp * FLEE_AT and _state != FLEE and _state != RECOVER:
 		var ship := _ship()
 		_enter(FLEE)

@@ -390,19 +390,19 @@ func _update_ship(ship: Mothership, mission: MissionLevel) -> void:
 	_set_bar("hull", ship.hull / ship.max_hull, _pct(ship.hull, ship.max_hull), "%d / %d" % [int(ship.hull), int(ship.max_hull)])
 	if ship.shield_down:
 		_set_bar("shield", 0.0, "DOWN", "reboot %d s" % int(ceil(ship.shield_reboot)) if ship.fuel > 0.0 else "NO FUEL")
-		(_texts["shield"] as Label).add_theme_color_override("font_color", UiTheme.DANGER)
+		_font_color((_texts["shield"] as Label), UiTheme.DANGER)
 	else:
 		_set_bar("shield", ship.shield / ship.max_shield, _pct(ship.shield, ship.max_shield), "%d / %d" % [int(ship.shield), int(ship.max_shield)])
-		(_texts["shield"] as Label).add_theme_color_override("font_color", UiTheme.TEXT)
+		_font_color((_texts["shield"] as Label), UiTheme.TEXT)
 	_set_bar("fuel", ship.fuel / ship.max_fuel, _pct(ship.fuel, ship.max_fuel), "%d / %d" % [int(ship.fuel), int(ship.max_fuel)])
-	(_texts["fuel"] as Label).add_theme_color_override("font_color", UiTheme.DANGER if ship.fuel < ship.max_fuel * 0.2 else UiTheme.TEXT)
+	_font_color((_texts["fuel"] as Label), UiTheme.DANGER if ship.fuel < ship.max_fuel * 0.2 else UiTheme.TEXT)
 	if ship.blast_cd <= 0.0:
 		_set_bar("blast", 1.0, "READY", "READY")
-		(_texts["blast"] as Label).add_theme_color_override("font_color", UiTheme.GOOD)
+		_font_color((_texts["blast"] as Label), UiTheme.GOOD)
 	else:
 		var charged := 1.0 - ship.blast_cd / Mothership.BLAST_COOLDOWN
 		_set_bar("blast", charged, "%d%%" % int(charged * 100.0), "%d s" % int(ceil(ship.blast_cd)))
-		(_texts["blast"] as Label).add_theme_color_override("font_color", UiTheme.MUTED)
+		_font_color((_texts["blast"] as Label), UiTheme.MUTED)
 	for sys: String in ["engine", "weapons"]:
 		var hpv := ship.system_hp(sys)
 		var online := ship.system_online(sys)
@@ -410,17 +410,17 @@ func _update_ship(ship: Mothership, mission: MissionLevel) -> void:
 		var col := UiTheme.TEXT if online else UiTheme.DANGER
 		if online and hpv < 50.0:
 			col = UiTheme.WARN
-		(_texts[sys] as Label).add_theme_color_override("font_color", col)
+		_font_color((_texts[sys] as Label), col)
 	match ship.landing:
 		Mothership.Dock.APPROACH:
 			_dock_status.text = "DOCKING - approach on autopilot"
 		Mothership.Dock.LANDED:
 			if ship.derelict_k >= 0:
 				_dock_status.text = "LANDED - abandoned station, no defences"
-				_dock_status.add_theme_color_override("font_color", UiTheme.WARN)
+				_font_color(_dock_status, UiTheme.WARN)
 			else:
 				_dock_status.text = "DOCKED - safe, refuelling, recharging shield"
-				_dock_status.add_theme_color_override("font_color", UiTheme.GOOD)
+				_font_color(_dock_status, UiTheme.GOOD)
 		Mothership.Dock.LIFTOFF:
 			_dock_status.text = "LIFTING OFF"
 	_dock_status.visible = ship.landing != Mothership.Dock.FLYING
@@ -432,7 +432,7 @@ func _update_ship(ship: Mothership, mission: MissionLevel) -> void:
 		_hostility_label.text = "SAFE HAVEN"
 	elif _hostility_hold and ship.derelict_k >= 0:
 		_hostility_label.text += " (holding)"
-	_hostility_label.add_theme_color_override("font_color", HOSTILITY_COLORS[stage])
+	_font_color(_hostility_label, HOSTILITY_COLORS[stage])
 	# Surging: the label flashes.
 	_hostility_label.modulate.a = (0.55 + 0.45 * sin(Time.get_ticks_msec() * 0.012)) if stage == 4 and not _hostility_hold else 1.0
 	_hostility.queue_redraw()
@@ -447,6 +447,14 @@ func _set_bar(id: String, value: float, inside: String, beside: String) -> void:
 	b.value = clampf(value, 0.0, 1.0)
 	(b.get_node("Pct") as Label).text = inside
 	(_texts[id] as Label).text = beside
+
+
+## Set a label's text colour, only when it changes (every override sent makes the label lay its
+## text out anew).
+static func _font_color(l: Control, col: Color) -> void:
+	if l.has_theme_color_override("font_color") and l.get_theme_color("font_color") == col:
+		return
+	l.add_theme_color_override("font_color", col)
 
 
 static func _pct(value: float, max_value: float) -> String:
@@ -486,7 +494,7 @@ func _update_crew(ship: Mothership) -> void:
 	if ship.hostiles > 0 and ship.derelict_k >= 0:
 		lines.append("HOSTILES IN THE STATION: %d" % ship.hostiles)
 	_crew.text = "\n".join(lines)
-	_crew.add_theme_color_override("font_color", UiTheme.DANGER if danger else UiTheme.TEXT)
+	_font_color(_crew, UiTheme.DANGER if danger else UiTheme.TEXT)
 
 
 func _update_player(player: CrewMember, ship: Mothership, _delta: float) -> void:
@@ -554,7 +562,7 @@ func _update_tool_label(player: CrewMember) -> void:
 			_tool_label.text = "%s  %d / %d  [1]" % [w, player.ammo, full]
 			if player.ammo <= maxi(1, int(full * 0.25)):
 				col = UiTheme.WARN
-	_tool_label.add_theme_color_override("font_color", col)
+	_font_color(_tool_label, col)
 
 
 func _update_station(player: CrewMember, ship: Mothership, _mission: MissionLevel) -> void:
@@ -675,6 +683,9 @@ func _crew_report(ship: Mothership, mission: MissionLevel) -> String:
 	lines.append("Research so far: %d RP (depth %d, waystations %d, nests %d)" % [rp["total"], rp["depth"], rp["stations"], rp["nests"]])
 	var guns := PackedStringArray()
 	for g: String in ship.gun_stations():
+		if ship.gun_weapon(g) == "mrls":
+			guns.append("%s: rocket launchers, %d of %d rockets" % [ship.station_name(g), ship.gun_ammo_of(g), GunPod.MRLS_TUBES])
+			continue
 		guns.append("%s: %s, heat %d%%" % [ship.station_name(g), "new belt loading" if ship.gun_reloading(g) else "%d rounds" % ship.gun_ammo_of(g),
 			int(ship.gun_heat_of(g) * 100.0)])
 	lines.append(", ".join(guns))

@@ -94,7 +94,7 @@ func _think_outside(delta: float, ship: Mothership) -> void:
 			_idle(delta, TERRITORY * 0.5)
 		_separate(delta)
 		return
-	var chest := victim.position + Vector3(0, 1.1, 0)
+	var chest := victim.position + Vector3(0, aim_height(victim) - 0.05, 0)
 	var d := _surf_pos.distance_to(chest)
 	if mode == CRAWL and _leap_cd <= 0.0 and d < LEAP_RANGE and d > LEAP_MIN \
 			and _clear_from(ship, ship.to_global(_surf_pos), ship.to_global(chest)):
@@ -114,9 +114,9 @@ func _think_outside(delta: float, ship: Mothership) -> void:
 	_separate(delta)
 
 
-## Spring off the surface at a chest: an arc from the body over the chest (a little above it) down to
-## the floor beyond.
-func _start_leap(ship: Mothership, victim: CrewMember, chest: Vector3) -> void:
+## Spring off the surface at a chest (or a sentry turret's gun): an arc from the body over it (a
+## little above it) down to the floor beyond.
+func _start_leap(ship: Mothership, victim: Node3D, chest: Vector3) -> void:
 	mode = LEAP
 	attacking = true
 	_leap_a = _surf_pos
@@ -148,11 +148,12 @@ func _fly(delta: float, ship: Mothership) -> void:
 	if dir.length_squared() > 0.000001:
 		basis = Basis.looking_at(dir.normalized(), Vector3.UP if absf(dir.normalized().y) < 0.95 else Vector3.FORWARD)
 	if not _leap_hit:
-		var victim := instance_from_id(_leap_victim) as CrewMember
-		if victim and is_instance_valid(victim) and victim.alive and victim.position.distance_to(p - Vector3(0, 1.1, 0)) < LEAP_HIT + 0.4 \
-				and (victim.position + Vector3(0, 1.1, 0)).distance_to(p) < LEAP_HIT:
-			_leap_hit = true
-			_claw(ship, victim)
+		var victim := instance_from_id(_leap_victim) as Node3D
+		if target_ok(ship, victim):
+			var up := Vector3(0, aim_height(victim) - 0.05, 0)
+			if victim.position.distance_to(p - up) < LEAP_HIT + 0.4 and (victim.position + up).distance_to(p) < LEAP_HIT:
+				_leap_hit = true
+				_claw(ship, victim)
 	if k >= 1.0:
 		mode = LANDED
 		attacking = false
@@ -168,7 +169,7 @@ func _fly(delta: float, ship: Mothership) -> void:
 
 
 ## Shot at: the pack round the nest turns on the crew (out to HUNT_RADIUS) for a while.
-func _hurt(_amount: float, shooter: CrewMember) -> void:
+func _hurt(_amount: float, shooter: Node3D) -> void:
 	_anger(shooter)
 	for c in get_parent().get_children():
 		var mate := c as Crawler
@@ -176,7 +177,7 @@ func _hurt(_amount: float, shooter: CrewMember) -> void:
 			mate._anger(shooter)
 
 
-func _anger(shooter: CrewMember) -> void:
+func _anger(shooter: Node3D) -> void:
 	_angry = ANGRY_TIME
 	if shooter and _target_id == 0:
 		_target_id = shooter.get_instance_id()

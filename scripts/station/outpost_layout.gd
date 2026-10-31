@@ -14,21 +14,23 @@ extends RefCounted
 ## by the cheapest path from one of its walls: going straight is cheaper than turning and running
 ## alongside another corridor is dear, so corridors bend round the rooms and branch off each other
 ## (T-junctions); a few extra links make loops. Rooms with a single doorway can be sealed: by a door
-## that needs the generator's power, or by a door locked behind a keypad (the vault, the room
-## furthest in, always is when it can be).
+## that needs the generator's power, by a door locked behind a keypad (the vault, the room furthest
+## in, always is when it can be), or by a door locked from the control hub (only with a hub).
 ##
 ## Layout: {"rooms", "doors", "kind" (per cell: ROCK, ROOM or HALL), "owner" (per cell: room index
 ## or -1), "links" (corridor edges that are open: edge_key -> true), "door_at" (edge_key -> door
-## index), "vault", "generator" (room index or -1), "security" (room index or -1), "carve_min",
-## "carve_max", "name"}.
+## index), "vault", "generator" (room index or -1), "hub" (the control hub, room index or -1),
+## "carve_min", "carve_max", "name"}.
 ## Room: {"name", "theme", "cells", "core" (the main rectangle, cells), "inner" (its middle, where
 ## furniture stands free of the walls, cells; may be empty), "c" and "size" (the core in metres,
 ## x/z), "h" (ceiling height above the deck), "doors" (door indices), "seal" ("", "power",
 ## "hack"), "dist" (cells from the front door), "props", "spots" (free floor by the walls for
 ## salvage: {pos, yaw}), "cams" (security cameras watching it: {pos, look})}.
 ## Door: {"room" (-1: the front door), "cell" (the room side; the entry corridor for the front
-## door), "out" (the corridor side), "kind" ("front", "open", "power", "hack"), "pos" (the floor in
-## the middle of the doorway), "normal" (from the room out into the corridor)}, and for a keypad
+## door), "out" (the corridor side), "kind" ("front", "open", "power", "hack", "hub"), "pos" (the
+## floor in the middle of the doorway), "normal" (from the room out into the corridor), "id" (with a
+## control hub: its name on the hub's map and over the doorway, "D23"; "" for the front door)}, and
+## for a keypad
 ## lock "digits" (the digit at each cord's left end), "colors" (the colour id at each cord
 ## terminal on the right), "wires" (the right terminal each left one is wired to), "lights" (the
 ## colour ids lit on the keypad, in order) and "code".
@@ -59,18 +61,22 @@ const BESIDE := 34
 ## Chance of an extra corridor from a room (making loops), and its longest (cells).
 const LOOP_CHANCE := 0.35
 const LOOP_MAX := 8
-## Chances that an outpost has a generator room (whose power some sealed doors need), a security
-## room and an armory, and that another dead-end room is locked behind a keypad.
+## Chances that an outpost has a generator room (whose power some sealed doors need), a control hub
+## and an armory, and that another dead-end room is locked behind a keypad.
 const GENERATOR_CHANCE := 0.65
-const SECURITY_CHANCE := 0.55
+const HUB_CHANCE := 0.6
 const ARMORY_CHANCE := 0.6
 const EXTRA_LOCK_CHANCE := 0.25
 ## At most this many rooms behind keypad locks (the vault and one more).
 const MAX_LOCKS := 2
+## With a control hub: one dead end locked from it (two with HUB_SECOND_CHANCE), and every door's id
+## a number from DOOR_IDS (no two alike).
+const HUB_SECOND_CHANCE := 0.4
+const DOOR_IDS := Vector2i(10, 60)
 ## Keypad locks: six cords run tangled from six digits on the left to six colours on the right, and
 ## the keypad lights HACK_DIGITS of those colours in a row: the code is their digits, in order.
-const HACK_COLORS: Array[Color] = [Color(1.0, 0.1, 0.06), Color(1.0, 0.8, 0.08), Color(0.12, 0.95, 0.2),
-	Color(0.12, 0.38, 1.0), Color(0.95, 0.95, 0.92), Color(1.0, 0.18, 0.88)]
+const HACK_COLORS: Array[Color] = [Color(0.88, 0.12, 0.06), Color(0.95, 0.68, 0.12), Color(0.25, 0.75, 0.2),
+	Color(0.2, 0.4, 0.85), Color(0.92, 0.88, 0.78), Color(0.75, 0.25, 0.65)]
 const HACK_COLOR_NAMES := ["RED", "YELLOW", "GREEN", "BLUE", "WHITE", "MAGENTA"]
 const HACK_CORDS := 6
 const HACK_DIGITS := 4
@@ -86,7 +92,7 @@ const THEMES := {
 	"storage": ["STORAGE", "CARGO HOLD", "SUPPLY ROOM"],
 	"quarters": ["CREW QUARTERS", "BUNK ROOM", "DORMITORY"],
 	"mess": ["MESS HALL", "CANTEEN"],
-	"security": ["SECURITY"],
+	"hub": ["CONTROL HUB"],
 	"generator": ["GENERATOR"],
 	"armory": ["ARMORY"],
 	"vault": ["SECURE STORAGE"],
@@ -106,7 +112,7 @@ const PROPS := {
 	"workbench": Vector3(2.4, 1.0, 0.9), "med_cabinet": Vector3(1.4, 2.0, 0.5), "strongbox": Vector3(1.4, 1.0, 0.85),
 	"barrels": Vector3(1.6, 1.0, 0.9), "pipes": Vector3(1.0, 4.0, 0.45),
 	"tube": Vector3(1.3, 2.9, 1.3), "lab_table": Vector3(2.4, 1.0, 1.15), "pallet": Vector3(2.1, 1.8, 2.1),
-	"table": Vector3(2.3, 0.8, 2.3), "security_desk": Vector3(3.2, 1.5, 1.5), "generator": Vector3(2.4, 2.6, 4.8),
+	"table": Vector3(2.3, 0.8, 2.3), "hub_desk": Vector3(3.0, 3.2, 1.7), "generator": Vector3(2.4, 2.6, 4.8),
 	"weapon_bench": Vector3(2.3, 1.0, 1.2), "surgery": Vector3(2.3, 1.3, 1.2), "lathe": Vector3(2.4, 1.6, 1.4),
 }
 ## What stands along the walls in each kind of room ([kind, weight]), and the share of wall stretches
@@ -117,7 +123,7 @@ const WALL_PROPS := {
 	"vault": [["strongbox", 3], ["locker", 2], ["shelf", 2]],
 	"quarters": [["bed", 5], ["locker", 2]],
 	"mess": [["counter", 2], ["vending", 2], ["barrels", 1]],
-	"security": [["monitor_wall", 2], ["locker", 2], ["filing", 2], ["console", 1]],
+	"hub": [["filing", 2], ["locker", 2], ["console", 2], ["breaker", 1]],
 	"generator": [["fuel_tanks", 3], ["breaker", 2], ["pipes", 2], ["barrels", 1]],
 	"armory": [["gun_rack", 4], ["ammo", 2], ["locker", 1]],
 	"medbay": [["med_cabinet", 3], ["bed", 2], ["console", 1]],
@@ -230,6 +236,7 @@ static func generate(rng: RandomNumberGenerator) -> Dictionary:
 	_assign(out, rng)
 	for di in doors.size():
 		_finish_door(doors[di], rng)
+	_door_ids(out, rng.seed)
 	for ri in rooms.size():
 		_furnish(out, ri, rng)
 	_cameras(out, rng)
@@ -544,7 +551,8 @@ static func _reown(rooms: Array, owner: PackedInt32Array, doors: Array) -> void:
 # --- What each room is -------------------------------------------------------------------------
 
 ## Themes and seals: the vault (the dead end furthest in, behind a keypad), a generator room with a
-## dead end or two that need its power, an armory, a security room and the rest.
+## dead end or two that need its power, an armory, a control hub (with a dead end or two locked from
+## it) and the rest.
 static func _assign(layout: Dictionary, rng: RandomNumberGenerator) -> void:
 	var rooms: Array = layout["rooms"]
 	var doors: Array = layout["doors"]
@@ -565,7 +573,7 @@ static func _assign(layout: Dictionary, rng: RandomNumberGenerator) -> void:
 	free.erase(vault)
 	layout["vault"] = vault
 	layout["generator"] = -1
-	layout["security"] = -1
+	layout["hub"] = -1
 	if rng.randf() < GENERATOR_CHANCE:
 		var picks: Array = []
 		for ri: int in free:
@@ -594,17 +602,36 @@ static func _assign(layout: Dictionary, rng: RandomNumberGenerator) -> void:
 		free.erase(armory)
 		if str(rooms[armory]["seal"]) == "" and leaves.has(armory) and rng.randf() < 0.4 and _seals(rooms, "hack") < MAX_LOCKS:
 			rooms[armory]["seal"] = "hack"
-	if rng.randf() < SECURITY_CHANCE and not free.is_empty():
-		var sec: int = free[0]
+	if rng.randf() < HUB_CHANCE and not free.is_empty():
+		# The control hub: a room no door seals, with floor in its middle for the desk, near the front.
+		var hub: int = free[0]
+		var best := INF
 		for ri: int in free:
-			if str(rooms[ri]["seal"]) == "" and (str(rooms[sec]["seal"]) != "" or int(rooms[ri]["dist"]) < int(rooms[sec]["dist"])):
-				sec = ri
-		rooms[sec]["theme"] = "security"
-		free.erase(sec)
-		layout["security"] = sec
+			var score := float(rooms[ri]["dist"]) + (1000.0 if str(rooms[ri]["seal"]) != "" else 0.0) \
+				+ (100.0 if _inner(rooms[ri]).get_area() == 0 else 0.0)
+			if score < best:
+				best = score
+				hub = ri
+		rooms[hub]["theme"] = "hub"
+		free.erase(hub)
+		leaves.erase(hub)
+		layout["hub"] = hub
 	for ri: int in leaves:
 		if str(rooms[ri]["seal"]) == "" and _seals(rooms, "hack") < MAX_LOCKS and rng.randf() < EXTRA_LOCK_CHANCE:
 			rooms[ri]["seal"] = "hack"
+	if int(layout["hub"]) >= 0:
+		# A dead end or two locked from the control hub (rolled apart, so the rest of the plan is as it
+		# was without them).
+		var hrng := RandomNumberGenerator.new()
+		hrng.seed = hash([rng.seed, "hub"])
+		var want := 1 + (1 if hrng.randf() < HUB_SECOND_CHANCE else 0)
+		# (The furthest in first.)
+		var far := leaves.duplicate()
+		far.sort_custom(func(a, e): return int(rooms[a]["dist"]) > int(rooms[e]["dist"]))
+		for ri: int in far:
+			if want > 0 and str(rooms[ri]["seal"]) == "" and str(rooms[ri]["theme"]) != "generator":
+				rooms[ri]["seal"] = "hub"
+				want -= 1
 	var rest: Array = ["lab", "storage", "quarters", "mess", "lab", "medbay", "workshop", "storage", "quarters"]
 	_shuffle(rest, rng)
 	rest.erase("lab")
@@ -682,6 +709,34 @@ static func _finish_door(d: Dictionary, rng: RandomNumberGenerator) -> void:
 	d["wires"] = PackedInt32Array(wires)
 	d["lights"] = PackedInt32Array(lights)
 	d["code"] = hack_code(d)
+
+
+## With a control hub: every door but the front door gets an id ("D" and a number from DOOR_IDS, no
+## two alike), on the hub's map and over the doorway (its own random numbers, from `base_seed`).
+static func _door_ids(layout: Dictionary, base_seed: int) -> void:
+	var doors: Array = layout["doors"]
+	for d: Dictionary in doors:
+		d["id"] = ""
+	if int(layout["hub"]) < 0:
+		return
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash([base_seed, "door ids"])
+	var numbers: Array = range(DOOR_IDS.x, DOOR_IDS.y)
+	_shuffle(numbers, rng)
+	for di in range(1, doors.size()):
+		doors[di]["id"] = "D%d" % int(numbers[(di - 1) % numbers.size()])
+
+
+## The door whose id is `name` ("d23", "D23" or "23"), or -1.
+static func door_by_id(layout: Dictionary, name: String) -> int:
+	var digits := name.strip_edges().to_upper().trim_prefix("D")
+	if digits.is_empty() or not digits.is_valid_int():
+		return -1
+	var doors: Array = layout["doors"]
+	for di in range(1, doors.size()):
+		if str(doors[di].get("id", "")) == "D%d" % int(digits):
+			return di
+	return -1
 
 
 ## The code a keypad lock opens to: for each lit colour, the digit at the other end of its cord.
@@ -762,8 +817,9 @@ static func _central(room: Dictionary, theme: String, taken: Array[Rect2], rng: 
 		"generator":
 			_place(room, taken, "generator", mid, yaw_long, PROPS["generator"], rng)
 			return
-		"security":
-			_place(room, taken, "security_desk", mid, 0.0 if long_x else PI / 2.0, PROPS["security_desk"], rng)
+		"hub":
+			# The hub desk faces the room's longer way (its map board across the room).
+			_place(room, taken, "hub_desk", mid, 0.0 if long_x else PI / 2.0, PROPS["hub_desk"], rng)
 			return
 		"mess":
 			# Long tables with benches down the length of the room.
@@ -891,10 +947,10 @@ static func _segment_hits(r: Rect2, a: Vector2, b: Vector2) -> bool:
 	return false
 
 
-## Security cameras: up to four rooms (not the security room) each get a camera high in a corner of
-## their core, looking at its middle; the security desk shows them.
+## Security cameras: up to four rooms (not the control hub) each get a camera high in a corner of
+## their core, looking at its middle; the hub desk's monitors show them.
 static func _cameras(layout: Dictionary, rng: RandomNumberGenerator) -> void:
-	var sec := int(layout["security"])
+	var sec := int(layout["hub"])
 	if sec < 0:
 		return
 	var rooms: Array = layout["rooms"]

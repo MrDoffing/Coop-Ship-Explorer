@@ -12,6 +12,8 @@ Cave system: As of right now the cave system is linear. Maybe add splitting sect
 
 Could add energy system that can be distributed manually between shield, weapons, engine. Is a classic system to have in these games. Then i could have module slots that take up X amount of energy. Engine module, shield module could be replaced with better ones but require more energy. Would need energy cells or something to aquire more energy points. Or i have a general system is always the same for each ship and give buffs to any of the systems. But unsure if it would be used. I think weapons would always be prioritized.
 
+No penalty for dying. Easy to dont care about health when in outpost as you instantly respawn. What should a penalty be? Losing credits? Held crew weapon? Maybe drop your stop but dont loose anything else.
+
 
 ---
 
@@ -60,3 +62,6 @@ Maybe have these special rooms in a hub area. A place to ready yourself for the 
 ## What the point of the game?
 To have fun, duuh.
 Maybe the outpost are the points. Traveling between them is only a transportation. You are searching for something in these Outposts. Maybe bake in Lore into this.
+
+## Agent Critic
+* [DONE] Spawn an agent and let it act as the art director. Let it evaluate the outpost environment's visuals, immersion and credibility according to the visual design "A retro-futuristic industrial military spaceship corridor, heavy olive-drab and bronze metal construction, thick angular bulkheads, exposed hydraulic pipes, ribbed wall panels, reinforced mechanical door frames, grated steel flooring, symmetrical modular architecture, repeating octagonal structures receding into the distance, warm amber utility lights, subtle grime and wear, deep shadows, low-key cinematic lighting, tactile hard-surface details, late-1990s science-fiction video game atmosphere, grounded and functional design, no sleek minimalist surfaces, no bright neon colors.".

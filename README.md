@@ -81,6 +81,15 @@ steel strips, with your seat, a control panel in front and a twin heavy machine 
   fired at full heat damages the **weapon systems** (0.5% each, with sparks in the pod and a warning
   buzzer). The engineers repair them at the repair panels as usual; at 0% every gun and mining
   laser goes offline until they are repaired to 50%. Fire in bursts.
+- **The rocket launcher:** a pod can carry the **Multiple Rocket Launcher** instead of its machine
+  guns: a tall launcher box on each side of the pod, eight rockets in each (sixteen in all). Hold
+  **LMB** and they leave one at a time, the boxes taking turns (about eight a second): they scatter
+  wide, fly a little crooked at first, speed up, and home in on an alien that comes within about
+  18 m ahead of them. Each hits for 38, and its blast hurts what is round it (55% of that, out to
+  4.5 m). An empty tube is reloaded one rocket at a time, one every 0.8 s, so a full reload takes
+  about 13 s; the screens show the rockets left and the loader. Guns for the pods come in crates
+  from the waystation shops: carry one to a gun console and press **E** there to mount it (the gun
+  taken off comes out in a crate at your feet, to mount again some time).
 - Everyone else sees you sitting in the pod, and the pod turning and firing.
 
 ### The cockpit
@@ -288,16 +297,19 @@ shows the next one.
   approach tunnels, including critters on the hull. No ambushes are sent while docked, and landing
   resets the **hostility**.
 - **Shop:** five items on pedestals, paid for with the credits mined this dive (prices rise at
-  every station further down). One is always a **hull repair kit** (restores 30% hull), and four
-  are random upgrades and **hand weapons**: armour plating, shield cells and coils, turret coolant
-  (faster fire and cooling), targeting modules, fuel tanks and injectors, thrusters, mining lens,
+  every station further down). One is always a **hull repair kit** (restores 30% hull), one a
+  **gun for the gun pods** (one the ship doesn't carry on every pod yet: at first that is the
+  Multiple Rocket Launcher), and three are random upgrades and **hand weapons**: armour plating,
+  shield cells and coils, turret coolant (faster fire and cooling), targeting modules, fuel tanks
+  and injectors, thrusters, mining lens,
   laser overcharge, tractor booster, repair nanobots, surge dampers, scout plating, blasters, cargo
-  pods and thrusters, the gunsmith kit, power tools, crew armour, the eight hand weapons, and
+  pods and thrusters, the gunsmith kit, power tools, crew armour, the nine hand weapons, and
   **auto turrets** (more likely while the ship has an empty turret slot).
 - **Buying and carrying:** look at an item and press **E** to buy it, then **E** again to pick up
   the crate. You can't use tools while carrying. Press **G** to put it down. Walk it up the ramp
   and fit it:
   - **Hand weapons** aren't installed: look at the crate and press **F** to swap (see below).
+  - **Guns for the gun pods** are mounted at a gun console (see **Gun pods**).
   - **Everything else** (repair kits, auto turrets, upgrades) goes to the ship's **install hub**.
 - **Selling:** the **buyback** counter just inside the shop door, facing the middle of the shop,
   buys any crate you carry to it (bought here, earlier or salvaged) for 25% of its price at this
@@ -337,8 +349,9 @@ Landing there is **optional** and there are no bulkheads: fly past if you like.
   - **Storage, crew quarters, mess halls, med bays and workshops:** shelves and crates stacked on
 	pallets; beds with side tables and lockers; long tables with benches and a serving counter;
 	surgery tables; machine tools and workbenches.
-  - **Security:** a desk with four screens showing live feeds from cameras high in the corners of
-	other rooms (with a generator, only once it runs). The feeds run while you are in the room.
+  - **The control hub** (in about three outposts out of five): a desk with the station's computer,
+	a big map of the station on a board behind it and, up over the board, four monitors showing
+	live feeds from cameras high in the corners of other rooms. See below.
   - **Armory:** gun racks, ammunition and weapon benches; most of its salvage is hand weapons.
   - **The generator room** (in about two outposts out of three): see below.
   - **Secure storage**, the vault: the dead end furthest in, behind a keypad lock, with the best
@@ -365,6 +378,36 @@ Landing there is **optional** and there are no bulkheads: fly past if you like.
   the display); after the third the door **locks down**: a steel shutter slams down in front of
   it, the corridor flashes red, an alarm sounds (drawing the stalker) and that door never opens
   again.
+- **The control hub** (a rough first version) runs every door in the station. In an outpost with
+  one, every doorway has a working door with an id (D10 to D59) on a plate over it, and a dead end
+  or two are locked from the hub (CONTROL LOCK on the door): a horde of boarders is shut in behind
+  each, besides whatever else lives there. The hub needs power: with a generator, it stays dark
+  (NO POWER on its map) until the generator runs. Then:
+  - **The map** on the board shows the rooms with their names, the corridors and every door with
+	its id, green while it is open, red while it is locked (dark red: locked down); a room shut in
+	behind locked doors is red and says LOCKED. It is turned so that up on the map is the way you
+	face looking at it, and a marker says YOU ARE HERE.
+  - **The computer:** look at it and press **E** to sit down at it: your view closes in on its
+	green screen, and what you type goes on it. **Enter** sends the line, **Backspace** deletes,
+	**Esc** gets up (a hit does too). The commands: `HELP`; `DOORS` (every door, its state and its
+	room); `LOCK D23` and `UNLOCK D23` (any door but the station's front door, not one locked down
+	for good, and a door won't come down on someone or something standing in its doorway). Find a
+	locked room's door on the map and unlock it; whatever was shut in there hears it open. Locking
+	doors behind you shuts aliens out (they can't get through a shut door). The answers show on
+	the screen for everyone, and several crew can use it at once.
+  - **The monitors** run while you are in the hub (one feed a frame, in turn).
+- **Sentry turrets:** a station holds one or two, and one more for every room locked from the
+  control hub (three at most): steel boxes much like the salvage crates (their glowing bands
+  orange), with a big yellow double chevron on the lid pointing the way they face (the barrel's tip
+  shows in a hatch at that end). Pick one up (**E**) and carry it like any crate; set it down in a
+  station (aboard the ship it won't open) and press **F**: the lid's halves swing open and a heavy
+  machine gun rises on its post.
+  It guards 45° either side of its front, swings to the nearest alien it can see within 24 m there
+  and fires at it, fast and hard (16 a round, about 12 rounds a second; much better than any hand
+  weapon), until its 300 rounds run out; the rounds left show on a display at its back. Aliens it
+  hurts turn on it; the others may run past it after the crew. **F** folds an intact one up again
+  (it keeps its rounds) to carry it on. Once it has taken enough damage it is wrecked for good:
+  bent over, sparking and smoking a little.
 - **Aliens**, tougher deeper down (the first room is always clear):
   - **The stalker** (in most outposts): taller than a man, glossy black, all limbs, with a long
 	swept-back head and a bladed tail, and it takes a lot of shooting. It roams the station. When
@@ -373,8 +416,8 @@ Landing there is **optional** and there are no bulkheads: fly past if you like.
 	hunts again.
   - **Barnacles** grow flat on the ceilings of corridors and rooms, crusted over with the
 	ceiling's own grime so they are hard to see; now and then a drop falls from one. Their tongues
-    stay in until you walk within about 2 m of the spot under one: then it lashes out, reels you in
-    under it, lifts you off your feet and holds you there while it chews on you, until it is shot
+	stay in until you walk within about 2 m of the spot under one: then it lashes out, reels you in
+	under it, lifts you off your feet and holds you there while it chews on you, until it is shot
 	dead (you can still look up and shoot; your crewmates and the bots can too). It can't reach
 	through a wall.
   - **Crawlers**, like face-huggers, live in packs round their nest, a spongy growth of hollow
@@ -410,17 +453,18 @@ You handle them in first person, and there are no hands: the weapon does all the
 - **Aimed (hold RMB):** the weapon comes up to your eye and you look down its own sight; the view
   zooms in a little and you walk at about half speed. The first shot goes where the sight is, but
   keep firing and the shots spread wider (they settle again within half a second or so). Each
-  weapon has a sight of its own: iron sights with glowing dots on the Pistol, a notch and a glowing
+  weapon has a sight of its own: iron sights with glowing dots on the Pistol (and on each of the
+  Dual Pistols, which come up just under your line of sight, closer together), a notch and a glowing
   bead on the Revolver, a peep and a hooded post on the Submachine Gun, a reflex sight with a
-  glowing ring on the Pulse Rifle, a holographic sight with a cyan ring on the Photon Rifle, a short
+  glowing ring on the Pulse Rifle, a round holographic sight with a cyan ring on the Photon Rifle, a short
   scope on the Marksman Rifle (you look through its eyepiece at a red chevron, zoomed 1.8 times,
   and still see the world round the scope), a bead and a ghost ring on the Shotgun, a WW2-style
-  ring sight on the Multiple Grenade Launcher and an open ring on the Lightning Thrower.
+  ring sight on the Multiple Grenade Launcher and an open ring on the Storm Lance.
 - **Kick:** every shot kicks the weapon back and the view up (most of that comes back by itself),
   with a muzzle flash. Sprinting lowers the weapon; firing or aiming stops a sprint. There is no
   crosshair: the weapons have their sights.
-- **The trigger:** most weapons fire for as long as you hold LMB. The Revolver and the Multiple
-  Grenade Launcher are semi-automatic: one shot a click, as fast as you click.
+- **The trigger:** most weapons fire for as long as you hold LMB. The Revolver is semi-automatic:
+  one shot a click, as fast as you click.
 - **The display** is built into the top of every weapon at the back, turned to you under a little
   hood (like the guns in Halo): its rounds left (or its heat on a bar), in green. You read it from
   the hip, and it sits just under the sight when you aim. You hear it too: the last few rounds of
@@ -428,8 +472,8 @@ You handle them in first person, and there are no hands: the weapon does all the
   rises as it heats up.
 
 There are two kinds:
-- **Magazine weapons** (Pistol, Revolver, Submachine Gun, Pulse Rifle, Marksman Rifle, Shotgun,
-  Multiple Grenade Launcher): most throw a spent casing out of the ejection port with every shot,
+- **Magazine weapons** (Pistol, Dual Pistols, Revolver, Submachine Gun, Pulse Rifle, Marksman
+  Rifle, Shotgun, Multiple Grenade Launcher): most throw a spent casing out of the ejection port with every shot,
   which bounces, rolls and lies on the floor for a few seconds before it is gone (the Shotgun's
   shells come out as its pump racks after each shot). Once the magazine is empty the trigger only
   clicks, hollow (the Pistol's slide locks back): press **R** to reload (you can also top it up
@@ -440,10 +484,14 @@ There are two kinds:
   launcher's cylinder swings out the same way, throwing out its six big cases. Switching to the
   toolkit, taking a station, picking up a crate or bringing out the scanner cuts a reload short. A
   weapon you take out of a crate comes loaded. Crew bots reload by themselves.
-- **Energy weapons** (Photon Rifle, Lightning Thrower): no magazine, but every shot heats them up
+- **Energy weapons** (Photon Rifle, Storm Lance): no magazine, but every shot heats them up
   (their coils, fins and chambers glow hotter) and the heat bleeds off by itself. At full heat the
   weapon overheats: it vents steam and stays locked (the trigger only fizzles) until it has cooled.
   **R** vents it early.
+- **The Dual Pistols** (Dual Berettas, in a way): a slim stainless pistol in each hand, either side
+  of the view. Hold LMB and they fire in turn, right, left, right..., each with its own slide,
+  flash and casing; each gun's display shows its own rounds (15 each), and a reload swaps both
+  magazines at once. Quick, but wild from the hip.
 - **The Revolver:** fire it slowly and every shot goes where the sights are; fan it and each shot
   scatters wider and kicks harder than the last (by the fifth quick shot the scatter is about six
   times as wide and the kick three times as hard): a wild-west shootout. It settles again within
@@ -453,14 +501,17 @@ There are two kinds:
   hard beyond about 25 m. The Shotgun's pellets lose most of their punch beyond 20 m too.
 - **The Marksman Rifle** fires heavy rounds at a steady pace; each goes through the first alien it
   hits into the one behind it.
-- **The Multiple Grenade Launcher** fires 40 mm grenades in an arc (its sight is set for about
-  10 m). A grenade clunks and bounces off the walls and floors, rolls, and goes off when its fuse
+- **The Multiple Grenade Launcher** is fully automatic: hold LMB and it fires its six 40 mm grenades
+  one after the other, in an arc (its sight is set for about 10 m). A grenade clunks and bounces off the walls and floors, rolls, and goes off when its fuse
   runs out 1.6 s after the shot, or at once when it strikes an alien; a red lamp blinks on its tail
-  so you can follow it in the dark. The blast hurts every alien within 4.5 m it can reach (not
+  so you can follow it in the dark. The blast hurts every alien within 6.5 m it can reach (not
   through a wall), never the crew, and shakes your view if you are close.
-- **The Lightning Thrower** charges while you hold LMB (its prongs crackle and its hum rises) and
-  lets the bolt go when you release it. The bolt strikes the closest alien in front of you (in a
-  narrower cone while aiming) and jumps on to the closest alien within 7 m of that one, up to four
+- **The Photon Rifle** fires glowing bolts, like a blaster: each flies to where the shot lands
+  (about 95 m/s), lighting the corridor as it goes, and strikes there.
+- **The Storm Lance** charges while you hold LMB (its prongs crackle and its hum rises) and
+  lets the bolt go when you release it. The bolt goes where you aim it: it does not seek aliens
+  out, it strikes the one in its way (or one it passes within a hand's breadth of) and jumps on
+  to the closest alien within 7 m of that one, up to four
   more times, each jump keeping 72% of the damage. A fuller charge hits harder and heats more; let
   go too early and it only fizzles. Holding a full charge slowly heats it up. The bolt is white-hot
   and flickers, every alien it strikes flares, it cracks like thunder where it first hits, and
@@ -469,14 +520,15 @@ There are two kinds:
 | Weapon | Kind | Damage | Rate | Magazine / heat | Notes |
 |---|---|---|---|---|---|
 | Pistol | magazine | 22 | 4.5 shots/s | 12, 1.5 s reload | The sidearm everyone starts with. |
+| Dual Pistols | magazine | 18 | 8.3 shots/s, the guns in turn | 2 x 15, 2.2 s reload | A gun in each hand. Wild from the hip. |
 | Revolver | magazine | 40 | as fast as you click | 6, 2.3 s reload (moon clip) | Semi-automatic. Quick shots scatter and kick harder and harder. |
 | Submachine Gun | magazine | 7.5, down to 45% from 10 to 28 m | 15 rounds/s | 64-round drum, 2.6 s reload | Wide scatter and a strong climb, even aimed. |
-| Pulse Rifle | magazine | 11 | 11 rounds/s | 40, 2.0 s reload | Rapid fire, with an ammo counter on top. |
-| Photon Rifle | energy | 11.5 | 10 rounds/s | 2.4% a shot (42 shots from cold), 1.8 s vent | The Pulse Rifle's energy twin: bright bolts, glowing fins. |
+| Pulse Rifle | magazine | 15 | 11 rounds/s | 40, 2.0 s reload | Rapid fire with a strong climb, an ammo counter on top. |
+| Photon Rifle | energy | 11.5 | 10 rounds/s | 2.4% a shot (42 shots from cold), 1.8 s vent | The Pulse Rifle's energy twin: glowing bolts, glowing fins. |
 | Marksman Rifle | magazine | 52 | 2.7 shots/s | 10, 2.3 s reload | Short scope. Each round goes through the first alien into the next. |
 | Shotgun | magazine | 10 pellets x 15, down to 40% from 6 to 20 m | every 0.7 s | 8, 2.2 s reload | Slow, heavy pump action, pistol grip. Shreds anything up close. |
-| Multiple Grenade Launcher | magazine | 80 blast, half at its 4.5 m edge | one a click, up to 2.5/s | 6, 3.0 s reload | Semi-automatic. Grenades bounce about until they go off. |
-| Lightning Thrower | energy | 30 to 85 by charge, then 72% a jump | 0.9 s to charge | 16 to 40% a bolt, 1.8 s vent | Jumps from alien to alien. |
+| Multiple Grenade Launcher | magazine | 80 blast, half at its 6.5 m edge | 2.8 grenades/s | 6, 3.0 s reload | Fully automatic. Grenades bounce about until they go off. |
+| Storm Lance | energy | 30 to 85 by charge, then 72% a jump | 0.9 s to charge | 16 to 40% a bolt, 1.8 s vent | Goes where it is aimed, then jumps from alien to alien. |
 
 The ship's guns are the gun pods' heavy machine guns (see **Gun pods**): 7 damage a round, about
 15 rounds a second from the four barrels, tracer rounds that converge on the sight. The older ship
@@ -502,16 +554,18 @@ the HUD's health bar), with a breathing vent and two status lamps between them:
   Light only gets into your helmet through the visor: a crewmate's lamp behind you leaves no glint
   on it and doesn't light the inside of your helmet, while a lamp ahead (say, a crewmate's
   flashlight pointed at you) glares through the grime round it.
-  Once your health is below 30% it cracks from its edges, more and further as your health keeps
-  dropping, and the suit beeps; the cracks seal over once you have recovered past 42%.
+  Once your health is down to half it cracks from its edges, more and further as your health keeps
+  dropping (below 30% the suit beeps too); the cracks seal over once you have recovered past 62%.
 - **The scanner:** hold **Q** to swing the echolocation scanner on your suit up in front of you
   (your weapon goes down, so you can't fire meanwhile). It pings like a boat's radar: a beam sweeps
-  round its round green screen every 2 s (the top is the way you face) and paints what the ping
-  bounces off as it passes, fading until the beam comes round again: a rough outline of the walls,
-  aliens as bright blobs and your crewmates as rings, out to 22 m. The further out, the rougher it
-  gets: walls blur and break up, blips wander off where they are (more so behind a wall) or don't
-  show at all, and false echoes and speckle creep in towards the edge. It only works outside the
-  ship, in the stations: aboard, the hull drowns the echoes and it shows nothing but static.
+  round its round green screen every 2 s (the top is the way you face) and paints the walls the
+  ping bounces off as it passes: a clean outline of the rooms and corridors round you, out to 32 m.
+  The ping goes through walls: it maps every wall within range, not only those in plain view. For
+  now the picture is as clear as it gets (an experiment): every echo is where the wall is, with no
+  false dots, no noise and no fading out with distance, and it stays at full strength until the
+  beam paints it afresh. Aliens show as orange blobs and your crewmates as blue rings, where they
+  are right now, each flaring as the beam passes. It only works outside the ship, in the stations:
+  aboard, the hull drowns the echoes and it shows nothing but static.
 - Everyone else sees you holding your weapon low, raised or up at your eye, and your scanner in
   front of your chest.
 
@@ -576,10 +630,10 @@ homebase crew panel. The choice is remembered for future sessions.
 |---|---|
 | Walking | WASD move, mouse look, Space jump, Shift sprint, E use station, 1/2/wheel hand weapon/toolkit, LMB fire (from the hip) or repair, RMB aim down the sight, R reload (or vent), hold Q scanner |
 | Shop and crates | E buy (look at a shop item), E pick up (look at a crate), E install (at the install hub or a gun console), G drop, F swap hand weapons with a crate |
-| Abandoned stations | E pull the generator's starter; at a keypad lock: E open its panel, then LMB (on a key) or 0-9 key a digit, Backspace/Delete delete/clear, E (or walking) leave |
+| Abandoned stations | E pull the generator's starter; at a keypad lock: E open its panel, then LMB (on a key) or 0-9 key a digit, Backspace/Delete delete/clear, E (or walking) leave; at the control hub's computer: E sit down, type a command, Enter send, Backspace delete, Esc get up; sentry turrets: F open (set down in a station) or fold up, E pick up (folded) |
 | Any station | E leave, Esc menu, Tab crew status |
 | Pilot | W/S throttle, A/D turn, Space/Ctrl climb/dive, T autopilot, X full stop, B emergency blast, L land at / lift off from a waystation or abandoned station, mouse looks around the cockpit, RMB lean in, LMB press the AUTOPILOT switch or the red button you look at |
-| Gun pods | Mouse aim (the pod swings after it), LMB fire, RMB lean in to the sight |
+| Gun pods | Mouse aim (the pod swings after it), LMB fire (machine guns, or rockets one after another), RMB lean in to the sight; E at a gun console while carrying a gun's crate mounts it |
 | Mining lasers | Mouse aim, LMB fire, RMB zoom |
 | Scout | Mouse steer, WASD move, Space/Ctrl up/down, Shift boost (straight ahead), LMB cannons, hold RMB on an alien to lock on and LMB to fire a missile (one a click), E dock when close, hold E to recall the scout (its cargo is lost) |
 | Anywhere | F11 fullscreen |
@@ -611,18 +665,19 @@ scripts/
   levels/              homebase.gd (shipyard), mission.gd (cave streaming, population, director, mission end)
   cave/                cave_gen.gd (signed-distance-field cave + surface nets, waystation halls, abandoned station hangars), cave_chunk.gd (threaded build, rock shader)
   station/             station_builder.gd (hall, bulkheads, pad, pier, shop), waystation.gd (bulkhead doors), supply_crate.gd, run_items.gd (shop catalogue, salvage),
-					   abandoned stations: outpost_layout.gd (the plan: rooms, corridors, doors, themes, furniture), derelict_builder.gd (building them, waypoints),
-					   outpost_props.gd (their furniture and machinery), derelict.gd (lamps, doors, generator, security feeds), hack_panel.gd (keypad locks)
-  ship/                ship_types.gd (the motherships' stats and layouts), ship_interiors.gd (each ship's rooms, consoles, panels, walking graph), mothership.gd (incl. gun pod simulation, docking, gates, shop, auto turrets, hostility), ship_builder.gd (hulls, glazed noses + interiors), cockpit.gd (the pilot's cockpit: dashboard, camera feeds, levers), turret.gd (mining lasers), gun_pod.gd (the manned gun pods), scout.gd (the scouts: flight, cannons, heat, booster, missiles), scout_cockpit.gd (the scout's canopy, cockpit and instruments), ship_marks.gd (decals on the hulls: markings, grime and wear, battle damage)
+					   abandoned stations: outpost_layout.gd (the plan: rooms, corridors, doors, door ids, themes, furniture), derelict_builder.gd (building them, waypoints),
+					   outpost_props.gd (their furniture and machinery), derelict.gd (lamps, doors, generator, the control hub's feeds, map and computer), hack_panel.gd (keypad locks),
+					   hub_console.gd (the control hub's computer), hub_map.gd (the station map on its board), sentry.gd (portable sentry turrets)
+  ship/                ship_types.gd (the motherships' stats and layouts), ship_interiors.gd (each ship's rooms, consoles, panels, walking graph), mothership.gd (incl. gun pod simulation, docking, gates, shop, auto turrets, hostility), ship_builder.gd (hulls, glazed noses + interiors), cockpit.gd (the pilot's cockpit: dashboard, camera feeds, levers), turret.gd (mining lasers), gun_pod.gd (the manned gun pods: heavy machine guns or the rocket launcher), scout.gd (the scouts: flight, cannons, heat, booster, missiles), scout_cockpit.gd (the scout's canopy, cockpit and instruments), ship_marks.gd (decals on the hulls: markings, grime and wear, battle damage)
   crew/                crew_member.gd (first-person avatar, stations, hand weapon, toolkit), crew_weapons.gd (hand weapons: stats, models, effects), weapon_rig.gd (the weapon in the first-person view), helmet.gd (the helmet, its instruments and visor), scanner.gd (the echolocation scanner), crew_bot.gd (bot AI)
   enemies/             alien.gd (spitter/critter/infiltrator), nest.gd, boarder.gd (aliens on foot: the boarder, and the base of the abandoned stations' aliens),
 					   stalker.gd, barnacle.gd, climber.gd (crawling over walls and ceilings), crawler.gd, hive.gd (crawlers' nests), spider.gd
   minerals/            deposit.gd, mineral_chunk.gd
-  fx/                  fx.gd (particles, flashes, tracers), projectiles.gd, debris.gd (spent casings and dropped magazines), grenades.gd (the grenade launcher's grenades), marks.gd (decals, and the ones that fade)
+  fx/                  fx.gd (particles, flashes, tracers), projectiles.gd (incl. the scouts' missiles and the gun pods' rockets), debris.gd (spent casings and dropped magazines), grenades.gd (the grenade launcher's grenades), marks.gd (decals, and the ones that fade)
   ui/                  hud.gd, main_menu.gd, pause_menu.gd, settings_panel.gd, cheat_menu.gd (homebase cheats)
   common/              models.gd (procedural meshes, mesh batching, loading the Blender-made assets), net_util.gd, ui_theme.gd
   dev/autotest.gd      automated test runs (see below)
-assets/models/         Blender-made models (.gltf with baked textures): the Prospector's hull and fittings, the gun pod, the Pulse Rifle
+assets/models/         Blender-made models (.gltf with baked textures): the Prospector's hull and fittings, the gun pod and its rocket launcher boxes, every hand weapon, the outposts' generator and furniture
 assets/decals/         decal textures (markings, grime, battle damage, laser burns); assets/textures/: the tiling hull plating and the
 					   abandoned stations' wall panels, tread plate and grating (tools/blender/outpost.py)
 tools/blender/         the Python scripts that make them (see "Blender-made models" and "Decals" below)
@@ -630,9 +685,13 @@ tools/blender/         the Python scripts that make them (see "Blender-made mode
 
 ### Blender-made models
 
-Most of the game is still built from primitives in GDScript, but three assets are made in
+Most of the game is still built from primitives in GDScript, but some assets are made in
 Blender by scripts in `tools/blender/`: the Prospector's fittings and hull shape (`prospector.py`),
-the gun pod (`gun_pod.py`) and the Pulse Rifle (`rifle.py`). Small things get their wear baked in;
+the gun pod (`gun_pod.py`), the Pulse Rifle (`rifle.py`), the other hand weapons (`weapons.py`, one
+`weapon_<id>` asset each: `blender -b -P tools/blender/weapons.py -- pistol` rebuilds one, no name
+all nine; the sights' dots and beads, the sight glass and reticles, the marksman rifle's scope and
+the displays are still made in code), and the outposts' generator and furniture
+(`outpost_generator.py`, `outpost_props.py`), and the gun pods' rocket launcher boxes (`mrls.py`). Small things get their wear baked in;
 the Prospector's hull is not baked (a baked texture the size of a ship costs far too much memory):
 it takes the tiling hull plating every mothership uses, and its grime and wear are decals (below). Each script models the asset in the
 game's own coordinates, gives every part a procedural material (paint, plating seams, chipped
@@ -705,7 +764,10 @@ Balance numbers to tweak:
   gun's rate of fire, damage, round speed and spread, the belt and how long a new one takes, heat
   per round, cooling and the damage of firing hot, how fast the pod turns, the heat its barrels
   start to smoke at, how loud its motors whine (`SERVO_DB`) and how high its bark rises in pitch at
-  full heat (`HOT_PITCH`).
+  full heat (`HOT_PITCH`). The rocket launcher: `MRLS_*` in `GunPod` (tubes, the time between
+  rockets, damage, launch speed, scatter, the loader's time a rocket) and `ROCKET_*` in
+  `projectiles.gd` (top speed, the crooked start, homing cone and reach, fuse, blast); what the pod
+  guns are and cost: `GunPod.WEAPONS`.
   Where each ship's pods sit and how far they swing: the gun stations in `ShipTypes.TYPES` (the
   `gunpod_check` autotest checks the barrels clear the hull); a pod with yaw limits of -180..180
   turns all the way round and holds its fire while the ship is in its line of fire
@@ -742,19 +804,30 @@ Balance numbers to tweak:
   (`DerelictBuilder`). The plan (`OutpostLayout`): the grid (`CELL`, `GX`, `GZ`), how many rooms
   and their heights, doorways, what a corridor costs to lay (`STEP`, `TURN`, `BESIDE`: how much
   they prefer running straight and keeping apart), loops (`LOOP_CHANCE`, `LOOP_MAX`), how often
-  there is a generator, a security room, an armory or a second keypad lock (`*_CHANCE`,
-  `MAX_LOCKS`), the keypad's colours, cords, digits and tries (`HACK_*`), and what stands along
+  there is a generator, a control hub (and a second room locked from it), an armory or a second
+  keypad lock (`*_CHANCE`, `MAX_LOCKS`), the door ids (`DOOR_IDS`), the keypad's colours, cords,
+  digits and tries (`HACK_*`), and what stands along
   each kind of room's walls (`WALL_PROPS`, `WALL_FREE`) and in its middle (`_central()`); the
   furniture itself is in `OutpostProps`. The look (`DerelictBuilder`): the corridors' octagonal
   frames (`CHAMFER_*`, `FRAME_*`), how many lamps (`LAMP_EVERY`) and their colours; the surfaces
   are drawn by `tools/blender/outpost.py` (`blender -b -P tools/blender/outpost.py`, a few
-  seconds). The station's life (`Derelict`): how fast a sealed door opens and a shutter drops
+  seconds). What it costs to draw: the station's surfaces (and its furniture models) are merged and
+  committed in cubes `CHUNK` metres on a side, so what is out of view or out of a flashlight's reach
+  is culled; its walls, floors, ceilings and doors are on `Game.VIS_SHELL`, the only shadow casters
+  for crewmates' flashlights; and one occluder of its wall and ceiling boxes lets the renderer skip
+  whatever they hide (`_occluder()`; project setting `rendering/occlusion_culling`). Nothing may be
+  built in front of a keypad (`HackPanel.clear_box()`, `Models.Batch.keep_clear()`). The station's life (`Derelict`): how fast a sealed door opens and a shutter drops
   (`DOOR_RATE`, `SHUTTER_TIME`), the power's wave of lamps (`POWER_WAVE`), the lockdown's alarm
-  (`ALARM_TIME`), the generator's flywheel and shake, the security feeds (`FEED_*`). Landing range
+  (`ALARM_TIME`), the generator's flywheel and shake, the control hub's camera feeds (`FEED_*`);
+  the hub's computer (`HubConsole`: its screen, text block, close look) and map (`HubMap`: size,
+  colours); what its commands do (`Mothership._hub_command()`). Sentry turrets: the constants at
+  the top of `Sentry` (arc, reach, rate of fire, damage, rounds, health, unfolding), how many a
+  station holds (`Mothership.SENTRY_MAX`) and how hard aliens it hurts go for it
+  (`Boarder.SENTRY_PROVOKED`, `SENTRY_PROVOKE_TIME`). Landing range
   and how close aliens may be for a landing, salvage, credit boxes and the stalker
   (`DERELICT_LAND_RANGE`, `DERELICT_CLEAR_RANGE`, `SALVAGE_CHANCE`, `CREDITS_CHANCE`,
   `STALKER_CHANCE`, `_credit_box()` and `_derelict_contents()` in `mothership.gd`, which also
-  places the barnacles, nests and spiders), how many pulls the generator takes (`_gen_need`), what
+  places the barnacles, nests, spiders and the hordes behind the hub's locked doors: `HORDE`), how many pulls the generator takes (`_gen_need`), what
   salvage can be (`RunItems.roll_salvage()`). The aliens: `Boarder.KIND_STATS` (health, speed,
   damage, reach, size), how close they hear and how far they keep off the walls (`HEAR_RANGE`,
   `WALL_GAP`), and each one's constants: `Stalker` (speeds, sight, claws a visit, hiding, fleeing
@@ -766,8 +839,11 @@ Balance numbers to tweak:
   whether the weapon is semi-automatic, the scatter from the hip and aimed and how it builds up, the
   zoom while aiming, the kick and how much harder quick shots kick, piercing, the grenades' speed,
   lift, fuse and blast radius, magazine and reload time, or heat per shot, cooling and vent time,
-  shop price), each weapon's muzzle (`MUZZLES`), the Lightning Thrower's charge and chain
-  (`CHARGE_TIME`, `CHAIN_RANGE`, `CHAIN_JUMPS`, `CHAIN_FALLOFF`...) and how long an overheated
+  shop price, the muzzle flash, the Photon Rifle's bolts), each weapon's muzzle (`MUZZLES`), how
+  far apart the Dual Pistols are (`DUAL_SPREAD`, `DUAL_HELD_SPREAD`, `DUAL_CRATE_SPREAD`; their poses
+  in view: `DUAL_*` in `WeaponRig`), the
+  Storm Lance's charge, aim and chain (`CHARGE_TIME`, `BOLT_SLACK`, `CHAIN_RANGE`, `CHAIN_JUMPS`,
+  `CHAIN_FALLOFF`...) and how long an overheated
   weapon vents (`OVERHEAT_VENT`). How they are handled: the constants at the top of `CrewMember`
   (how fast a weapon comes up and how long until it is held relaxed again, aiming time and speed,
   extra scatter on the move, how much of the kick comes back). Their poses in view: `WeaponRig`.
@@ -780,14 +856,15 @@ Balance numbers to tweak:
   `GunPod.GLASS_LIGHT` (`GLINT_MAX` and `GLINT_ROUGH`: how bright and how sharp a lamp's reflection
   in the glass may get; `GLARE` and the two scattering lobes in its light(): how much a lamp beyond
   the glass glares through the grease, and how far round it). Fill lights that hang in front of the
-  glass with no lamp there leave it out (`Game.VIS_GLASS`). The helmet's inside is lit only through
+  glass with no lamp there leave it out (`Game.VIS_GLASS`); a lamp grazing the glass glares less
+  (`GRAZE`), so a curved pane lit from the side shows no hard edge. The helmet's inside is lit only through
   its opening: `Helmet.LIT_SHADER` (`BOUNCE`: light that gets in and bounces round inside).
 - The suit: `Helmet` (the opening's shape: `OPEN_SIDE`, `SIDE_BOW`, `OPEN_TOP`, `OPEN_BOTTOM`,
   `V_RISE`; the shell's profile `RINGS` and its seams; where the instruments and the vent sit and
-  their plates; the visor; when it cracks: `CRITICAL`, `CRACK_AT`, `HEAL_MARGIN`, and where the
-  cracks run: `CRACKS`) and `Scanner` (range, sweep time, rays per
-  sweep, how fast echoes fade, and the noise: `WALL_NOISE*`, `DROPOUT`, `BLIP_NOISE*`, `MISS`,
-  `GHOSTS`).
+  their plates; the visor; when it cracks: `CRACK_START`, `CRACK_AT`, `HEAL_MARGIN`, `CRITICAL`,
+  and where the cracks run: `CRACKS`) and `Scanner` (range, sweep time, rays per sweep, how many
+  walls a ray goes on through: `WALL_LAYERS`, how high it pings: `PING_HEIGHT`, how long a fresh
+  echo and a blip's flare glow, when two echoes join into a line: `JOIN_*`, the inks).
 - Egg sacs: `Nest.SAC_HP`.
 - Alien stats: `Alien.KIND_STATS`.
 - Mining and minerals: mining speed and reach (`mining_power`, `mining_range`, `tractor_range` in
@@ -849,15 +926,26 @@ godot --path . -- --autotest=gunpod    # gun pods: barrels clear of every hull, 
 godot --path . -- --autotest=cockpit   # the cockpit: glazed noses and camera mounts, lasers clear of the glass, how much of the spine and belly views the hull fills, the pilot's view, lever, stick, gauges, readouts, red lights, lamps, side displays, terminal, camera feeds, red button, looking at and clicking the switches, the barrier, ambush warning, surge, scraping, gun pod smoke, motors and bark by heat, every ship's cockpit and the Vanguard's interrupter (cockpit_check: no shots)
 godot --path . -- --autotest=fighter   # the scouts: clear of every ship's docks, the view from the eye (panels in view, inside the canopy), the cockpit view, cannons, magazine, overheating, booster, locking on and missiles, cracks and the critical alarm, the homing needle and the dock's marker, docking, muffled sounds aboard, in a pod and in the scout, the Vanguard's combat scouts (fighter_check: no shots)
 godot --path . -- --autotest=host_scout  # with --autotest=join_scout: a client flies the scout (it turns at once there), fires the cannons, boosts, locks on and fires a missile at the host's spitter, docks
-godot --path . -- --autotest=soldier   # on foot: the helmet's instruments, the weapon's poses, every sight lined up, scatter and bloom, casings and magazines, reloading, overheating and venting, the lightning chain and its shake, the revolver held, fanned and fired slowly and its moon-clip reload, the submachine gun's rate, scatter and climb, the marksman round through two aliens, the shotgun's rate and damage, grenades bouncing, going off on the fuse or on an alien and the cases thrown out, the scanner aboard and in a station, the visor sealing outside and cracking, and that nothing hides the helmet's screens or any gun's display (soldier_check: no shots)
+godot --path . -- --autotest=soldier   # on foot: the helmet's instruments, the weapon's poses, every sight lined up, scatter and bloom, casings and magazines, reloading, overheating and venting, the lightning chain and its shake, the revolver held, fanned and fired slowly and its moon-clip reload, the Dual Pistols firing in turn, the submachine gun's rate, scatter and climb, the marksman round through two aliens, the shotgun's rate and damage, grenades bouncing, going off on the fuse or on an alien and the cases thrown out, the scanner aboard and in a station, the visor sealing outside and cracking, and that nothing hides the helmet's screens or any gun's display (soldier_check: no shots)
 godot --path . -- --autotest=glass    # lamps and dirty glass: a lamp behind the head leaves nothing on the visor, one ahead glares through its grime; the gun pod, cockpit and scout canopy (windowed)
 godot --path . -- --autotest=outpost  # the outpost test: landed at an abandoned station, a crate of every hand weapon on the pier, swapping each one, the save left alone (outpost_check: no shots)
 godot --path . -- --autotest=outpost_plans    # 80 outposts' plans checked (every room reachable, sealed rooms behind the right door, furniture clear), how long one takes, plans drawn to plan_<n>.png (headless)
-godot --path . -- --autotest=outpost_tour     # every room, a corridor, the security desk's feeds and a keypad with the power off and on, a lockdown, how long building one takes (windowed)
+godot --path . -- --autotest=outpost_tour     # every room, a corridor, the control hub's desk and a keypad with the power off and on, a lockdown, how long building one takes (windowed)
 godot --path . -- --autotest=outposts         # the generator's starter, a keypad lock (wrong code, a key clicked, the right code, walking through) and a lockdown, a barnacle (hidden tongue, its reach, not through a wall), the stalker's visit and its healing, crawlers in and out of their patch, an acid spider (and how often its legs reach), a credit box deposited, aliens behind a shut door, 40 s of aliens chasing about checked against the walls (outposts_check: no shots)
+godot --path . -- --autotest=outpost_walls    # 2 minutes of a busy outpost (aliens of every kind chasing the player all over it, going home, a noise): every step of every alien checked against the walls and shut doors (headless)
 godot --path . -- --autotest=host_outpost     # multiplayer outpost, host side (run join_outpost in a second instance): reports the client's generator pulls, codes and the barnacle holding them
 godot --path . -- --autotest=join_outpost     # multiplayer outpost, client side: the generator's starter, a wrong and the right code at a keypad, held by a barnacle, a spider's legs, as the client sees them
 godot --path . -- --autotest=outpost_gallery  # the outposts' aliens up close in a studio on the pad (windowed)
+godot --path . -- --autotest=props_gallery    # every kind of outpost furniture up close (lockers, filing cabinets, tanks and drums in four variants), pg_<kind>.png (windowed)
+godot --path . -- --autotest=keypads          # 55 keypad locks in 40 outposts: nothing the station builds stands in front of one (keypads_check: headless, no shots)
+godot --path . -- --autotest=outpost_perf     # what an outpost costs to draw with three crew bots along: fps, GPU time, draw calls at the pier, a corridor and every room, and with the flashlights off, the station hidden, the aliens stopped (windowed; outpost_perf_solo: no bots)
+godot --path . -- --autotest=visor_side       # a lamp close beside the helmet, 45 to 90 degrees off the view: the visor's glare fades smoothly (windowed)
+godot --path . -- --autotest=hub              # the control hub: door ids, the horde behind its locked door, dark without power, sitting at the computer and typing (HELP, DOORS, bad lines), a door refused with a crate in its doorway, locked and unlocked, the dead end opened, Esc; pictures of the desk, map, screen and a door's plate (hub_check: no shots)
+godot --path . -- --autotest=sentries         # sentry turrets: won't open aboard, opened in a room, what it shoots and leaves alone, aliens turning on it, its rounds, folded and picked up, wrecked (sentries_check: no shots)
+godot --path . -- --autotest=scanner_perf     # what the echolocation scanner costs to draw: frame rate with it down and up, draw time, a ray's time (windowed)
+godot --path . -- --autotest=generator_views  # the outposts' generator alone from each side, its control box and the starter pulled out (windowed)
+godot --path . -- --autotest=rockets          # the rocket launcher: mounted from a crate (the machine gun comes off in one), a salvo at tough spitters (scatter, curve, homing), the loader, the screens, a bot firing salvos (rockets_check: no shots)
+godot --path . -- --autotest=dual             # the Dual Pistols in the first-person view: poses, firing in turn, both displays, reloading (windowed)
 godot --path . -- --autotest=host_soldier  # with --autotest=join_soldier: a client fires the pistol (from the hip and aimed) and reloads, lets a lightning bolt go down a line of the host's boarders and holds the scanner up; the host reports the hits, the client's poses and the casings and magazine out of its gun
 ```
 

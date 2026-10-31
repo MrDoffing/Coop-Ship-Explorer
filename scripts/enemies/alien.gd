@@ -25,6 +25,7 @@ uniform vec4 base_color : source_color = vec4(0.22, 0.1, 0.25, 1.0);
 uniform vec4 glow_color : source_color = vec4(0.5, 1.0, 0.2, 1.0);
 uniform float pulse_speed = 2.0;
 uniform float vein_scale = 6.0;
+uniform float roughness = 0.3;
 instance uniform float flash = 0.0;
 varying vec3 lp;
 
@@ -58,8 +59,8 @@ void fragment() {
 	float rim = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 2.5);
 	float pulse = 0.6 + 0.4 * sin(TIME * pulse_speed + lp.y * 2.0);
 	ALBEDO = mix(base_color.rgb * (0.7 + 0.6 * mottle), vec3(1.0), flash * 0.6);
-	ROUGHNESS = 0.3;
-	SPECULAR = 0.7;
+	ROUGHNESS = roughness;
+	SPECULAR = mix(0.7, 0.25, smoothstep(0.3, 0.9, roughness));
 	EMISSION = glow_color.rgb * (veins * pulse * 1.4 + rim * 0.3) + vec3(1.0, 0.9, 0.8) * flash * 2.5;
 }
 """
@@ -104,8 +105,8 @@ var _range := 24.0
 var _roaming := false
 
 
-static func organic(base: Color, glow: Color, pulse := 2.0, veins := 6.0) -> ShaderMaterial:
-	var key := "%s|%s|%.1f|%.1f" % [base.to_html(), glow.to_html(), pulse, veins]
+static func organic(base: Color, glow: Color, pulse := 2.0, veins := 6.0, rough := 0.3) -> ShaderMaterial:
+	var key := "%s|%s|%.1f|%.1f|%.2f" % [base.to_html(), glow.to_html(), pulse, veins, rough]
 	if _mats.has(key):
 		return _mats[key]
 	if _shader == null:
@@ -117,6 +118,7 @@ static func organic(base: Color, glow: Color, pulse := 2.0, veins := 6.0) -> Sha
 	m.set_shader_parameter("glow_color", glow)
 	m.set_shader_parameter("pulse_speed", pulse)
 	m.set_shader_parameter("vein_scale", veins)
+	m.set_shader_parameter("roughness", rough)
 	_mats[key] = m
 	return m
 

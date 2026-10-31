@@ -46,8 +46,22 @@ const CYLINDER := ["revolver", "mgl"]
 const CRANE_OPEN := 1.66
 const TURN_TIME := {"revolver": 0.06, "mgl": 0.14}
 ## Seconds a slide or bolt takes to run back and forward, and the shotgun's pump to rack.
-const SLIDE_TIME := {"pistol": 0.08, "smg": 0.035, "marksman": 0.07}
+const SLIDE_TIME := {"pistol": 0.08, "dual": 0.07, "smg": 0.035, "marksman": 0.07}
 const PUMP_TIME := 0.45
+## The Dual Pistols (a gun in each hand, either side of the middle of the view): the pair's poses
+## (where their middle is and how it is turned; aimed, they come up just under the line of sight,
+## closer together, `DUAL_AIM_SPREAD` of their spread), how far each gun is turned in towards the
+## middle, and how far each rolls out when held relaxed.
+const DUAL_READY_POS := Vector3(0.0, -0.16, -0.44)
+const DUAL_RELAX_POS := Vector3(0.0, -0.2, -0.42)
+const DUAL_RELAX_ROT := Vector3(-0.36, 0.0, 0.0)
+const DUAL_AIM_POS := Vector3(0.0, -0.1, -0.42)
+const DUAL_AIM_SPREAD := 0.8
+const DUAL_SPRINT_POS := Vector3(0.0, -0.3, -0.34)
+const DUAL_SPRINT_ROT := Vector3(-0.8, 0.0, 0.0)
+const DUAL_HOLSTER_ROT := Vector3(-1.1, 0.0, 0.0)
+const DUAL_TOE := 0.045
+const DUAL_RELAX_ROLL := 0.35
 
 ## The crew member holding it.
 var crew: CrewMember
@@ -81,6 +95,13 @@ var _steam: CPUParticles3D
 var _arcs: MeshInstance3D
 var _arc_mesh: ImmediateMesh
 var _clock := 0.0
+## The Dual Pistols: the left gun's parts ({} for other weapons), its magazine's place, and per gun
+## (right, left) its kick, its slide's travel and its muzzle flash's time left.
+var _twin: Dictionary = {}
+var _twin_mag_home := Transform3D.IDENTITY
+var _gun_kick: Array[float] = [0.0, 0.0]
+var _gun_slide: Array[float] = [1.0, 1.0]
+var _gun_flash: Array[float] = [0.0, 0.0]
 
 
 ## Build the rig for crew member `c` (under their first-person view).
@@ -153,6 +174,13 @@ func set_weapon(id: String) -> void:
 	parts = CrewWeapons.parts_of(model)
 	var mag: Node3D = parts.get("mag")
 	_mag_home = mag.transform if mag else Transform3D.IDENTITY
+	_twin = parts.get("twin", {})
+	if not _twin.is_empty():
+		_twin_mag_home = (_twin["mag"] as Node3D).transform
+		(_twin["flash"] as Node3D).visible = false
+	_gun_kick = [0.0, 0.0]
+	_gun_slide = [1.0, 1.0]
+	_gun_flash = [0.0, 0.0]
 	if parts.has("vent"):
 		_steam.position = (parts["vent"] as Node3D).position
 		model.add_child(_steam)
@@ -176,11 +204,25 @@ func set_weapon(id: String) -> void:
 
 ## A shot: the kick (`grow` times as hard as usual: the shots that kick harder as they come
 ## quicker), the muzzle flash, the slide or bolt and the casing (the shotgun's comes out as the
-## pump racks), or the hammer and the cylinder's turn.
-func shot(grow := 1.0) -> void:
+## pump racks), or the hammer and the cylinder's turn. The Dual Pistols: gun `side` fired (0 the
+## right, 1 the left), and it alone kicks, flashes, runs its slide back and throws its casing.
+func shot(grow := 1.0, side := 0) -> void:
 	if model == null:
 		return
 	var d := CrewWeapons.def(weapon)
+	if not _twin.is_empty():
+		var gp := _gun_parts(side)
+		_kick = maxf(_kick, minf(grow, 1.8) * 0.35)
+		_kick_yaw = randf_range(-1.0, 1.0)
+		_gun_kick[side] = minf(grow, 1.8)
+		_gun_flash[side] = 0.045
+		_gun_slide[side] = 0.0
+		var gflash: Node3D = gp["flash"]
+		gflash.visible = true
+		gflash.rotation = Vector3(0, 0, randf() * TAU)
+		gflash.scale = Vector3.ONE * randf_range(0.8, 1.25)
+		_eject(side)
+		return
 	_kick = minf(grow, 1.8)
 	_kick_yaw = randf_range(-1.0, 1.0)
 	_flash_t = 0.045
@@ -207,9 +249,15 @@ func shot(grow := 1.0) -> void:
 				_eject()
 
 
-## Throw a casing out of the ejection port, to the right and up, carried along with the crew
-## member's own movement.
-func _eject() -> void:
+## The parts of gun `side` of the Dual Pistols (0 the right: the root's own; 1 the left), or the
+## weapon's parts.
+func _gun_parts(side: int) -> Dictionary:
+	return _twin if side == 1 and not _twin.is_empty() else parts
+
+
+## Throw a casing out of the ejection port (gun `side`'s, the Dual Pistols), to the right and up,
+## carried along with the crew member's own movement.
+func _eject(side := 0) -> void:
 	var kind := str(CrewWeapons.def(weapon)["casing"])
 	if kind == "" or not parts.has("port") or crew.ship == null:
 		return
@@ -217,9 +265,10 @@ func _eject() -> void:
 	if deb == null:
 		return
 	var ship := crew.ship
-	var mx := model.global_transform
+	var gp := _gun_parts(side)
+	var mx: Transform3D = (gp["gun"] as Node3D).global_transform if gp.has("gun") else model.global_transform
 	var mb := mx.basis.orthonormalized()
-	var at := mx * (parts["port"] as Vector3)
+	var at := mx * (gp["port"] as Vector3)
 	var cam := crew.camera.global_transform.basis
 	var out := cam * Vector3(randf_range(1.6, 2.4), randf_range(1.0, 1.7), randf_range(0.1, 0.5))
 	if kind == "shell":
@@ -251,14 +300,17 @@ func update(delta: float, st: Dictionary) -> void:
 	var e_sprint := smoothstep(0.0, 1.0, float(st.get("sprint", 0.0)))
 	var e_down := smoothstep(0.0, 1.0, maxf(_holster, _swap))
 	var eye: Vector3 = parts.get("eye", Vector3(0, 0.07, 0.3))
-	var pos := RELAX_POS.lerp(READY_POS, e_ready)
-	var rot := RELAX_ROT.lerp(READY_ROT, e_ready)
-	pos = pos.lerp(SPRINT_POS, e_sprint)
-	rot = rot.lerp(SPRINT_ROT, e_sprint)
-	pos = pos.lerp(-eye, e_aim)
+	# (The Dual Pistols are held either side of the middle of the view; there is no sight to look
+	# down, so aimed they come up just under the line of sight.)
+	var dual := not _twin.is_empty()
+	var pos := DUAL_RELAX_POS.lerp(DUAL_READY_POS, e_ready) if dual else RELAX_POS.lerp(READY_POS, e_ready)
+	var rot := DUAL_RELAX_ROT.lerp(Vector3.ZERO, e_ready) if dual else RELAX_ROT.lerp(READY_ROT, e_ready)
+	pos = pos.lerp(DUAL_SPRINT_POS if dual else SPRINT_POS, e_sprint)
+	rot = rot.lerp(DUAL_SPRINT_ROT if dual else SPRINT_ROT, e_sprint)
+	pos = pos.lerp(DUAL_AIM_POS if dual else -eye, e_aim)
 	rot = rot.lerp(Vector3.ZERO, e_aim)
-	pos = pos.lerp(HOLSTER_POS, e_down)
-	rot = rot.lerp(HOLSTER_ROT, e_down)
+	pos = pos.lerp(Vector3(0.0, HOLSTER_POS.y, HOLSTER_POS.z) if dual else HOLSTER_POS, e_down)
+	rot = rot.lerp(DUAL_HOLSTER_ROT if dual else HOLSTER_ROT, e_down)
 	# Walking sways it, turning drags it behind the view, and breathing moves it a little.
 	var move := clampf(float(st.get("move", 0.0)), 0.0, 1.7)
 	var bob := float(st.get("bob", 0.0))
@@ -293,6 +345,9 @@ func update(delta: float, st: Dictionary) -> void:
 		pos += Vector3(randf_range(-1, 1), randf_range(-1, 1), 0.0) * 0.0012 * ch * ch
 	model.position = pos
 	model.rotation = rot
+	if dual:
+		var tilt := smoothstep(0.0, 0.14, p) * (1.0 - smoothstep(0.84, 1.0, p)) if reloading else 0.0
+		_update_twin(delta, e_ready, e_aim, tilt)
 	_update_slide(delta, st)
 	_update_flash(delta)
 	_update_glow(st)
@@ -307,12 +362,31 @@ func update(delta: float, st: Dictionary) -> void:
 	_toolkit.rotation = Vector3(-0.6 * (1.0 - tu), 0, 0)
 
 
+## The Dual Pistols' two guns in the pair's frame: either side of the middle (closer together when
+## aimed), turned in a little, rolled out when held relaxed, each kicked back and up by its own shots,
+## and tipped in towards the middle (`tilt`) while their magazines are swapped.
+func _update_twin(delta: float, e_ready: float, e_aim: float, tilt: float) -> void:
+	var punch := float(CrewWeapons.def(weapon)["punch"])
+	var spread := CrewWeapons.DUAL_SPREAD * lerpf(1.0, DUAL_AIM_SPREAD, e_aim)
+	var guns: Array = parts.get("guns", [])
+	for side in guns.size():
+		var s := 1.0 if side == 0 else -1.0
+		_gun_kick[side] *= exp(-delta * 13.0)
+		var k := _gun_kick[side]
+		var gun: Node3D = guns[side]
+		gun.position = Vector3(s * spread, 0.0, punch * k)
+		gun.rotation = Vector3(punch * 3.2 * k * (1.0 - 0.5 * e_aim), s * DUAL_TOE, s * (0.55 * tilt - DUAL_RELAX_ROLL * (1.0 - e_ready)))
+
+
 ## How far a reload tips the weapon over, a vent turns it to the side, or a cylinder reload tips it
-## up and turns its open side to the eye ([position, rotation]).
+## up and turns its open side to the eye ([position, rotation]). The Dual Pistols only come up a
+## little (each gun tips in on its own, see _update_twin).
 func _reload_pose(reloading: bool, p: float, kind: String) -> Array:
 	if not reloading:
 		return [Vector3.ZERO, Vector3.ZERO]
 	var t := smoothstep(0.0, 0.14, p) * (1.0 - smoothstep(0.84, 1.0, p))
+	if not _twin.is_empty():
+		return [Vector3(0.0, 0.04, 0.02) * t, Vector3(0.35, 0.0, 0.0) * t]
 	match kind:
 		"heat":
 			return [Vector3(-0.02, 0.025, 0.02) * t, Vector3(0.12, -0.2, 0.35) * t]
@@ -321,30 +395,38 @@ func _reload_pose(reloading: bool, p: float, kind: String) -> Array:
 	return [Vector3(-0.035, 0.05, 0.03) * t, Vector3(0.3, -0.35, 0.7) * t]
 
 
-## A magazine weapon's reload, step by step (each sound and the dropped magazine come once).
+## A magazine weapon's reload, step by step (each sound and the dropped magazine come once). The
+## Dual Pistols swap both magazines at once.
 func _update_reload(reloading: bool, p: float) -> void:
 	var mag: Node3D = parts.get("mag")
 	if mag == null:
 		return
+	var mags: Array = [[mag, _mag_home]]
+	if not _twin.is_empty():
+		mags.append([_twin["mag"], _twin_mag_home])
 	if not reloading:
 		if _reload_step != 0:
 			_reload_step = 0
-			mag.visible = true
-			mag.transform = _mag_home
+			for mh: Array in mags:
+				(mh[0] as Node3D).visible = true
+				(mh[0] as Node3D).transform = mh[1]
 		return
 	if _reload_step == 0 and p >= MAG_OUT:
 		_reload_step = 1
-		_drop_mag(mag)
-		mag.visible = false
+		for mh: Array in mags:
+			_drop_mag(mh[0])
+			(mh[0] as Node3D).visible = false
 		Sfx.play("mag_out", null, -8.0)
 	if _reload_step >= 1 and p >= MAG_UP and p < MAG_IN:
 		var u := clampf((p - MAG_UP) / (MAG_IN - MAG_UP), 0.0, 1.0)
-		mag.visible = true
-		mag.transform = _mag_home * Transform3D(Basis.IDENTITY, Vector3(0, -0.24 * pow(1.0 - u, 2.0), 0))
+		for mh: Array in mags:
+			(mh[0] as Node3D).visible = true
+			(mh[0] as Node3D).transform = (mh[1] as Transform3D) * Transform3D(Basis.IDENTITY, Vector3(0, -0.24 * pow(1.0 - u, 2.0), 0))
 	if _reload_step == 1 and p >= MAG_IN:
 		_reload_step = 2
-		mag.visible = true
-		mag.transform = _mag_home
+		for mh: Array in mags:
+			(mh[0] as Node3D).visible = true
+			(mh[0] as Node3D).transform = mh[1]
 		_kick = maxf(_kick, 0.3)
 		Sfx.play("mag_in", null, -6.0)
 	if _reload_step == 2 and p >= RACK:
@@ -468,6 +550,9 @@ func _update_vent(delta: float, reloading: bool) -> void:
 ## empty); the shotgun's pump racks after every shot, throwing the shell out as it comes back; a
 ## reload racks them too.
 func _update_slide(delta: float, st: Dictionary) -> void:
+	if not _twin.is_empty():
+		_update_twin_slides(delta, st)
+		return
 	var slide: Node3D = parts.get("slide")
 	if slide == null:
 		return
@@ -496,7 +581,37 @@ func _update_slide(delta: float, st: Dictionary) -> void:
 	slide.position = travel * off
 
 
+## The Dual Pistols' slides: each runs back with its own gun's shot and locks back once that gun is
+## empty; a reload racks them both.
+func _update_twin_slides(delta: float, st: Dictionary) -> void:
+	var rounds := CrewWeapons.twin_rounds(weapon, int(st.get("ammo", 1)))
+	var reloading := bool(st.get("reloading", false))
+	var p := float(st.get("progress", 0.0))
+	for side in 2:
+		var gp := _gun_parts(side)
+		var slide: Node3D = gp.get("slide")
+		if slide == null:
+			continue
+		_gun_slide[side] = minf(1.0, _gun_slide[side] + delta / float(SLIDE_TIME.get(weapon, 0.06)))
+		var off := 1.0 - _gun_slide[side]
+		var empty := (rounds.x if side == 0 else rounds.y) <= 0
+		if empty and not reloading and _gun_slide[side] >= 1.0:
+			off = 1.0
+		if reloading:
+			var rack := smoothstep(RACK, RACK + 0.05, p) - smoothstep(RACK + 0.06, RACK + 0.14, p)
+			var locked := 1.0 if empty and p < RACK + 0.06 else 0.0
+			off = maxf(off, maxf(rack, locked))
+		slide.position = (gp.get("travel", Vector3.ZERO) as Vector3) * off
+
+
 func _update_flash(delta: float) -> void:
+	if not _twin.is_empty():
+		for side in 2:
+			if _gun_flash[side] > 0.0:
+				_gun_flash[side] -= delta
+				if _gun_flash[side] <= 0.0:
+					(_gun_parts(side)["flash"] as Node3D).visible = false
+		return
 	var flash: Node3D = parts["flash"]
 	if _flash_t > 0.0:
 		_flash_t -= delta
@@ -593,20 +708,34 @@ func _update_display(st: Dictionary) -> void:
 		CrewWeapons.set_text(state, text)
 		state.modulate = col
 		value.modulate = GunPod.RED if heat >= 0.9 else (GunPod.AMBER if heat >= 0.6 else GunPod.GREEN)
+	elif not _twin.is_empty():
+		# Each of the Dual Pistols shows its own rounds.
+		var rounds := CrewWeapons.twin_rounds(weapon, int(st.get("ammo", 0)))
+		var half := CrewWeapons.mag(weapon) / 2
+		_show_mag(disp, rounds.x, half, reloading, blink)
+		_show_mag(_twin.get("display", {}), rounds.y, half, reloading, blink)
 	else:
-		var ammo := int(st.get("ammo", 0))
-		var full := CrewWeapons.mag(weapon)
-		if reloading:
-			CrewWeapons.set_text(value, "--")
-			value.modulate = GunPod.AMBER * (1.0 if blink else 0.5)
-			CrewWeapons.set_text(state, "RELOAD")
-			state.modulate = GunPod.AMBER
-		elif ammo <= 0:
-			CrewWeapons.set_text(value, "00")
-			value.modulate = GunPod.RED * (1.0 if blink else 0.35)
-			CrewWeapons.set_text(state, "EMPTY" if blink else "")
-			state.modulate = GunPod.RED
-		else:
-			CrewWeapons.set_text(value, "%02d" % ammo)
-			value.modulate = GunPod.AMBER if ammo <= maxi(1, int(full * 0.25)) else GunPod.GREEN
-			CrewWeapons.set_text(state, "")
+		_show_mag(disp, int(st.get("ammo", 0)), CrewWeapons.mag(weapon), reloading, blink)
+
+
+## A magazine weapon's display (`disp`): `ammo` rounds left of `full` (amber when low, red and
+## flashing when empty), dashes while reloading.
+func _show_mag(disp: Dictionary, ammo: int, full: int, reloading: bool, blink: bool) -> void:
+	if disp.is_empty():
+		return
+	var value: Label3D = disp["value"]
+	var state: Label3D = disp["state"]
+	if reloading:
+		CrewWeapons.set_text(value, "--")
+		value.modulate = GunPod.AMBER * (1.0 if blink else 0.5)
+		CrewWeapons.set_text(state, "RELOAD")
+		state.modulate = GunPod.AMBER
+	elif ammo <= 0:
+		CrewWeapons.set_text(value, "00")
+		value.modulate = GunPod.RED * (1.0 if blink else 0.35)
+		CrewWeapons.set_text(state, "EMPTY" if blink else "")
+		state.modulate = GunPod.RED
+	else:
+		CrewWeapons.set_text(value, "%02d" % ammo)
+		value.modulate = GunPod.AMBER if ammo <= maxi(1, int(full * 0.25)) else GunPod.GREEN
+		CrewWeapons.set_text(state, "")

@@ -460,23 +460,110 @@ static func prism(poly: PackedVector2Array, y0: float, y1: float) -> ArrayMesh:
 ## renderer, a stall per primitive that made a detailed build take over a second with a real
 ## renderer (and nothing headless). Normals are carried by the inverse transpose, so they stay
 ## right under any scale.
+##
+## With `cell` set (metres), pieces are grouped by where they are as well (cubes `cell` on a side,
+## by each piece's middle): a big batch (a whole station) then commits as a mesh per material per
+## cube, so what is out of view, or out of a light's reach, is culled instead of the lot being
+## drawn in every pass. add_model() merges an imported model's surfaces (with their own materials)
+## in too.
 class Batch extends RefCounted:
-	## Material -> BatchPart. (A packed array taken out of an Array or Dictionary is a copy, so the
-	## triangles live in an object's members, which grow in place.)
+	## Material (or [material, cube] with `cell`) -> BatchPart. (A packed array taken out of an Array
+	## or Dictionary is a copy, so the triangles live in an object's members, which grow in place.)
 	var _parts: Dictionary = {}
+	## Boxes kept clear (keep_clear()): [inverse of the box's frame, the box] each.
+	var _keep_out: Array = []
+	## The size of the cubes pieces are grouped into (0: by material only).
+	var cell := 0.0
+	## Whole models placed as they are (add_instance()): [mesh, cube] (or the mesh) -> transforms.
+	var _instances: Dictionary = {}
 
-	func add(mesh: Mesh, xform: Transform3D, m: Material) -> void:
-		var tri: Array = Models.triangles(mesh)
-		var part: BatchPart = _parts.get(m)
+	func _part(m: Material, at: Vector3) -> BatchPart:
+		var key: Variant = m
+		if cell > 0.0:
+			key = [m, Vector3i((at / cell).floor())]
+		var part: BatchPart = _parts.get(key)
 		if part == null:
 			part = BatchPart.new()
-			_parts[m] = part
+			part.material = m
+			_parts[key] = part
+		return part
+
+	func _kept_out(mesh: Mesh, xform: Transform3D) -> bool:
+		if _keep_out.is_empty():
+			return false
+		var bounds := mesh.get_aabb()
+		for k: Array in _keep_out:
+			if ((k[0] as Transform3D) * xform * bounds).intersects(k[1]):
+				return true
+		return false
+
+	## Keep `box` (in frame `xform`) clear: any piece added from now on whose bounds reach into it is
+	## left out (a keypad and the view of it, say). Bounds are boxes round the pieces, so a slanted
+	## piece near the box can go too.
+	func keep_clear(xform: Transform3D, box: AABB) -> void:
+		_keep_out.append([xform.affine_inverse(), box])
+
+	func add(mesh: Mesh, xform: Transform3D, m: Material) -> void:
+		if _kept_out(mesh, xform):
+			return
+		var tri: Array = Models.triangles(mesh)
+		var part := _part(m, xform * mesh.get_aabb().get_center())
 		var nb := xform.basis
 		if absf(nb.determinant()) > 1e-12:
 			nb = nb.inverse().transposed()
 		part.v.append_array(xform * (tri[0] as PackedVector3Array))
 		part.n.append_array(Transform3D(nb, Vector3.ZERO) * (tri[1] as PackedVector3Array))
 		part.uv.append_array(tri[2] as PackedVector2Array)
+
+	## Place a whole imported model (every surface with its own material) at `xform`, as it is: all
+	## placements of the same mesh (in the same cube, with `cell`) are drawn together, as one
+	## MultiMesh, with no copying of its triangles.
+	func add_instance(mesh: Mesh, xform: Transform3D) -> void:
+		if _kept_out(mesh, xform):
+			return
+		var key: Variant = mesh
+		if cell > 0.0:
+			key = [mesh, Vector3i(((xform * mesh.get_aabb().get_center()) / cell).floor())]
+		if not _instances.has(key):
+			_instances[key] = []
+		(_instances[key] as Array).append(xform)
+
+	## Merge every surface of an imported model (a Blender asset's mesh) in at `xform`, each with its
+	## own material (or the one `swap` gives for that material's name). Its tangents come along for
+	## the normal maps. False if the mesh's triangles can't be had (it should be shown on its own).
+	func add_model(mesh: Mesh, xform: Transform3D, swap := {}) -> bool:
+		var surfaces: Array = Models.surface_triangles(mesh)
+		if surfaces.is_empty():
+			return false
+		if _kept_out(mesh, xform):
+			return true
+		var at := xform * mesh.get_aabb().get_center()
+		var nb := xform.basis
+		if absf(nb.determinant()) > 1e-12:
+			nb = nb.inverse().transposed()
+		var flip := -1.0 if xform.basis.determinant() < 0.0 else 1.0
+		for sd: Array in surfaces:
+			var m: Material = sd[0]
+			if m and swap.has(m.resource_name) and swap[m.resource_name] is Material:
+				m = swap[m.resource_name]
+			var part := _part(m, at)
+			var v: PackedVector3Array = sd[1]
+			var base := part.v.size()
+			part.v.append_array(xform * v)
+			part.n.append_array(Transform3D(nb, Vector3.ZERO) * (sd[2] as PackedVector3Array))
+			part.uv.append_array(sd[3] as PackedVector2Array)
+			var tan: PackedFloat32Array = sd[4]
+			if tan.size() == v.size() * 4:
+				# Tangents follow the model's turn (not its scale's inverse), their sign the handedness.
+				if part.t.size() < base * 4:
+					part.t.resize(base * 4)
+				for i in v.size():
+					var tv := (xform.basis * Vector3(tan[i * 4], tan[i * 4 + 1], tan[i * 4 + 2])).normalized()
+					part.t.append(tv.x)
+					part.t.append(tv.y)
+					part.t.append(tv.z)
+					part.t.append(tan[i * 4 + 3] * flip)
+		return true
 
 	## The primitives below scale shared unit meshes into place. Boxes and straight cylinders scale
 	## exactly; cones are shared per size.
@@ -513,8 +600,8 @@ class Batch extends RefCounted:
 	func commit(parent: Node3D, node_name := "Detail", shadows := true) -> Array[MeshInstance3D]:
 		var out: Array[MeshInstance3D] = []
 		var i := 0
-		for m: Material in _parts:
-			var part: BatchPart = _parts[m]
+		for key: Variant in _parts:
+			var part: BatchPart = _parts[key]
 			if part.v.is_empty():
 				continue
 			var arrays := []
@@ -522,26 +609,144 @@ class Batch extends RefCounted:
 			arrays[Mesh.ARRAY_VERTEX] = part.v
 			arrays[Mesh.ARRAY_NORMAL] = part.n
 			arrays[Mesh.ARRAY_TEX_UV] = part.uv
+			if not part.t.is_empty():
+				part.t.resize(part.v.size() * 4)
+				arrays[Mesh.ARRAY_TANGENT] = part.t
 			var am := ArrayMesh.new()
 			am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 			var mi := MeshInstance3D.new()
 			mi.name = "%s%d" % [node_name, i]
 			mi.mesh = am
-			mi.material_override = m
+			mi.material_override = part.material
 			if not shadows:
 				mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			parent.add_child(mi)
 			out.append(mi)
 			i += 1
 		_parts.clear()
+		for key: Variant in _instances:
+			var list: Array = _instances[key]
+			var mm := MultiMesh.new()
+			mm.transform_format = MultiMesh.TRANSFORM_3D
+			mm.mesh = key[0] if key is Array else key
+			mm.instance_count = list.size()
+			for k in list.size():
+				mm.set_instance_transform(k, list[k])
+			var mmi := MultiMeshInstance3D.new()
+			mmi.name = "%sModels%d" % [node_name, i]
+			mmi.multimesh = mm
+			if not shadows:
+				mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			parent.add_child(mmi)
+			i += 1
+		_instances.clear()
 		return out
 
 
-## One material's merged triangles in a Batch.
+## One material's merged triangles in a Batch (tangents only for merged models: 4 floats a corner).
 class BatchPart extends RefCounted:
+	var material: Material
 	var v := PackedVector3Array()
 	var n := PackedVector3Array()
 	var uv := PackedVector2Array()
+	var t := PackedFloat32Array()
+
+
+## Merge every visible mesh under `root` (a model that no longer moves in parts, say a weapon lying on
+## a crate) into one mesh per material under `root`, and free the pieces: a model of a hundred small
+## boxes then costs a draw call per material. Hidden pieces (and what is under them), labels, lights
+## and the rest stay as they are.
+static func flatten(root: Node3D) -> void:
+	var b := Batch.new()
+	var done: Array[Node] = []
+	_flatten_into(root, Transform3D.IDENTITY, b, done)
+	for n in done:
+		n.get_parent().remove_child(n)
+		n.queue_free()
+	b.commit(root, "Merged")
+
+
+static func _flatten_into(node: Node, xform: Transform3D, b: Batch, done: Array[Node]) -> void:
+	for c in node.get_children():
+		var n3 := c as Node3D
+		if n3 == null or not n3.visible:
+			continue
+		var x := xform * n3.transform
+		var mi := c as MeshInstance3D
+		if mi and mi.mesh and mi.get_child_count() == 0:
+			var mesh := mi.mesh
+			var merged := false
+			if mesh is PrimitiveMesh:
+				var m: Material = mi.material_override if mi.material_override else (mesh as PrimitiveMesh).material
+				if m == null:
+					m = mi.get_surface_override_material(0)
+				if m:
+					b.add(mesh, x, m)
+					merged = true
+			elif mi.material_override == null:
+				var swap := {}
+				for i in mesh.get_surface_count():
+					var own := mesh.surface_get_material(i)
+					if own and mi.get_surface_override_material(i):
+						swap[own.resource_name] = mi.get_surface_override_material(i)
+				merged = b.add_model(mesh, x, swap)
+			if merged:
+				done.append(mi)
+				continue
+		_flatten_into(c, x, b, done)
+
+
+## Every surface of an imported mesh as triangles: [material, positions, normals, uvs, tangents]
+## each, one entry per corner (not indexed); read back from the renderer once per mesh and kept.
+## Empty when the renderer has none to give (the mesh is then shown on its own).
+static func surface_triangles(mesh: Mesh) -> Array:
+	if _surface_tris.has(mesh):
+		return _surface_tris[mesh]
+	var out: Array = []
+	for si in mesh.get_surface_count():
+		var arrays: Array = mesh.surface_get_arrays(si)
+		if arrays.is_empty() or arrays[Mesh.ARRAY_VERTEX] == null:
+			out = []
+			break
+		var v: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		var n: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL] if arrays[Mesh.ARRAY_NORMAL] != null else PackedVector3Array()
+		var uv: PackedVector2Array = arrays[Mesh.ARRAY_TEX_UV] if arrays[Mesh.ARRAY_TEX_UV] != null else PackedVector2Array()
+		var tan: PackedFloat32Array = arrays[Mesh.ARRAY_TANGENT] if arrays[Mesh.ARRAY_TANGENT] != null else PackedFloat32Array()
+		if n.size() != v.size():
+			n.resize(v.size())
+		if uv.size() != v.size():
+			uv.resize(v.size())
+		var index: Variant = arrays[Mesh.ARRAY_INDEX]
+		if index != null and (index as PackedInt32Array).size() > 0:
+			var ix: PackedInt32Array = index
+			var tv := PackedVector3Array()
+			var tn := PackedVector3Array()
+			var tu := PackedVector2Array()
+			var tt := PackedFloat32Array()
+			tv.resize(ix.size())
+			tn.resize(ix.size())
+			tu.resize(ix.size())
+			var with_t := tan.size() == v.size() * 4
+			if with_t:
+				tt.resize(ix.size() * 4)
+			for i in ix.size():
+				var k := ix[i]
+				tv[i] = v[k]
+				tn[i] = n[k]
+				tu[i] = uv[k]
+				if with_t:
+					for c in 4:
+						tt[i * 4 + c] = tan[k * 4 + c]
+			v = tv
+			n = tn
+			uv = tu
+			tan = tt
+		out.append([mesh.surface_get_material(si), v, n, uv, tan])
+	_surface_tris[mesh] = out
+	return out
+
+
+static var _surface_tris: Dictionary = {}
 
 
 ## The triangles of a mesh's first surface: [positions, normals, uvs], one entry per corner (not

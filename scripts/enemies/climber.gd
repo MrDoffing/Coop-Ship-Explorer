@@ -114,8 +114,8 @@ func body_pos() -> Vector3:
 
 
 ## It looks from its body (from a wall or the ceiling it sees over the furniture).
-func _sees(ship: Mothership, p: CrewMember) -> bool:
-	return _clear_from(ship, ship.to_global(_surf_pos + _surf_up * 0.3), ship.to_global(p.position) + ship.global_basis.y * 1.2)
+func _sees(ship: Mothership, p: Node3D) -> bool:
+	return _clear_from(ship, ship.to_global(_surf_pos + _surf_up * 0.3), ship.to_global(p.position) + ship.global_basis.y * aim_height(p))
 
 
 ## Put the body on its surface (see the class description).
